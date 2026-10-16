@@ -528,7 +528,7 @@ PrepareGraphicsPipeline(GraphicContext& graphics, PipelineCache::Pipeline& pipel
 		build.dynamic_states.push_back(vk::DynamicState::eColorWriteEnableEXT);
 	}
 #endif
-	if (graphics.attachment_feedback_loop_enabled) {
+	if (graphics.attachment_feedback_loop_dynamic_state_enabled) {
 		build.dynamic_states.push_back(vk::DynamicState::eAttachmentFeedbackLoopEnableEXT);
 	}
 
@@ -556,6 +556,10 @@ PrepareGraphicsPipeline(GraphicContext& graphics, PipelineCache::Pipeline& pipel
 	pipeline_info.pDynamicState       = &build.dynamic_state;
 	pipeline_info.layout              = pipeline.pipeline_layout;
 	pipeline_info.basePipelineIndex   = -1;
+	if (rendering.depth_stencil_feedback_loop) {
+		EXIT_IF(!graphics.attachment_feedback_loop_enabled || !with_depth);
+		pipeline_info.flags |= vk::PipelineCreateFlagBits::eDepthStencilAttachmentFeedbackLoopEXT;
+	}
 
 	const uint64_t ps_hash = ps_active && ps_input_info->stage
 	                             ? ps_input_info->stage.program->shader_hash

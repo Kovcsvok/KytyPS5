@@ -77,6 +77,9 @@ struct PipelineRenderingState {
 	vk::Format                                           depth_format   = vk::Format::eUndefined;
 	vk::Format                                           stencil_format = vk::Format::eUndefined;
 	uint32_t                                             color_count    = 0;
+	// Static VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, used when the
+	// host cannot enable attachment feedback loops per draw.
+	bool depth_stencil_feedback_loop = false;
 
 	bool operator==(const PipelineRenderingState&) const = default;
 };
@@ -191,7 +194,7 @@ public:
 	                              std::span<const ShaderVertexInputInfo> vertex_info,
 	                              CommandBuffer& command, const ShaderPixelInputInfo* ps_input_info,
 	                              vk::PrimitiveTopology topology, bool primitive_restart_enable,
-	                              const GraphicsPrograms& programs);
+	                              const GraphicsPrograms& programs, bool depth_feedback_loop = false);
 	// As GetGraphicsPipeline; with may_defer, a pipeline the driver does not compile within a
 	// short wait is compiled on a worker thread, and nullptr says to skip this draw.
 	Pipeline* TryGetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
@@ -200,7 +203,8 @@ public:
 	                                 CommandBuffer&                         command,
 	                                 const ShaderPixelInputInfo*            ps_input_info,
 	                                 vk::PrimitiveTopology topology, bool primitive_restart_enable,
-	                                 const GraphicsPrograms& programs, bool may_defer);
+	                                 const GraphicsPrograms& programs, bool may_defer,
+	                                 bool depth_feedback_loop = false);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	                             const ShaderProgram&          compute_program);
 
