@@ -3,7 +3,7 @@ rem Marvel's Wolverine on KytyPS5 (Wolverine build v2).
 rem First launch asks for your game folder and remembers it in game_path.txt.
 rem Saves, shader cache and logs go to the userdata folder next to this file, never into the game.
 setlocal EnableExtensions
-set "HERE=%~dp0"
+set "HERE=%~sdp0"
 set "EMU=%HERE%emulator\kyty_emulator.exe"
 set "USERDATA=%HERE%userdata"
 set "PATHFILE=%HERE%game_path.txt"
@@ -92,7 +92,7 @@ echo Starting Marvel's Wolverine. The first launch compiles shaders: expect a lo
 echo and stutter that fades as the cache fills.
 echo Do not resize or minimize the game window while it runs.
 echo Log: %LOG%
-"%EMU%" --game "%GAME%" --bindless --redzone --tessellation --readback-linear-images true %CPU_OPTS% %SKIP% %* > "%LOG%" 2>&1
+"%EMU%" --game "%GAME%" --skip-notice-screen true --bindless --redzone --tessellation --readback-linear-images true %CPU_OPTS% %SKIP% %* > "%LOG%" 2>&1
 set CODE=%ERRORLEVEL%
 echo Exit code: %CODE% >> "%LOG%"
 echo.

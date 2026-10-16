@@ -274,6 +274,7 @@ void ConfigurationEditDialog::Init(const Configuration& info) {
 	m_ui->checkBox_hide_cursor->setChecked(info.hide_cursor_enabled);
 	m_ui->checkBox_readback->setChecked(info.readback_linear_images);
 	m_ui->checkBox_tessellation->setChecked(info.tessellation_enabled);
+	m_ui->checkBox_skip_notice_screen->setChecked(info.skip_notice_screen);
 	m_ui->checkBox_bindless->setChecked(info.bindless_images_enabled);
 	m_ui->lineEdit_skip_shaders->setText(info.skip_shader_hashes);
 	m_ui->checkBox_trophy_notifications->setChecked(info.trophy_enabled);
@@ -430,6 +431,7 @@ static void UpdateInfo(Configuration& info, Ui::ConfigurationEditDialog& ui, boo
 	info.hide_cursor_enabled       = ui.checkBox_hide_cursor->isChecked();
 	info.readback_linear_images    = ui.checkBox_readback->isChecked();
 	info.tessellation_enabled      = ui.checkBox_tessellation->isChecked();
+	info.skip_notice_screen        = ui.checkBox_skip_notice_screen->isChecked();
 	info.bindless_images_enabled   = ui.checkBox_bindless->isChecked();
 	info.skip_shader_hashes        = ui.lineEdit_skip_shaders->text().simplified().remove(' ');
 	info.trophy_enabled            = ui.checkBox_trophy_notifications->isChecked();

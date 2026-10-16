@@ -88,6 +88,7 @@ static void PrintUsage() {
 	::printf(
 	    "  --trophy-notifications <true|false>   Show trophy unlock toasts and play their sound.\n");
 	::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
+	::printf("  --skip-notice-screen <true|false>    Skip startup logos in supported games (default false).\n");
 	::printf("  --bindless                           Sample heap-indexed images through bindless arrays.\n");
 	::printf("  --no-float-image-atomics             Skip shaders that run integer image atomics on R32\n"
 	         "                                       float images (they run by default).\n");
@@ -441,6 +442,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--trophy-notifications") {
 			if (!ParseBool(value, options.config.trophy_enabled)) {
+				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
+				return false;
+			}
+		} else if (arg == "--skip-notice-screen") {
+			if (!ParseBool(value, options.config.skip_notice_screen)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}

@@ -133,7 +133,7 @@ jobs:
           New-Item -ItemType Directory -Path $portable -Force | Out-Null
           Copy-Item -Path "packaging/wolverine/package/*" -Destination $portable -Recurse -Force
           Copy-Item -Path "_Build/windows/install/*" -Destination (Join-Path $portable "emulator") -Recurse -Force
-          & (Join-Path $portable "emulator/kyty_emulator.exe") --help
+          & (Join-Path $portable "emulator/kyty_emulator.exe") --skip-notice-screen true --help
           if ($LASTEXITCODE -ne 0) { throw "Emulator help smoke check failed" }
 
       - name: Upload Windows artifacts

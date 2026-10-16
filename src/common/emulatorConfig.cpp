@@ -156,6 +156,10 @@ bool TessellationEnabled() {
 	return g_config->tessellation_enabled;
 }
 
+bool SkipNoticeScreen() {
+	return g_config->skip_notice_screen;
+}
+
 bool TrophyEnabled() {
 	return g_config->trophy_enabled;
 }

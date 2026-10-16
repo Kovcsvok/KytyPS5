@@ -8,4 +8,4 @@ Startup prints the selected path. On affected AMD drivers, expect layout=yes dyn
 
 Validation: full Windows launcher build, program disk cache/resource tracking/settings tests, and executable --help smoke test in the accompanying workflow. Hardware image quality, GPU validation, and sustained gameplay still require testing. The inherited ShaderRecompilerComputeTests target is incompatible with this fork's APIs and is not built by this workflow.
 
-Intro skipping is not implemented. No guessed game command-line flags or game archive deletions are included.
+Boot logo skipping is backported from upstream cc44a43ebc53be6c8df1574c65787858d404b5dc (#1127). The portable Play Wolverine.bat enables --skip-notice-screen true. This reports the console notice-screen skip flag to the game; upstream specifically documents Wolverine omitting movies/BootSequence/BootSequence.movie. This does not skip story cinematics. The general emulator and GUI option default to false; the Wolverine portable launcher opts in. No game files are modified.

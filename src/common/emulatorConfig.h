@@ -75,6 +75,7 @@ struct ConfigOptions {
 	bool                   readback_linear_images      = false;
 	bool                   tessellation_enabled        = false;
 	bool                   trophy_enabled              = true;
+	bool                   skip_notice_screen          = false;
 	bool                   playgo_hack_enabled         = false;
 	bool                   bindless_images_enabled     = false;
 	bool                   float_image_atomics_enabled = true;
@@ -132,6 +133,7 @@ bool BindlessImagesEnabled();
 const std::string& GetSkipShaderHashes();
 bool FloatImageAtomicsEnabled();
 bool TrophyEnabled();
+bool SkipNoticeScreen();
 bool PlayGoHackEnabled();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 bool RedZoneProtectionEnabled();
