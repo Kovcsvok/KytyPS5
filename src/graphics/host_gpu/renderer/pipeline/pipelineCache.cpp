@@ -2154,6 +2154,24 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		// waves in passes; see EmitMeshEntryPoint.
 		mesh.passes = mesh.PassesFor(
 		    std::min(limits.maxMeshWorkGroupInvocations, limits.maxMeshWorkGroupSize[0]));
+		// Revivedx/KytyPS5 9c3d0e61: multiple guest wave32 waves must not share
+		// one wider host subgroup, or subgroup masks can discard the wrong primitives.
+		static const bool wave_passes = [] {
+			const char* value = std::getenv("KYTY_MESH_WAVE_PASSES");
+			return value == nullptr || value[0] != '0';
+		}();
+		const auto original_passes = mesh.passes;
+		if (wave_passes && mesh.passes != 0 && mesh.wave_size < mesh.host_subgroup_size &&
+		    mesh.Waves() > 1) {
+			mesh.passes = mesh.Waves();
+		}
+		static std::atomic<uint32_t> mesh_layout_reports {0};
+		if (mesh_layout_reports.fetch_add(1, std::memory_order_relaxed) < 24) {
+			std::fprintf(stderr, "AMD mesh layout: shader=0x%016" PRIx64
+			             " guest_wave=%u host_subgroup=%u waves=%u passes=%u previous=%u option=%s\n",
+			             vertex_params[0].hash, mesh.wave_size, mesh.host_subgroup_size,
+			             mesh.Waves(), mesh.passes, original_passes, wave_passes ? "on" : "off");
+		}
 		if (mesh.passes == 0 || mesh.max_vertices > limits.maxMeshOutputVertices ||
 		    mesh.max_primitives > limits.maxMeshOutputPrimitives ||
 		    mesh.lds_size_dwords * sizeof(uint32_t) > limits.maxMeshSharedMemorySize) {
