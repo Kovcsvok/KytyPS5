@@ -1,9 +1,9 @@
-name: Wolverine v2 AMD wave32 lane Windows test
+name: Wolverine v2 AMD pixel wave Windows test
 
 on:
   workflow_dispatch:
   push:
-    branches: [ wolverine-v2-amd-wave32-lanes ]
+    branches: [ wolverine-v2-amd-pixel-wave ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -139,7 +139,7 @@ jobs:
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Wolverine-v2-AMD-Wave32-Lanes-Windows-x64
+          name: Wolverine-v2-AMD-Pixel-Wave-Windows-x64
           path: _Build/windows/portable/**
           if-no-files-found: error
 

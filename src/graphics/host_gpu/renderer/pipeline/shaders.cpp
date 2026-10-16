@@ -23,6 +23,8 @@
 #include <chrono>
 #include <cinttypes>
 #include <cstdlib>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <span>
@@ -304,6 +306,30 @@ PrepareGraphicsPipeline(GraphicContext& graphics, PipelineCache::Pipeline& pipel
 		build.stages[shader_stage_count++] = {.stage  = vk::ShaderStageFlagBits::eFragment,
 		                                      .module = pixel_program.module,
 		                                      .pName  = "main"};
+		// Revivedx/KytyPS5 9c3d0e61: use the guest pixel wave size where the host
+		// supports specifying it for fragment shaders. Never force every shader to wave64.
+		static const bool ps_subgroup = [] {
+			const char* value = std::getenv("KYTY_PS_SUBGROUP");
+			return value == nullptr || std::strcmp(value, "0") != 0;
+		}();
+		const auto wave_size = ps_input_info->wave_size;
+		const bool use_guest_wave =
+		    ps_subgroup && graphics.compute_subgroup_size_control_enabled &&
+		    (graphics.required_subgroup_size_stages & vk::ShaderStageFlagBits::eFragment) &&
+		    wave_size >= graphics.min_subgroup_size && wave_size <= graphics.max_subgroup_size;
+		if (use_guest_wave) {
+			build.ps_subgroup_size.requiredSubgroupSize = wave_size;
+			build.stages[shader_stage_count - 1].pNext  = &build.ps_subgroup_size;
+		}
+		// Once per wave size / selected path, including release builds.
+		static std::atomic<uint32_t> logged_modes {0};
+		const uint32_t mode = (wave_size == 32u ? 0u : wave_size == 64u ? 1u : 2u) +
+		                      (use_guest_wave ? 0u : 3u);
+		const uint32_t bit = 1u << mode;
+		if ((logged_modes.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+			std::fprintf(stderr, "Vulkan pixel subgroup: guest=%u requested=%s option=%s\n",
+			             wave_size, use_guest_wave ? "yes" : "no", ps_subgroup ? "on" : "off");
+		}
 	}
 
 	auto& input_attr = build.input_attr;
