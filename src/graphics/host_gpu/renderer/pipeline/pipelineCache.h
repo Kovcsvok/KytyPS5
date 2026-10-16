@@ -123,6 +123,8 @@ struct GraphicsPipelineBuild {
 	vk::ShaderModule                                                      tess_control = nullptr;
 	vk::ShaderModule                                                      tess_eval    = nullptr;
 	std::array<vk::PipelineShaderStageCreateInfo, 4>                      stages {};
+	// Owned with the build: pNext remains valid during asynchronous driver compilation.
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo                 ps_subgroup_size {};
 	std::array<vk::VertexInputAttributeDescription, ShaderVertexInputInfo::RES_MAX> input_attr {};
 	std::array<vk::VertexInputBindingDescription, ShaderVertexInputInfo::RES_MAX>   input_desc {};
 	vk::PipelineVertexInputStateCreateInfo                                vertex_input_info {};

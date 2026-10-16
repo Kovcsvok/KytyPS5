@@ -330,6 +330,11 @@ int main() {
 	TestInfoRoundTrip();
 	TestPayloadRoundTrip();
 	TestKeys();
+	// The wave32 lane opt-out changes emitted SPIR-V. Reusing a warm cache must
+	// not silently defeat an A/B test; mesh pass selection also changes translation.
+	Check(Disk::AffectsTranslation("KYTY_VS_LANE_WRAP32") &&
+	          Disk::AffectsTranslation("KYTY_MESH_WAVE_PASSES"),
+	      "wave translation switches must separate program caches");
 	Check(Disk::AffectsTranslation("KYTY_FOLD_LANE_MASKS") &&
 	          Disk::AffectsTranslation("KYTY_BINDLESS_SAMPLERS") &&
 	          !Disk::AffectsTranslation("KYTY_VRAM_REPORT") &&
