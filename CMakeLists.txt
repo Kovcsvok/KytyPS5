@@ -465,6 +465,11 @@ add_executable(program_disk_cache_tests EXCLUDE_FROM_ALL
 target_link_libraries(program_disk_cache_tests xxhash fmt::fmt common)
 target_include_directories(program_disk_cache_tests PRIVATE ${inc_headers})
 
+add_executable(pipeline_tuning_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PipelineTuningTests.cpp"
+)
+target_include_directories(pipeline_tuning_tests PRIVATE "${KYTY_SOURCE_DIR}")
+
 add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
@@ -686,6 +691,7 @@ if(BUILD_TESTING)
 		add_test(NAME x64_load_emulation COMMAND $<TARGET_FILE:x64_load_emulation_tests>)
 	endif()
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
+	add_test(NAME pipeline_tuning COMMAND $<TARGET_FILE:pipeline_tuning_tests>)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
 	add_test(NAME bindless_sampler COMMAND $<TARGET_FILE:bindless_sampler_tests>)
 	add_test(NAME program_disk_cache COMMAND $<TARGET_FILE:program_disk_cache_tests>)

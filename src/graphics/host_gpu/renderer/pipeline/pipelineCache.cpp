@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/programDiskCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineTuning.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -626,7 +627,8 @@ static const bool g_async_pipelines = [] {
 }();
 static const std::chrono::milliseconds g_pipeline_wait = [] {
 	const char* value = std::getenv("KYTY_PIPELINE_WAIT_MS");
-	return std::chrono::milliseconds(value != nullptr ? std::strtoul(value, nullptr, 10) : 20u);
+	return std::chrono::milliseconds(PipelineTuning::WaitMilliseconds(
+	    value != nullptr ? std::string_view(value) : std::string_view {}));
 }();
 
 struct PendingGraphicsPipeline {
@@ -1830,7 +1832,10 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	InitializeDriverCache();
 	InitializeProgramDiskCache();
 	if (g_async_pipelines) {
-		const auto threads = std::clamp(std::thread::hardware_concurrency() / 4u, 1u, 4u);
+		const char* configured = std::getenv("KYTY_PIPELINE_THREADS");
+		const auto threads = PipelineTuning::WorkerCount(
+		    configured != nullptr ? std::string_view(configured) : std::string_view {},
+		    std::thread::hardware_concurrency());
 		m_compiler         = std::make_unique<PipelineCompiler>(threads);
 		PipelineCacheLog("Vulkan pipelines: compiled on {} worker threads (wait {} ms)", threads,
 		                 g_pipeline_wait.count());

@@ -1,0 +1,154 @@
+name: Wolverine v2 AMD tuning Windows test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ wolverine-v2-amd-tuning ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  KYTY_BUILD_ORIGIN: ${{ github.repository != 'KytyPS5/KytyPS5' && 'Fork' || github.event_name == 'push' && 'Official' || 'Source' }}
+  KYTY_BUILD_REPOSITORY: ${{ github.repository }}
+
+jobs:
+  metadata:
+    name: Prepare build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release_tag.outputs.value }}
+
+    steps:
+      - name: Generate release tag
+        id: release_tag
+        shell: bash
+        run: |
+          echo "value=KytyPS5-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Build KytyPS5 (Windows)
+    needs: [metadata, tuning-settings]
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Visual Studio environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Locate vcpkg
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgRoot = Split-Path (Get-Command vcpkg).Source
+          $portHash = (Get-FileHash "$vcpkgRoot\ports\glslang\vcpkg.json" -Algorithm SHA256).Hash
+          "root=$vcpkgRoot" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "port_hash=$($portHash.ToLowerInvariant())" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Cache glslang
+        id: glslang_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.vcpkg.outputs.root }}\installed\x64-windows
+          key: glslang-${{ runner.os }}-${{ runner.arch }}-${{ steps.vcpkg.outputs.port_hash }}-tools-opt
+
+      - name: Install glslang
+        shell: pwsh
+        run: |
+          $vcpkgRoot = "${{ steps.vcpkg.outputs.root }}"
+          if ("${{ steps.glslang_cache.outputs.cache-hit }}" -ne "true") {
+            vcpkg install glslang[tools,opt]:x64-windows
+          }
+          "$vcpkgRoot\installed\x64-windows\tools\glslang" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install Qt 6.10.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.10.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Verify toolchain
+        shell: cmd
+        run: |
+          git --version
+          cmake --version
+          ninja --version
+          clang-cl --version
+          glslangValidator --version
+          echo Qt6_DIR=%Qt6_DIR%
+
+      - name: Configure
+        shell: cmd
+        run: |
+          cmake -S . -B _Build/windows ^
+            -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON ^
+            -DKYTY_BUILD_ORIGIN=%KYTY_BUILD_ORIGIN% ^
+            -DKYTY_BUILD_REPOSITORY=%KYTY_BUILD_REPOSITORY% ^
+            -DKYTY_RELEASE_TAG=${{ needs.metadata.outputs.release_tag }} ^
+            -DCMAKE_C_COMPILER=clang-cl ^
+            -DCMAKE_CXX_COMPILER=clang-cl ^
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache ^
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache ^
+            -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
+
+      - name: Build
+        shell: cmd
+        run: |
+          cmake --build _Build/windows --target launcher pipeline_tuning_tests program_disk_cache_tests resource_tracking_tests --parallel
+
+      - name: Test
+        shell: cmd
+        run: |
+          ctest --test-dir _Build/windows --output-on-failure -R "^(pipeline_tuning|program_disk_cache|resource_tracking)$"
+
+      - name: Install
+        shell: cmd
+        run: |
+          cmake --install _Build/windows --prefix _Build/windows/install
+
+      - name: Assemble portable Wolverine package
+        shell: pwsh
+        run: |
+          $portable = Join-Path $env:GITHUB_WORKSPACE "_Build/windows/portable"
+          New-Item -ItemType Directory -Path $portable -Force | Out-Null
+          Copy-Item -Path "packaging/wolverine/package/*" -Destination $portable -Recurse -Force
+          Copy-Item -Path "_Build/windows/install/*" -Destination (Join-Path $portable "emulator") -Recurse -Force
+          & (Join-Path $portable "emulator/kyty_emulator.exe") --help
+          if ($LASTEXITCODE -ne 0) { throw "Emulator help smoke check failed" }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wolverine-v2-AMD-Tuning-Windows-x64
+          path: _Build/windows/portable/**
+          if-no-files-found: error
+
+  tuning-settings:
+    name: Test tuning settings (no GPU required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and test worker and wait settings
+        run: |
+          g++ -std=c++20 -Wall -Wextra -pedantic -Isrc tests/PipelineTuningTests.cpp -o pipeline-tuning-tests
+          ./pipeline-tuning-tests
