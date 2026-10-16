@@ -1,0 +1,16 @@
+name: Wolverine reference backport checks
+on:
+  push:
+    branches: [ wolverine-v2-reference-backports ]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lru-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check LRU invariants with address and undefined-behavior sanitizers
+        run: |
+          g++ -std=c++20 -Wall -Wextra -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc tests/LruCacheTests.cpp -o lru-tests
+          ./lru-tests

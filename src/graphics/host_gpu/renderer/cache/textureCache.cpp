@@ -512,7 +512,8 @@ void TextureCache::RegisterImage(ImageId id) {
 	});
 	image.registered = true;
 	NoteBindlessStateChange(image);
-	image.lru_id     = m_lru_cache.Insert(id, LruClock());
+	image.lru_touch_clock = LruClock();
+	image.lru_id = m_lru_cache.Insert(id, image.lru_touch_clock);
 	// KYTY_GC_HOST_SIZES=1 (live, research, default 0): count an image by the device memory it
 	// was given instead of its guest bytes. Converted formats (depth with stencil, expanded
 	// texel formats) and alignment make the host image larger than the guest one, so the
@@ -751,7 +752,15 @@ void TextureCache::FreeImage(ImageId id) {
 
 void TextureCache::TouchImage(Image& image) {
 	if (image.registered) {
-		m_lru_cache.Touch(image.lru_id, LruClock());
+		// The LRU list already ignores repeated/older timestamps. Keep that timestamp
+		// beside the image to avoid loading its separate LRU entry on every draw.
+		// Wolverine's clock includes presentation and collector progress, not just a GPU tick.
+		const auto clock = LruClock();
+		static auto& memo = Common::LiveSwitches::Get("KYTY_IMAGE_LRU_MEMO", 1);
+		if (memo.load(std::memory_order_relaxed) == 0 || image.lru_touch_clock < clock) {
+			image.lru_touch_clock = std::max(image.lru_touch_clock, clock);
+			m_lru_cache.Touch(image.lru_id, clock);
+		}
 	}
 }
 

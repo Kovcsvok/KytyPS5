@@ -186,6 +186,8 @@ public:
 	uint64_t         last_upload_frame  = 0;
 	uint32_t         uploads            = 0;
 	size_t           lru_id             = 0;
+	// Last timestamp passed to the LRU list; initialized whenever the image is registered.
+	uint64_t         lru_touch_clock    = 0;
 
 private:
 	friend struct ImageTestAccess;
