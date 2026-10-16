@@ -1,9 +1,9 @@
-name: Wolverine v2 AMD combined waves Windows test
+name: Wolverine v2 AMD upstream stability Windows test
 
 on:
   workflow_dispatch:
   push:
-    branches: [ wolverine-v2-amd-combined-waves ]
+    branches: [ wolverine-v2-amd-upstream-stability ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -114,12 +114,16 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          cmake --build _Build/windows --target launcher pipeline_tuning_tests program_disk_cache_tests resource_tracking_tests --parallel
+          cmake --build _Build/windows --target launcher pipeline_tuning_tests program_disk_cache_tests resource_tracking_tests virtual_memory_allocation_tests --parallel
 
       - name: Test
         shell: cmd
         run: |
           ctest --test-dir _Build/windows --output-on-failure -R "^(pipeline_tuning|program_disk_cache|resource_tracking)$"
+
+      - name: TLS flags regression
+        shell: cmd
+        run: _Build\windows\virtual_memory_allocation_tests.exe --tls-stubs-only
 
       - name: Install
         shell: cmd
@@ -139,7 +143,7 @@ jobs:
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Wolverine-v2-AMD-Combined-Waves-Windows-x64
+          name: Wolverine-v2-AMD-Upstream-Stability-Windows-x64
           path: _Build/windows/portable/**
           if-no-files-found: error
 

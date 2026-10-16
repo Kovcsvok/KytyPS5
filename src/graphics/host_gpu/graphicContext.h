@@ -36,6 +36,7 @@ struct GraphicContext;
 [[nodiscard]] const DiagnosticCheckpoint*
 RecordDiagnosticCheckpoint(const DiagnosticCheckpoint& checkpoint);
 void DumpDeviceLossDiagnostics(GraphicContext& graphics);
+void RecordHostDiagnostic(const DiagnosticCheckpoint& checkpoint);
 
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;

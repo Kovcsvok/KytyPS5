@@ -6,6 +6,7 @@ setlocal EnableExtensions
 set "HERE=%~sdp0"
 set "EMU=%HERE%emulator\kyty_emulator.exe"
 set "USERDATA=%HERE%userdata"
+if defined KYTY_TEST_USERDATA set "USERDATA=%KYTY_TEST_USERDATA%"
 set "PATHFILE=%HERE%game_path.txt"
 
 if not exist "%EMU%" (
@@ -51,7 +52,7 @@ rem textures the game no longer uses (without it VRAM overflows into system memo
 rem and the frame rate drops to single digits). Freed memory is held back up to 2 GiB as a safety
 rem net against a known stale read (rare "device lost").
 set KYTY_VRAM_SAVER=2
-set KYTY_BINDLESS_EVICT=1
+if not defined KYTY_BINDLESS_EVICT set KYTY_BINDLESS_EVICT=1
 set KYTY_MEMORY_GRAVEYARD_MB=2048
 rem Host fault handling for a rare write crash.
 set KYTY_FAULT_WATCHED_UNMAPPED=1

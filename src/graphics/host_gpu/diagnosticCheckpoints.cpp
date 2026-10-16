@@ -9,6 +9,9 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -19,6 +22,10 @@ constexpr size_t CHECKPOINT_RING_SIZE = 1u << 16u;
 
 std::array<DiagnosticCheckpoint, CHECKPOINT_RING_SIZE> g_checkpoints {};
 std::atomic<uint64_t>                                  g_checkpoint_sequence {0};
+// CPU history is separate from NV checkpoint storage: it is not proof of GPU progress.
+std::array<DiagnosticCheckpoint, 256> g_host_history {};
+std::mutex g_host_history_mutex;
+uint64_t g_host_sequence = 0;
 
 const char* OpName(uint32_t op) {
 	switch (op) {
@@ -31,6 +38,7 @@ const char* OpName(uint32_t op) {
 		case 6: return "EopFlip";
 		case 7: return "EopWriteBackFlip";
 		case 8: return "EopOnlyFlip";
+		case 9: return "DispatchIndirect";
 		default: return "Unknown";
 	}
 }
@@ -54,6 +62,18 @@ const DiagnosticCheckpoint* RecordDiagnosticCheckpoint(const DiagnosticCheckpoin
 	slot                = checkpoint;
 	slot.sequence       = sequence;
 	return &slot;
+}
+
+void RecordHostDiagnostic(const DiagnosticCheckpoint& checkpoint) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_HOST_BREADCRUMBS");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	if (!enabled) return;
+	std::lock_guard lock(g_host_history_mutex);
+	auto& slot = g_host_history[g_host_sequence % g_host_history.size()];
+	slot = checkpoint;
+	slot.sequence = ++g_host_sequence;
 }
 
 static void DumpDeviceFault(GraphicContext& graphics) {
@@ -117,6 +137,22 @@ static void DumpDeviceFault(GraphicContext& graphics) {
 }
 
 void DumpDeviceLossDiagnostics(GraphicContext& graphics) {
+	static std::atomic_flag dumped = ATOMIC_FLAG_INIT;
+	if (!dumped.test_and_set(std::memory_order_relaxed)) {
+		std::array<DiagnosticCheckpoint, 256> snapshot;
+		uint64_t sequence;
+		{
+			std::lock_guard lock(g_host_history_mutex);
+			snapshot = g_host_history;
+			sequence = g_host_sequence;
+		}
+		if (sequence != 0) {
+			std::printf("--- Host operation history (CPU recorded, NOT GPU completion) ---\n");
+			const auto first = sequence > snapshot.size() ? sequence - snapshot.size() : 0;
+			for (auto i = first; i < sequence; ++i) Print("host", snapshot[i % snapshot.size()]);
+			std::fflush(stdout);
+		}
+	}
 	DumpDeviceFault(graphics);
 	if (!graphics.diagnostic_checkpoints_enabled || graphics.queue == nullptr) {
 		return;

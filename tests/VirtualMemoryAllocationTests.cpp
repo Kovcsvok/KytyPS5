@@ -4232,6 +4232,14 @@ void TestTlsStubsPreserveFlags() {
 
 int main(int argc, char** argv) {
 	InitSubsystems();
+	if (argc == 2 && std::strcmp(argv[1], "--tls-stubs-only") == 0) {
+#if defined(__linux__) || KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		RunTest(TestTlsStubsPreserveFlags);
+		return g_failed_tests == 0 ? 0 : 1;
+#else
+		return 1;
+#endif
+	}
 #if defined(__linux__)
 	if (argc == 2 && std::strcmp(argv[1], "--fixed-direct-replacement-only") == 0) {
 		RunTest(TestFixedDirectReplacementPreservesAccess);

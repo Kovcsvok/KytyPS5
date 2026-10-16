@@ -69,6 +69,8 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 	m_debug_arg2      = arg2;
 	m_debug_arg3      = arg3;
 	m_debug_arg4      = arg4;
+	RecordHostDiagnostic({.op = op, .submit_id = submit_id, .arg0 = arg0,
+	                      .arg1 = arg1, .arg2 = arg2, .arg3 = arg3, .arg4 = arg4});
 	if (m_graphics.diagnostic_checkpoints_enabled && !IsInvalid()) {
 		const auto* marker = RecordDiagnosticCheckpoint({.op        = op,
 		                                                 .submit_id = submit_id,
