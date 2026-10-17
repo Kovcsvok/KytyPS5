@@ -21,10 +21,19 @@ layout(std430, binding = 1) buffer Report {
     uint last[5];
 } report;
 
+// Every record, for the device-loss log: tag, guard counter, dwords | dropped << 8, the guest's
+// words as read.
+layout(std430, binding = 2) writeonly buffer History {
+    uint history[];
+};
+
 layout(push_constant) uniform Push {
     uvec2 record_address;
     uint  dwords;
     uint  output_dword;
+    uint  history_dword;
+    uint  tag;
+    uint  counter;
 } pc;
 
 // Far above any real draw, far below what keeps the geometry engine busy past the driver's
@@ -43,6 +52,12 @@ void main() {
     const uint instances = words[1];
     const bool possible  = count <= MaxCount && instances <= MaxInstances &&
                           (instances == 0u || count <= MaxTotal / instances);
+    history[pc.history_dword + 0u] = pc.tag;
+    history[pc.history_dword + 1u] = pc.counter;
+    history[pc.history_dword + 2u] = pc.dwords | (possible ? 0u : 0x100u);
+    for (uint i = 0u; i < 5u; i++) {
+        history[pc.history_dword + 3u + i] = words[i];
+    }
     if (!possible) {
         atomicAdd(report.dropped, 1u);
         for (uint i = 0u; i < 5u; i++) {

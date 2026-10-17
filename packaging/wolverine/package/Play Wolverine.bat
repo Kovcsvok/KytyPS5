@@ -58,6 +58,10 @@ rem Host fault handling for a rare write crash.
 set KYTY_FAULT_WATCHED_UNMAPPED=1
 set KYTY_FAULT_REPAIR_HOST_PAGE=1
 set KYTY_FAULT_SETTLE_MS=50
+rem AMD: some shader loops run far past their guest bound here (main menu 3-6 fps instead of
+rem 30-40). The loop watchdog ends every loop after 4096 iterations and names it in the log
+rem ("Loop watchdog:"). It changes shader translation, so it has its own shader cache.
+if not defined KYTY_SHADER_LOOP_WATCHDOG set KYTY_SHADER_LOOP_WATCHDOG=1
 rem Fallback only: KYTY_SKIP_POPS_SHADERS=1 skips the pixel shaders that order overlapping
 rem pixels with POPS (blood and hit effects). The combat device loss they seemed to cause was an
 rem indirect draw with garbage counts, which the indirect draw guard now drops.

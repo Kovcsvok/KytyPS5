@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shaderBindings.h"
 
+#include <unordered_set>
 #include <cstdio>
 #include <algorithm>
 #include <atomic>
@@ -849,6 +850,18 @@ void BindlessTable::DrainWatchdogReports(uint64_t frame) {
 	}
 	static std::atomic<uint32_t> logged = 0;
 	LOGF("WatchdogTrips: frame=%" PRIu64 " reports=%u loops=%zu\n", frame, count, loops.size());
+	// The release log is silent: name each loop the first time it trips, on the console log.
+	static std::unordered_set<uint64_t> announced;
+	for (const auto& [key, entry]: loops) {
+		if (announced.size() >= 64 || !announced.insert(key).second) {
+			continue;
+		}
+		const auto* r = entry.second;
+		std::printf("Loop watchdog: shader 0x%08x%08x loop block %u cut at %u iterations (%u lanes "
+		            "this frame, frame %" PRIu64 ")\n",
+		            r[2], r[1], r[0] & 0xffffu, r[3], entry.first, frame);
+	}
+	std::fflush(stdout);
 	for (const auto& [key, entry]: loops) {
 		if (logged.fetch_add(1) >= 256) {
 			break;

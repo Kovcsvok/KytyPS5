@@ -115,6 +115,18 @@ void DumpGpuMarkers(GraphicContext& graphics) {
 
 }
 
+namespace {
+std::atomic<void (*)()> g_device_loss_hook {nullptr};
+} // namespace
+
+uint64_t PeekDiagnosticSequence() {
+	return g_checkpoint_sequence.load(std::memory_order_relaxed) + 1;
+}
+
+void SetDeviceLossHook(void (*hook)()) {
+	g_device_loss_hook.store(hook, std::memory_order_relaxed);
+}
+
 void CreateGpuMarkers(GraphicContext& graphics) {
 	if (!graphics.gpu_markers_enabled) {
 		return;
@@ -282,6 +294,9 @@ void DumpDeviceLossDiagnostics(GraphicContext& graphics) {
 			std::fflush(stdout);
 		}
 		DumpGpuMarkers(graphics);
+		if (auto* hook = g_device_loss_hook.load(std::memory_order_relaxed); hook != nullptr) {
+			hook();
+		}
 	}
 	DumpDeviceFault(graphics);
 	if (!graphics.diagnostic_checkpoints_enabled || graphics.queue == nullptr) {

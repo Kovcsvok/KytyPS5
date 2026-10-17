@@ -31,7 +31,12 @@ struct GuardPushConstants {
 	uint32_t record_high;
 	uint32_t dwords;
 	uint32_t output_dword;
+	uint32_t history_dword;
+	uint32_t tag;
+	uint32_t counter;
 };
+
+IndirectDrawGuard* g_guard = nullptr;
 
 // Report layout (dwords): the dropped count, then the last dropped record.
 constexpr uint32_t GuardReportBytes = 256;
@@ -145,7 +150,16 @@ IndirectDrawGuard::IndirectDrawGuard(GraphicContext& graphics, CommandScheduler&
                 vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eIndirectBuffer,
                 Entries * EntryDwords * sizeof(uint32_t)),
       m_report(graphics, scheduler, MemoryUsage::Stream, 0, vk::BufferUsageFlagBits::eStorageBuffer,
-               GuardReportBytes) {
+               GuardReportBytes),
+      m_history(graphics, scheduler, MemoryUsage::Download, 0,
+                vk::BufferUsageFlagBits::eStorageBuffer, HistoryEntries * 8u * sizeof(uint32_t)) {
+	EXIT_IF(m_history.Mapped().size() < HistoryEntries * 8u * sizeof(uint32_t));
+	std::memset(m_history.Mapped().data(), 0, HistoryEntries * 8u * sizeof(uint32_t));
+	if (!m_history.IsCoherent()) {
+		m_history.Flush(0, HistoryEntries * 8u * sizeof(uint32_t));
+	}
+	g_guard = this;
+	SetDeviceLossHook(&IndirectDrawGuard::DumpHistory);
 	SetVulkanObjectNameF(graphics.device, m_records.Handle(), "Indirect Draw Guard");
 	EXIT_IF(m_report.Mapped().size() < GuardReportBytes);
 	std::memset(m_report.Mapped().data(), 0, GuardReportBytes);
@@ -153,9 +167,10 @@ IndirectDrawGuard::IndirectDrawGuard(GraphicContext& graphics, CommandScheduler&
 		m_report.Flush(0, GuardReportBytes);
 	}
 
-	const std::array<vk::DescriptorSetLayoutBinding, 2> bindings {{
+	const std::array<vk::DescriptorSetLayoutBinding, 3> bindings {{
 	    {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
 	    {1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
+	    {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
 	}};
 	vk::DescriptorSetLayoutCreateInfo layout_info {};
 	layout_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
@@ -191,6 +206,8 @@ IndirectDrawGuard::IndirectDrawGuard(GraphicContext& graphics, CommandScheduler&
 }
 
 IndirectDrawGuard::~IndirectDrawGuard() {
+	SetDeviceLossHook(nullptr);
+	g_guard = nullptr;
 	m_graphics.device.destroyPipeline(m_pipeline, nullptr);
 	m_graphics.device.destroyPipelineLayout(m_pipeline_layout, nullptr);
 	m_graphics.device.destroyDescriptorSetLayout(m_set_layout, nullptr);
@@ -222,6 +239,35 @@ void IndirectDrawGuard::Report() {
 	     words[0], words[1], words[2], words[3], words[4], words[5]);
 }
 
+void IndirectDrawGuard::DumpHistory() {
+	auto* guard = g_guard;
+	if (guard == nullptr) {
+		return;
+	}
+	const auto bytes = HistoryEntries * 8u * sizeof(uint32_t);
+	if (!guard->m_history.IsCoherent()) {
+		guard->m_history.Invalidate(0, bytes);
+	}
+	std::array<uint32_t, HistoryEntries * 8u> words {};
+	std::memcpy(words.data(), guard->m_history.Mapped().data(), bytes);
+	std::printf("--- Indirect draw records (last %u written by the GPU; tag = GPU marker seq) ---\n",
+	            HistoryEntries);
+	const auto newest = guard->m_counter;
+	for (uint32_t n = HistoryEntries; n > 0; n--) {
+		if (newest < n) {
+			continue;
+		}
+		const auto  counter = newest - n;
+		const auto* entry   = words.data() + (counter % HistoryEntries) * 8u;
+		const bool  written = entry[1] == counter && (entry[2] & 0xffu) != 0u;
+		std::printf("  #%u %s tag=%u dwords=%u%s: %u,%u,%u,%u,%u\n", counter,
+		            written ? "ran" : "not run", entry[0], entry[2] & 0xffu,
+		            (entry[2] & 0x100u) != 0 ? " DROPPED" : "", entry[3], entry[4], entry[5],
+		            entry[6], entry[7]);
+	}
+	std::fflush(stdout);
+}
+
 IndirectDrawGuard::Result IndirectDrawGuard::Guard(const CommandRecorder& command,
                                                    vk::DeviceAddress record, bool indexed) {
 	Report();
@@ -240,20 +286,26 @@ IndirectDrawGuard::Result IndirectDrawGuard::Guard(const CommandRecorder& comman
 	                        vk::PipelineStageFlagBits::eComputeShader, {}, 1, &record_ready, 0,
 	                        nullptr, 0, nullptr);
 
-	const std::array<vk::DescriptorBufferInfo, 2> infos {{
+	const std::array<vk::DescriptorBufferInfo, 3> infos {{
 	    {m_records.Handle(), 0, VK_WHOLE_SIZE},
 	    {m_report.Handle(), 0, VK_WHOLE_SIZE},
+	    {m_history.Handle(), 0, VK_WHOLE_SIZE},
 	}};
-	std::array<vk::WriteDescriptorSet, 2> writes {};
+	std::array<vk::WriteDescriptorSet, 3> writes {};
 	for (uint32_t i = 0; i < writes.size(); i++) {
 		writes[i].dstBinding      = i;
 		writes[i].descriptorCount = 1;
 		writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
 		writes[i].pBufferInfo     = &infos[i];
 	}
+	const auto counter = m_counter++;
 	const GuardPushConstants push {static_cast<uint32_t>(record),
-	                               static_cast<uint32_t>(record >> 32u), indexed ? 5u : 4u,
-	                               entry * EntryDwords};
+	                               static_cast<uint32_t>(record >> 32u),
+	                               indexed ? 5u : 4u,
+	                               entry * EntryDwords,
+	                               (counter % HistoryEntries) * 8u,
+	                               static_cast<uint32_t>(PeekDiagnosticSequence()),
+	                               counter};
 	command.bindPipeline(vk::PipelineBindPoint::eCompute, m_pipeline);
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, m_pipeline_layout, 0,
 	                             static_cast<uint32_t>(writes.size()), writes.data());

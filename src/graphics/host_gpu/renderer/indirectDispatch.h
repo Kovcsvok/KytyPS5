@@ -73,16 +73,23 @@ public:
 	[[nodiscard]] Result Guard(const CommandRecorder& command, vk::DeviceAddress record,
 	                           bool indexed);
 
+	// Prints the records of the last indirect draws (called on a device loss).
+	static void DumpHistory();
+
 private:
 	void Report();
 
-	static constexpr uint32_t Entries     = 4096;
-	static constexpr uint32_t EntryDwords = 8;
+	static constexpr uint32_t Entries        = 4096;
+	static constexpr uint32_t EntryDwords    = 8;
+	static constexpr uint32_t HistoryEntries = 64;
 
 	GraphicContext&         m_graphics;
 	Buffer                  m_records;
 	// The dropped-draw count and the last dropped record, read back for the log every 5 s.
 	Buffer                  m_report;
+	// Host-visible copy of the last HistoryEntries records, readable after a device loss.
+	Buffer                  m_history;
+	uint32_t                m_counter         = 0;
 	vk::DescriptorSetLayout m_set_layout      = nullptr;
 	vk::PipelineLayout      m_pipeline_layout = nullptr;
 	vk::Pipeline            m_pipeline        = nullptr;

@@ -43,6 +43,10 @@ void RecordHostDiagnostic(const DiagnosticCheckpoint& checkpoint);
 // each checkpoint's sequence into, before it (top of pipe) and once everything earlier finished
 // (bottom of pipe). After a device loss the two values bracket the operation the GPU hung in.
 void CreateGpuMarkers(GraphicContext& graphics);
+// The sequence the next debug checkpoint gets (GPU markers), to tag GPU-side records with.
+[[nodiscard]] uint64_t PeekDiagnosticSequence();
+// Called once from DumpDeviceLossDiagnostics (renderer-side state such as indirect draw records).
+void SetDeviceLossHook(void (*hook)());
 
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;
