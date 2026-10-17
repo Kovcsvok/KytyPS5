@@ -856,6 +856,29 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		return skipped;
 	}
 
+	// KYTY_SKIP_POPS_SHADERS=1 (environment; the name puts it in the program cache signature):
+	// skip the pixel shaders that order their overlapping pixels with POPS (they read
+	// pops_exiting_wave_id). Wolverine's blood and hit effects use them; on AMD hosts their draws
+	// lose the device in combat (GPU markers name them), and nothing emulates the ordering yet.
+	static const bool skip_pops = [] {
+		const char* value = std::getenv("KYTY_SKIP_POPS_SHADERS");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (skip_pops && options.stage == ShaderType::Pixel &&
+	    std::ranges::any_of(decoded.instructions, [](const Decoder::Instruction& inst) {
+		    const auto pops = [](const Decoder::Operand& operand) {
+			    return operand.kind == Decoder::OperandKind::PopsExitingWaveId;
+		    };
+		    return pops(inst.src0) || pops(inst.src1) || pops(inst.src2) || pops(inst.src3);
+	    })) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "POPS: skipping pixel shader 0x{:016x} (KYTY_SKIP_POPS_SHADERS=1)\n",
+		    options.shader_hash));
+		TranslateResult skipped;
+		skipped.unsupported = true;
+		return skipped;
+	}
+
 	std::string decoded_dump;
 	// KYTY_DECODED_DUMP_DIR=<dir> (environment): the decoded RDNA2 of every program that already has
 	// <dir>/<hash>.txt (from KYTY_IR_DUMP_DIR) goes to <dir>/<hash>.rdna.txt, with the original
