@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+// DRAW_INDIRECT / DRAW_INDEX_INDIRECT: copies the guest's draw record (Vulkan's layout:
+// count, instances, first, (vertex offset,) first instance) and zeroes counts no real draw has,
+// so garbage written by a misbehaving earlier pass drops the draw instead of the device.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Record {
+    uint words[];
+};
+
+layout(std430, binding = 0) writeonly buffer Records {
+    uint records[];
+};
+
+layout(std430, binding = 1) buffer Report {
+    uint dropped;
+    uint last[5];
+} report;
+
+layout(push_constant) uniform Push {
+    uvec2 record_address;
+    uint  dwords;
+    uint  output_dword;
+} pc;
+
+// Far above any real draw, far below what keeps the geometry engine busy past the driver's
+// timeout.
+const uint MaxCount     = 1u << 26u;
+const uint MaxInstances = 1u << 22u;
+const uint MaxTotal     = 1u << 28u;
+
+void main() {
+    Record record = Record(pc.record_address);
+    uint words[5];
+    for (uint i = 0u; i < 5u; i++) {
+        words[i] = i < pc.dwords ? record.words[i] : 0u;
+    }
+    const uint count     = words[0];
+    const uint instances = words[1];
+    const bool possible  = count <= MaxCount && instances <= MaxInstances &&
+                          (instances == 0u || count <= MaxTotal / instances);
+    if (!possible) {
+        atomicAdd(report.dropped, 1u);
+        for (uint i = 0u; i < 5u; i++) {
+            report.last[i] = words[i];
+        }
+        words[0] = 0u;
+        words[1] = 0u;
+    }
+    for (uint i = 0u; i < pc.dwords; i++) {
+        records[pc.output_dword + i] = words[i];
+    }
+}

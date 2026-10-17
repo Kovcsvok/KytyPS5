@@ -58,10 +58,9 @@ rem Host fault handling for a rare write crash.
 set KYTY_FAULT_WATCHED_UNMAPPED=1
 set KYTY_FAULT_REPAIR_HOST_PAGE=1
 set KYTY_FAULT_SETTLE_MS=50
-rem AMD: pixel shaders that order overlapping pixels with POPS (blood and hit effects) lose
-rem the GPU in combat; they are skipped until the ordering is emulated (those effects are missing).
-rem Set KYTY_SKIP_POPS_SHADERS=0 before starting to draw them.
-if not defined KYTY_SKIP_POPS_SHADERS set KYTY_SKIP_POPS_SHADERS=1
+rem Fallback only: KYTY_SKIP_POPS_SHADERS=1 skips the pixel shaders that order overlapping
+rem pixels with POPS (blood and hit effects). The combat device loss they seemed to cause was an
+rem indirect draw with garbage counts, which the indirect draw guard now drops.
 rem Live switches for testing: write NAME=value lines into this file while the game runs.
 set KYTY_LIVE_FILE=%USERDATA%\kyty_live.txt
 type nul > "%KYTY_LIVE_FILE%"

@@ -50,6 +50,47 @@ private:
 	uint32_t                m_next            = 0;
 };
 
+// DRAW_INDIRECT and DRAW_INDEX_INDIRECT read their counts on the GPU, from a record an earlier
+// pass wrote. When that pass misbehaves the record holds garbage, and a draw of billions of
+// vertices or instances keeps the geometry engine busy until the driver resets the device
+// (Wolverine on AMD, combat: Radeon GPU Detective shows DrawIndirectMulti in progress with no
+// page fault). This copies the record on the GPU and zeroes counts no real draw has.
+// KYTY_INDIRECT_DRAW_GUARD=0 draws from the guest's record directly.
+class IndirectDrawGuard {
+public:
+	IndirectDrawGuard(GraphicContext& graphics, CommandScheduler& scheduler);
+	~IndirectDrawGuard();
+	KYTY_CLASS_NO_COPY(IndirectDrawGuard);
+
+	[[nodiscard]] static bool Enabled();
+
+	struct Result {
+		vk::Buffer     buffer;
+		vk::DeviceSize offset = 0;
+	};
+	// Records the checked copy of the draw record at `record` (5 dwords indexed, 4 otherwise)
+	// and returns where the draw reads it. Must be recorded outside a render pass.
+	[[nodiscard]] Result Guard(const CommandRecorder& command, vk::DeviceAddress record,
+	                           bool indexed);
+
+private:
+	void Report();
+
+	static constexpr uint32_t Entries     = 4096;
+	static constexpr uint32_t EntryDwords = 8;
+
+	GraphicContext&         m_graphics;
+	Buffer                  m_records;
+	// The dropped-draw count and the last dropped record, read back for the log every 5 s.
+	Buffer                  m_report;
+	vk::DescriptorSetLayout m_set_layout      = nullptr;
+	vk::PipelineLayout      m_pipeline_layout = nullptr;
+	vk::Pipeline            m_pipeline        = nullptr;
+	uint32_t                m_next            = 0;
+	uint32_t                m_reported        = 0;
+	int64_t                 m_last_report_us  = 0;
+};
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_INDIRECTDISPATCH_H_

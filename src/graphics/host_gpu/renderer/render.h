@@ -282,6 +282,8 @@ private:
 	std::vector<uint32_t>                 m_image_occurrences;
 	// Created at the first thread-dimension indirect dispatch.
 	std::unique_ptr<IndirectDispatchGroups> m_indirect_groups;
+	// Created at the first indirect draw (KYTY_INDIRECT_DRAW_GUARD, on by default).
+	std::unique_ptr<IndirectDrawGuard> m_indirect_draw_guard;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

@@ -1272,13 +1272,19 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	uint64_t indirect_offset = 0;
 	if (emit.indirect_args != 0) {
 		EXIT_IF(mesh_active || (emit.indirect_args & 3u) != 0);
+		const bool guard = IndirectDrawGuard::Enabled();
 		const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 		    emit.indirect_args, draw.IsIndexed() ? sizeof(vk::DrawIndexedIndirectCommand)
 		                                         : sizeof(vk::DrawIndirectCommand),
-		    false);
+		    false, false, {}, guard);
 		EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
+		EXIT_IF(guard && !args_buffer->HasDeviceAddress());
 		indirect_buffer = args_buffer;
 		indirect_offset = args_offset;
+		if (guard && m_indirect_draw_guard == nullptr) {
+			m_indirect_draw_guard = std::make_unique<IndirectDrawGuard>(
+			    m_context.GetGraphics(), m_context.GetCommandScheduler());
+		}
 	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
@@ -1317,9 +1323,17 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
 	const auto vk_buffer = buffer.Recorder();
+	vk::Buffer indirect_handle = indirect_buffer != nullptr ? indirect_buffer->Handle() : nullptr;
 	if (indirect_buffer != nullptr) {
 		// Earlier passes wrote the arguments; indirect reads happen outside the render pass.
 		buffer.EndRendering();
+		if (m_indirect_draw_guard != nullptr) {
+			const auto guarded = m_indirect_draw_guard->Guard(
+			    vk_buffer, indirect_buffer->BufferDeviceAddress() + indirect_offset,
+			    draw.IsIndexed());
+			indirect_handle = guarded.buffer;
+			indirect_offset = guarded.offset;
+		}
 		vk::MemoryBarrier barrier {};
 		barrier.srcAccessMask =
 		    vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
@@ -1394,9 +1408,7 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
-		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit,
-		                   indirect_buffer != nullptr ? indirect_buffer->Handle() : nullptr,
-		                   indirect_offset);
+		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit, indirect_handle, indirect_offset);
 	}
 
 	if (!draw.IsIndexed()) {

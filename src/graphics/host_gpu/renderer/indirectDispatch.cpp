@@ -2,10 +2,18 @@
 
 #include "common/assert.h"
 #include "gpu_tiler_shaders/dispatch_indirect_groups_spv.h"
+#include "gpu_tiler_shaders/draw_indirect_guard_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+
+#include "common/logging/log.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace Libs::Graphics {
 
@@ -17,6 +25,16 @@ struct PushConstants {
 	uint32_t local_size[3];
 	uint32_t output_dword;
 };
+
+struct GuardPushConstants {
+	uint32_t record_low;
+	uint32_t record_high;
+	uint32_t dwords;
+	uint32_t output_dword;
+};
+
+// Report layout (dwords): the dropped count, then the last dropped record.
+constexpr uint32_t GuardReportBytes = 256;
 
 } // namespace
 
@@ -111,6 +129,145 @@ IndirectDispatchGroups::Convert(const CommandRecorder& command, vk::DeviceAddres
 	                        {}, 1, &groups_ready, 0, nullptr, 0, nullptr);
 	return {m_groups.Handle(), offset,
 	        m_groups.BufferDeviceAddress() + offset + 4u * sizeof(uint32_t)};
+}
+
+bool IndirectDrawGuard::Enabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_INDIRECT_DRAW_GUARD");
+		return value == nullptr || value[0] != '0';
+	}();
+	return enabled;
+}
+
+IndirectDrawGuard::IndirectDrawGuard(GraphicContext& graphics, CommandScheduler& scheduler)
+    : m_graphics(graphics),
+      m_records(graphics, scheduler, MemoryUsage::DeviceLocal, 0,
+                vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eIndirectBuffer,
+                Entries * EntryDwords * sizeof(uint32_t)),
+      m_report(graphics, scheduler, MemoryUsage::Stream, 0, vk::BufferUsageFlagBits::eStorageBuffer,
+               GuardReportBytes) {
+	SetVulkanObjectNameF(graphics.device, m_records.Handle(), "Indirect Draw Guard");
+	EXIT_IF(m_report.Mapped().size() < GuardReportBytes);
+	std::memset(m_report.Mapped().data(), 0, GuardReportBytes);
+	if (!m_report.IsCoherent()) {
+		m_report.Flush(0, GuardReportBytes);
+	}
+
+	const std::array<vk::DescriptorSetLayoutBinding, 2> bindings {{
+	    {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
+	    {1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
+	}};
+	vk::DescriptorSetLayoutCreateInfo layout_info {};
+	layout_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+	layout_info.bindingCount = static_cast<uint32_t>(bindings.size());
+	layout_info.pBindings    = bindings.data();
+	RequireVulkanSuccess(graphics.device.createDescriptorSetLayout(&layout_info, nullptr,
+	                                                               &m_set_layout),
+	                     "create indirect-draw guard descriptor layout");
+
+	const vk::PushConstantRange  push_range {vk::ShaderStageFlagBits::eCompute, 0,
+                                            sizeof(GuardPushConstants)};
+	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
+	pipeline_layout_info.setLayoutCount         = 1;
+	pipeline_layout_info.pSetLayouts            = &m_set_layout;
+	pipeline_layout_info.pushConstantRangeCount = 1;
+	pipeline_layout_info.pPushConstantRanges    = &push_range;
+	RequireVulkanSuccess(graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
+	                                                          &m_pipeline_layout),
+	                     "create indirect-draw guard pipeline layout");
+
+	const auto                        module = CompileSPV(DRAW_INDIRECT_GUARD_SPV, graphics.device);
+	vk::PipelineShaderStageCreateInfo stage {};
+	stage.stage  = vk::ShaderStageFlagBits::eCompute;
+	stage.module = module;
+	stage.pName  = "main";
+	vk::ComputePipelineCreateInfo pipeline_info {};
+	pipeline_info.stage  = stage;
+	pipeline_info.layout = m_pipeline_layout;
+	const auto result =
+	    graphics.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &m_pipeline);
+	graphics.device.destroyShaderModule(module, nullptr);
+	RequireVulkanSuccess(result, "create indirect-draw guard pipeline");
+}
+
+IndirectDrawGuard::~IndirectDrawGuard() {
+	m_graphics.device.destroyPipeline(m_pipeline, nullptr);
+	m_graphics.device.destroyPipelineLayout(m_pipeline_layout, nullptr);
+	m_graphics.device.destroyDescriptorSetLayout(m_set_layout, nullptr);
+}
+
+void IndirectDrawGuard::Report() {
+	const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+	                     std::chrono::steady_clock::now().time_since_epoch())
+	                     .count();
+	if (now - m_last_report_us < 5000000) {
+		return;
+	}
+	m_last_report_us = now;
+	if (!m_report.IsCoherent()) {
+		m_report.Invalidate(0, GuardReportBytes);
+	}
+	std::array<uint32_t, 6> words {};
+	std::memcpy(words.data(), m_report.Mapped().data(), sizeof(words));
+	if (words[0] == m_reported) {
+		return;
+	}
+	m_reported = words[0];
+	std::printf("Indirect draw guard: %u draws with impossible counts dropped; last record "
+	            "%u,%u,%u,%u,%u\n",
+	            words[0], words[1], words[2], words[3], words[4], words[5]);
+	std::fflush(stdout);
+	LOGF("Indirect draw guard: %u draws with impossible counts dropped; last record "
+	     "%u,%u,%u,%u,%u\n",
+	     words[0], words[1], words[2], words[3], words[4], words[5]);
+}
+
+IndirectDrawGuard::Result IndirectDrawGuard::Guard(const CommandRecorder& command,
+                                                   vk::DeviceAddress record, bool indexed) {
+	Report();
+	const auto entry  = m_next;
+	m_next            = (m_next + 1u) % Entries;
+	const auto offset = vk::DeviceSize {entry} * EntryDwords * sizeof(uint32_t);
+
+	// The record comes from earlier shader or transfer writes; the entry's previous indirect
+	// read must finish before it is rewritten.
+	vk::MemoryBarrier record_ready {};
+	record_ready.srcAccessMask = vk::AccessFlagBits::eShaderWrite |
+	                             vk::AccessFlagBits::eTransferWrite |
+	                             vk::AccessFlagBits::eIndirectCommandRead;
+	record_ready.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+	command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                        vk::PipelineStageFlagBits::eComputeShader, {}, 1, &record_ready, 0,
+	                        nullptr, 0, nullptr);
+
+	const std::array<vk::DescriptorBufferInfo, 2> infos {{
+	    {m_records.Handle(), 0, VK_WHOLE_SIZE},
+	    {m_report.Handle(), 0, VK_WHOLE_SIZE},
+	}};
+	std::array<vk::WriteDescriptorSet, 2> writes {};
+	for (uint32_t i = 0; i < writes.size(); i++) {
+		writes[i].dstBinding      = i;
+		writes[i].descriptorCount = 1;
+		writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
+		writes[i].pBufferInfo     = &infos[i];
+	}
+	const GuardPushConstants push {static_cast<uint32_t>(record),
+	                               static_cast<uint32_t>(record >> 32u), indexed ? 5u : 4u,
+	                               entry * EntryDwords};
+	command.bindPipeline(vk::PipelineBindPoint::eCompute, m_pipeline);
+	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, m_pipeline_layout, 0,
+	                             static_cast<uint32_t>(writes.size()), writes.data());
+	command.pushConstants(m_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push),
+	                      &push);
+	command.dispatch(1, 1, 1);
+
+	vk::MemoryBarrier record_written {};
+	record_written.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+	record_written.dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead;
+	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+	                        vk::PipelineStageFlagBits::eDrawIndirect, {}, 1, &record_written, 0,
+	                        nullptr, 0, nullptr);
+	return {m_records.Handle(), offset};
 }
 
 } // namespace Libs::Graphics
