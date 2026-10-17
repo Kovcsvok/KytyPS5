@@ -289,6 +289,7 @@ Emitter::SpirvRequirements Emitter::AnalyzeProgramRequirements(const IR::Program
 					Fail(program, "address operation has invalid memory metadata");
 				}
 				const auto kind = program.memory_info[memory_index].kind;
+				requirements.uses_lds |= kind == IR::ResourceKind::Lds;
 				if (kind == IR::ResourceKind::Scratch || kind == IR::ResourceKind::FlatLocal) {
 					if (program.scratch_dwords == 0) {
 						Fail(program, "scratch operation has no per-thread storage");

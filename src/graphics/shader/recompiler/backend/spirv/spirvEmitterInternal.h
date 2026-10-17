@@ -67,6 +67,8 @@ struct SpirvRequirements {
 	bool compute_derivatives          = false;
 	bool image_gather_extended        = false;
 	bool function_lds                 = false;
+	// Some address operation reads or writes LDS (EmitWaitcnt orders them within the wave).
+	bool uses_lds                     = false;
 	// Dwords the function-scope LDS array needs, from bounds on every LDS address; 0 when some
 	// address is unbounded.
 	uint32_t function_lds_dwords      = 0;

@@ -3,6 +3,7 @@
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"
 
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 
@@ -682,6 +683,25 @@ void EmitBarrier(EmitterState& state) {
 	                                             spv::MemorySemanticsWorkgroupMemoryMask;
 	state.builder.AddFunction(spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup),
 	                          ConstantU32(state, memory_scope), ConstantU32(state, semantics));
+}
+
+// GCN orders a wave's LDS accesses with s_waitcnt lgkmcnt, and a workgroup of one wave shares
+// LDS between its lanes with no s_barrier at all (the guest compiler drops it). Without an
+// ordering point the host compiler may move one lane's LDS load above another's store (the
+// GPU-assisted validation race on lds_dwords). A subgroup-scope fence is free on the hardware:
+// it only keeps LDS accesses on their side of the wait. KYTY_SHADER_LDS_WAVE_FENCE=0 omits it.
+void EmitWaitcnt(ValueEmitContext& ctx) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SHADER_LDS_WAVE_FENCE");
+		return value == nullptr || value[0] != '0';
+	}();
+	auto& state = ctx.state;
+	if (!enabled || !state.requirements.uses_lds) {
+		return;
+	}
+	state.builder.AddFunction(spv::OpMemoryBarrier, ConstantU32(state, spv::ScopeSubgroup),
+	                          ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask |
+	                                                 spv::MemorySemanticsWorkgroupMemoryMask));
 }
 
 uint32_t EmitLaneId(EmitterState& state) {
