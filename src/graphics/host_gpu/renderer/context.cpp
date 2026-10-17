@@ -61,7 +61,7 @@ void CommandBuffer::End() const {
 }
 
 void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1,
-                                 uint32_t arg2, uint32_t arg3, uint64_t arg4) {
+                                 uint32_t arg2, uint32_t arg3, uint64_t arg4, uint64_t arg5) {
 	m_debug_op        = op;
 	m_debug_submit_id = submit_id;
 	m_debug_arg0      = arg0;
@@ -70,17 +70,29 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 	m_debug_arg3      = arg3;
 	m_debug_arg4      = arg4;
 	RecordHostDiagnostic({.op = op, .submit_id = submit_id, .arg0 = arg0,
-	                      .arg1 = arg1, .arg2 = arg2, .arg3 = arg3, .arg4 = arg4});
-	if (m_graphics.diagnostic_checkpoints_enabled && !IsInvalid()) {
+	                      .arg1 = arg1, .arg2 = arg2, .arg3 = arg3, .arg4 = arg4, .arg5 = arg5});
+	const bool markers = m_graphics.gpu_markers_enabled;
+	if ((m_graphics.diagnostic_checkpoints_enabled || markers) && !IsInvalid()) {
 		const auto* marker = RecordDiagnosticCheckpoint({.op        = op,
 		                                                 .submit_id = submit_id,
 		                                                 .arg0      = arg0,
 		                                                 .arg1      = arg1,
 		                                                 .arg2      = arg2,
 		                                                 .arg3      = arg3,
-		                                                 .arg4      = arg4});
-		if (marker != nullptr) {
+		                                                 .arg4      = arg4,
+		                                                 .arg5      = arg5});
+		if (marker != nullptr && m_graphics.diagnostic_checkpoints_enabled) {
 			Recorder().setCheckpointNV(marker);
+		}
+		if (marker != nullptr && markers) {
+			// Top of pipe: the command processor reached this operation. Bottom of pipe: every
+			// command recorded before it has finished.
+			const auto value    = static_cast<uint32_t>(marker->sequence);
+			const auto recorder = Recorder();
+			recorder.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eTopOfPipe,
+			                              m_graphics.gpu_marker_buffer, 0, value);
+			recorder.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eBottomOfPipe,
+			                              m_graphics.gpu_marker_buffer, sizeof(uint32_t), value);
 		}
 	}
 }

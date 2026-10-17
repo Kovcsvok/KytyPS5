@@ -1098,7 +1098,8 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	IR::EliminateDeadCode(ir.blocks);
 
 	IR::CollectShaderInfo(ir, options.input_info);
-	ir.info.watchdog_reports = ir.bindless_images && ir.info.uses_dma;
+	ir.info.watchdog_reports =
+	    ir.bindless_images && (ir.info.uses_dma || IR::LoopWatchdogAllPrograms());
 	IR::AllocateBindings(ir, push_data_start_dword);
 	WriteResourceSummary(ir);
 	// KYTY_IR_DUMP_DIR=<dir> (environment): the IR of every program with a bindless sampler plan

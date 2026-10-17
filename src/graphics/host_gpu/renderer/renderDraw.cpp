@@ -865,9 +865,9 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 // count, arg3 = instance count, arg4 = the pixel shader's hash (0 without one), which device-loss
 // triage needs to tell which draw read a freed resource.
 static void SetDrawDebugPhase(CommandBuffer& buffer, uint64_t submit_id, const DrawCallInfo& draw,
-                              uint32_t phase, uint64_t ps_hash) {
+                              uint32_t phase, uint64_t ps_hash, uint64_t vs_hash) {
 	buffer.SetDebugInfo(static_cast<uint32_t>(draw.debug_op), submit_id, phase, draw.index_count,
-	                    draw.first_instance, draw.instance_count, ps_hash);
+	                    draw.first_instance, draw.instance_count, ps_hash, vs_hash);
 }
 
 static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& topology) {
@@ -1336,18 +1336,23 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 		FullMemoryBarrier(vk_buffer);
 	}
 	uint64_t ps_hash = 0;
+	// The first vertex-side stage (vertex, export or mesh shader), for GPU hang triage.
+	uint64_t vs_hash = 0;
 	for (const auto* stage: stages) {
-		if (stage->runtime != nullptr && *stage->runtime &&
-		    stage->runtime->program->stage == ShaderType::Pixel) {
-			ps_hash = stage->runtime->program->shader_hash;
+		if (stage->runtime != nullptr && *stage->runtime) {
+			if (stage->runtime->program->stage == ShaderType::Pixel) {
+				ps_hash = stage->runtime->program->shader_hash;
+			} else if (vs_hash == 0) {
+				vs_hash = stage->runtime->program->shader_hash;
+			}
 		}
 	}
-	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u, ps_hash);
+	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u, ps_hash, vs_hash);
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
 	if (state.ps_active && !draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u, ps_hash);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u, ps_hash, vs_hash);
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (mesh_active) {
@@ -1373,7 +1378,7 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 
 	LogDrawPhase(draw.Name(), "BeginRendering");
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u, ps_hash);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u, ps_hash, vs_hash);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	// KYTY_STATE_CACHE: the same pipeline bound again is a no-op. GetDynamicState().valid is set
@@ -1384,7 +1389,7 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 		cached.pipeline = pipeline.pipeline;
 	}
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, ps_hash);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, ps_hash, vs_hash);
 	}
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
@@ -1395,7 +1400,7 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	}
 
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, ps_hash);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, ps_hash, vs_hash);
 	}
 	vk::PipelineStageFlags shader_write_stages = {};
 	for (const auto& stage: vertex_stages) {
@@ -1429,7 +1434,7 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	}
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {
-		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u, ps_hash);
+		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u, ps_hash, vs_hash);
 	}
 }
 

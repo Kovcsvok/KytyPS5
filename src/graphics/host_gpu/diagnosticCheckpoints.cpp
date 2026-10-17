@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cinttypes>
@@ -45,15 +46,143 @@ const char* OpName(uint32_t op) {
 
 void Print(const char* stage, const DiagnosticCheckpoint& checkpoint) {
 	std::printf("  [%s] seq=%" PRIu64 " op=%s submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64
-	            "\n",
+	            " shader=0x%016" PRIx64 "\n",
 	            stage, checkpoint.sequence, OpName(checkpoint.op), checkpoint.submit_id,
 	            checkpoint.arg0, checkpoint.arg1, checkpoint.arg2, checkpoint.arg3,
-	            checkpoint.arg4);
-	LOGF("  [%s] seq=%" PRIu64 " op=%s submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
+	            checkpoint.arg4, checkpoint.arg5);
+	LOGF("  [%s] seq=%" PRIu64 " op=%s submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64
+	     " shader=0x%016" PRIx64 "\n",
 	     stage, checkpoint.sequence, OpName(checkpoint.op), checkpoint.submit_id, checkpoint.arg0,
-	     checkpoint.arg1, checkpoint.arg2, checkpoint.arg3, checkpoint.arg4);
+	     checkpoint.arg1, checkpoint.arg2, checkpoint.arg3, checkpoint.arg4, checkpoint.arg5);
 }
 
+// The ring slot of a 32-bit marker value, or nullptr once a later checkpoint reused the slot.
+const DiagnosticCheckpoint* FindCheckpoint(uint32_t marker) {
+	const auto& slot = g_checkpoints[marker % CHECKPOINT_RING_SIZE];
+	return static_cast<uint32_t>(slot.sequence) == marker ? &slot : nullptr;
+}
+
+void DumpGpuMarkers(GraphicContext& graphics) {
+	if (!graphics.gpu_markers_enabled || graphics.gpu_marker_values == nullptr) {
+		return;
+	}
+	const uint32_t top    = graphics.gpu_marker_values[0];
+	const uint32_t bottom = graphics.gpu_marker_values[1];
+	const auto     last   = g_checkpoint_sequence.load(std::memory_order_relaxed);
+	std::printf("--- AMD GPU markers: reached seq=%u, everything before seq=%u finished "
+	            "(last recorded seq=%" PRIu64 ") ---\n",
+	            top, bottom, last);
+	LOGF("--- AMD GPU markers: reached seq=%u, everything before seq=%u finished (last recorded "
+	     "seq=%" PRIu64 ") ---\n",
+	     top, bottom, last);
+	if (top == 0 && bottom == 0) {
+		std::fflush(stdout);
+		return;
+	}
+	// The oldest unfinished operation (bottom) is the one the GPU hung in or waited on; the ones
+	// up to top had started too. Show a little context before it.
+	const uint32_t first = bottom > 16u ? bottom - 16u : 1u;
+	const uint32_t end   = std::max(top, bottom) + 1u;
+	const uint32_t limit = std::min(end, first + 160u);
+	for (uint32_t value = first; value < limit; value++) {
+		const auto* checkpoint = FindCheckpoint(value);
+		if (checkpoint == nullptr) {
+			continue;
+		}
+		const char* label = value < bottom ? "done" : value == bottom ? "HUNG?" : "started";
+		Print(label, *checkpoint);
+	}
+	// The shaders of the oldest unfinished draw or dispatch, ready for skip_live.txt or
+	// --skip-shaders: the draw's pixel shader is in arg4 (DrawIndexAuto phases), the vertex-side or
+	// compute shader in arg5.
+	for (uint32_t value = bottom; value < limit; value++) {
+		const auto* checkpoint = FindCheckpoint(value);
+		if (checkpoint == nullptr || checkpoint->arg5 == 0) {
+			continue;
+		}
+		const bool dispatch = checkpoint->op == 0 || checkpoint->op == 9;
+		const uint64_t pixel = dispatch ? 0 : checkpoint->arg4;
+		std::printf("--- GPU hang suspect: seq=%u op=%s shader=0x%016" PRIx64
+		            " pixel=0x%016" PRIx64 " ---\n",
+		            value, OpName(checkpoint->op), checkpoint->arg5, pixel);
+		LOGF("--- GPU hang suspect: seq=%u op=%s shader=0x%016" PRIx64 " pixel=0x%016" PRIx64
+		     " ---\n",
+		     value, OpName(checkpoint->op), checkpoint->arg5, pixel);
+		break;
+	}
+	std::fflush(stdout);
+}
+
+}
+
+void CreateGpuMarkers(GraphicContext& graphics) {
+	if (!graphics.gpu_markers_enabled) {
+		return;
+	}
+	vk::BufferCreateInfo buffer_info {};
+	buffer_info.size        = 256;
+	buffer_info.usage       = vk::BufferUsageFlagBits::eTransferDst;
+	buffer_info.sharingMode = vk::SharingMode::eExclusive;
+	auto result = graphics.device.createBuffer(&buffer_info, nullptr, &graphics.gpu_marker_buffer);
+	if (result != vk::Result::eSuccess) {
+		LOGF("GPU markers: buffer creation failed: %s\n", vk::to_string(result).c_str());
+		graphics.gpu_markers_enabled = false;
+		return;
+	}
+	vk::MemoryRequirements requirements {};
+	graphics.device.getBufferMemoryRequirements(graphics.gpu_marker_buffer, &requirements);
+	// Device-coherent uncached memory (VK_AMD_device_coherent_memory) keeps the last writes
+	// visible after the device is lost; host-coherent memory is the fallback.
+	const auto host = vk::MemoryPropertyFlagBits::eHostVisible |
+	                  vk::MemoryPropertyFlagBits::eHostCoherent;
+	const auto uncached = host | vk::MemoryPropertyFlagBits::eDeviceCoherentAMD |
+	                      vk::MemoryPropertyFlagBits::eDeviceUncachedAMD;
+	const auto find_type = [&](vk::MemoryPropertyFlags wanted) {
+		const auto& properties = graphics.physical_device_memory_properties;
+		for (uint32_t i = 0; i < properties.memoryTypeCount; i++) {
+			if ((requirements.memoryTypeBits & (1u << i)) != 0 &&
+			    (properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+				return i;
+			}
+		}
+		return UINT32_MAX;
+	};
+	uint32_t type = graphics.device_coherent_memory_enabled ? find_type(uncached) : UINT32_MAX;
+	const bool uncached_type = type != UINT32_MAX;
+	if (type == UINT32_MAX) {
+		type = find_type(host);
+	}
+	if (type == UINT32_MAX) {
+		LOGF("GPU markers: no host-visible memory type\n");
+		graphics.device.destroyBuffer(graphics.gpu_marker_buffer, nullptr);
+		graphics.gpu_marker_buffer   = nullptr;
+		graphics.gpu_markers_enabled = false;
+		return;
+	}
+	vk::MemoryAllocateInfo allocate_info {};
+	allocate_info.allocationSize  = requirements.size;
+	allocate_info.memoryTypeIndex = type;
+	result = graphics.device.allocateMemory(&allocate_info, nullptr, &graphics.gpu_marker_memory);
+	void* mapped = nullptr;
+	if (result == vk::Result::eSuccess) {
+		result = graphics.device.bindBufferMemory(graphics.gpu_marker_buffer,
+		                                          graphics.gpu_marker_memory, 0);
+	}
+	if (result == vk::Result::eSuccess) {
+		result = graphics.device.mapMemory(graphics.gpu_marker_memory, 0, VK_WHOLE_SIZE, {},
+		                                   &mapped);
+	}
+	if (result != vk::Result::eSuccess || mapped == nullptr) {
+		LOGF("GPU markers: memory setup failed: %s\n", vk::to_string(result).c_str());
+		graphics.gpu_markers_enabled = false;
+		return;
+	}
+	std::memset(mapped, 0, 256);
+	graphics.gpu_marker_values = static_cast<volatile uint32_t*>(mapped);
+	std::printf("GPU markers: VK_AMD_buffer_marker on (%s memory)\n",
+	            uncached_type ? "device-uncached" : "host-coherent");
+	LOGF("GPU markers: VK_AMD_buffer_marker on (%s memory)\n",
+	     uncached_type ? "device-uncached" : "host-coherent");
 }
 
 const DiagnosticCheckpoint* RecordDiagnosticCheckpoint(const DiagnosticCheckpoint& checkpoint) {
@@ -152,6 +281,7 @@ void DumpDeviceLossDiagnostics(GraphicContext& graphics) {
 			for (auto i = first; i < sequence; ++i) Print("host", snapshot[i % snapshot.size()]);
 			std::fflush(stdout);
 		}
+		DumpGpuMarkers(graphics);
 	}
 	DumpDeviceFault(graphics);
 	if (!graphics.diagnostic_checkpoints_enabled || graphics.queue == nullptr) {

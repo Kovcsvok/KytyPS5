@@ -28,6 +28,8 @@ struct DiagnosticCheckpoint {
 	uint32_t arg2      = 0;
 	uint32_t arg3      = 0;
 	uint64_t arg4      = 0;
+	// The draw's vertex-side shader hash or the dispatch's compute shader hash (0 if unknown).
+	uint64_t arg5      = 0;
 	uint64_t sequence  = 0;
 };
 
@@ -37,6 +39,10 @@ struct GraphicContext;
 RecordDiagnosticCheckpoint(const DiagnosticCheckpoint& checkpoint);
 void DumpDeviceLossDiagnostics(GraphicContext& graphics);
 void RecordHostDiagnostic(const DiagnosticCheckpoint& checkpoint);
+// KYTY_GPU_MARKERS=1 with VK_AMD_buffer_marker: allocates the buffer the command processor writes
+// each checkpoint's sequence into, before it (top of pipe) and once everything earlier finished
+// (bottom of pipe). After a device loss the two values bracket the operation the GPU hung in.
+void CreateGpuMarkers(GraphicContext& graphics);
 
 struct GraphicContext {
 	vk::Instance                       instance                              = nullptr;
@@ -51,6 +57,12 @@ struct GraphicContext {
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               diagnostic_checkpoints_enabled        = false;
+	// VK_AMD_buffer_marker progress markers (KYTY_GPU_MARKERS=1, see CreateGpuMarkers).
+	bool                               gpu_markers_enabled                   = false;
+	bool                               device_coherent_memory_enabled        = false;
+	vk::Buffer                         gpu_marker_buffer                     = nullptr;
+	vk::DeviceMemory                   gpu_marker_memory                     = nullptr;
+	volatile uint32_t*                 gpu_marker_values                     = nullptr;
 	bool                               device_fault_enabled                  = false;
 	bool                               shader_device_clock_enabled           = false;
 	bool                               compute_subgroup_size_control_enabled = false;

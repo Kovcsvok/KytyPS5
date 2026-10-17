@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
@@ -750,6 +751,19 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 			graphics.device_fault_enabled = true;
 		}
 	}
+	vk::PhysicalDeviceCoherentMemoryFeaturesAMD coherent_memory {};
+	if (HasExtension(device_extensions, VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME)) {
+		vk::PhysicalDeviceCoherentMemoryFeaturesAMD supported_coherent {};
+		vk::PhysicalDeviceFeatures2                 coherent_query {};
+		coherent_query.pNext = &supported_coherent;
+		physical_device.getFeatures2(&coherent_query);
+		if (supported_coherent.deviceCoherentMemory) {
+			coherent_memory.deviceCoherentMemory     = VK_TRUE;
+			coherent_memory.pNext                    = const_cast<void*>(create_info.pNext);
+			create_info.pNext                        = &coherent_memory;
+			graphics.device_coherent_memory_enabled = true;
+		}
+	}
 	if (graphics.shader_image_int64_atomics_enabled) {
 		image_atomic_int64.pNext = const_cast<void*>(create_info.pNext);
 		image_atomic_int64.sparseImageInt64Atomics = VK_FALSE;
@@ -1167,6 +1181,17 @@ void WindowContext::CreateVulkan() {
 		if (HasExtension(available_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
 		}
+		// KYTY_GPU_MARKERS=1: GPU progress markers for device-loss triage on AMD, which has no
+		// NV checkpoints (diagnosticCheckpoints.cpp).
+		if (const char* markers = std::getenv("KYTY_GPU_MARKERS");
+		    markers != nullptr && markers[0] == '1' &&
+		    HasExtension(available_extensions, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) {
+			device_extensions.push_back(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+			graphic_ctx.gpu_markers_enabled = true;
+			if (HasExtension(available_extensions, VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME)) {
+				device_extensions.push_back(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
+			}
+		}
 		if (graphic_ctx.address_binding_messenger != nullptr &&
 		    HasExtension(available_extensions,
 		                 VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME)) {
@@ -1213,6 +1238,7 @@ void WindowContext::CreateVulkan() {
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");
 	}
+	CreateGpuMarkers(graphic_ctx);
 
 	render_context = std::make_unique<RenderContext>(graphic_ctx);
 	LibKernel::Memory::InstallGpuResources(render_context.get());

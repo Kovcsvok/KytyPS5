@@ -138,6 +138,19 @@ inline constexpr uint32_t WatchdogReportWords    = 64;
 inline constexpr uint32_t WatchdogReportSlots    = 1023;
 inline constexpr uint32_t WatchdogReportPhis     = 24; // header phi values per lane half
 
+// KYTY_SHADER_LOOP_WATCHDOG=1 (environment, read once; the name puts it in the program cache
+// signature): every program gets the loop watchdog, not only those that read memory through
+// device addresses. A guest loop that never ends on the host (a wave-size or memory-ordering
+// difference) then leaves after its iteration budget and reports itself instead of hanging the
+// GPU until the driver resets it.
+inline bool LoopWatchdogAllPrograms() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SHADER_LOOP_WATCHDOG");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 
 #endif // EMULATOR_SRC_GRAPHICS_SHADER_RECOMPILER_IR_BINDLESSBINDINGS_H_

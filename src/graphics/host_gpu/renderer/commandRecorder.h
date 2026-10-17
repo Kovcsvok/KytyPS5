@@ -297,6 +297,12 @@ public:
 	void endRendering() const {
 		Run([](vk::CommandBuffer command) { command.endRendering(); });
 	}
+	void writeBufferMarkerAMD(vk::PipelineStageFlagBits stage, vk::Buffer buffer,
+	                          vk::DeviceSize offset, uint32_t marker) const {
+		Run([=](vk::CommandBuffer command) {
+			command.writeBufferMarkerAMD(stage, buffer, offset, marker);
+		});
+	}
 	void setCheckpointNV(const void* marker) const {
 		Run([=](vk::CommandBuffer command) { command.setCheckpointNV(marker); });
 	}
