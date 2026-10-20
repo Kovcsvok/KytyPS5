@@ -142,7 +142,12 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
 	Recorder().beginRendering(rendering);
 	m_render_state = state;
-	m_rendering    = true;
+	for (auto& color: m_render_state.color_attachments) {
+		color.is_clear = false;
+	}
+	m_render_state.depth_stencil_attachment.depth_clear   = false;
+	m_render_state.depth_stencil_attachment.stencil_clear = false;
+	m_rendering                                           = true;
 }
 
 void CommandBuffer::EndRendering() const {

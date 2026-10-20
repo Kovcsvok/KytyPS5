@@ -103,6 +103,7 @@ public:
 	void PublishLabelAtCompletion(void* dst, uint64_t value, uint32_t bytes, bool clock);
 	void FlushForLabel();
 	void EmitGlobalBarrier();
+	void EmitLegacyGlobalBarrier();
 	void TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
 	                    uint32_t mode);

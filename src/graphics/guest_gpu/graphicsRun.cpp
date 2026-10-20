@@ -1799,6 +1799,14 @@ void CommandProcessor::EmitGlobalBarrier() {
 	CurrentBuffer().Recorder().pipelineBarrier2(dependency);
 }
 
+void CommandProcessor::EmitLegacyGlobalBarrier() {
+	// Upstream 70668fb dropped these barriers (PM4 flush events/releases); KYTY_LEGACY_GLOBAL_BARRIERS=1 restores them.
+	static auto& legacy = Common::LiveSwitches::Get("KYTY_LEGACY_GLOBAL_BARRIERS", 0);
+	if (legacy.load(std::memory_order_relaxed) != 0) {
+		EmitGlobalBarrier();
+	}
+}
+
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {
 	Sync::TriggerEopEventAtEndOfPipe(CurrentBuffer(), m_interrupt_event_id, interrupt_context_id);
 }
@@ -1818,7 +1826,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 		// CsPartialFlush, GsPartialFlush, PsPartialFlush.
 		case 0x00000007:
 		case 0x0000000f:
-		case 0x00000010: EmitGlobalBarrier(); break;
+		case 0x00000010: EmitLegacyGlobalBarrier(); break;
 		// CbDbDataWritebackInvalidate, CbDataWritebackInvalidate.
 		case 0x00000016:
 		case 0x00000031:
@@ -1826,7 +1834,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				EXIT("unknown event type: 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", event_type,
 				     event_index);
 			}
-			EmitGlobalBarrier();
+			EmitLegacyGlobalBarrier();
 			break;
 		// DbDataWritebackInvalidate, DbMetadataWritebackInvalidate, CbMetadataWritebackInvalidate.
 		case 0x0000002a:
@@ -1836,7 +1844,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 				EXIT("unknown event type: 0x%08" PRIx32 ", 0x%08" PRIx32 "\n", event_type,
 				     event_index);
 			}
-			EmitGlobalBarrier();
+			EmitLegacyGlobalBarrier();
 			break;
 		case 0x0000000d:
 		case 0x0000000e:
