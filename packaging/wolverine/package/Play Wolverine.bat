@@ -69,7 +69,7 @@ rem KYTY_SKIP_POPS_SHADERS=0 draws them (expect the combat crash).
 if not defined KYTY_SKIP_POPS_SHADERS set KYTY_SKIP_POPS_SHADERS=1
 rem Live switches for testing: write NAME=value lines into this file while the game runs.
 set KYTY_LIVE_FILE=%USERDATA%\kyty_live.txt
-type nul > "%KYTY_LIVE_FILE%"
+rem Keep existing kyty_live.txt
 rem F9 saves the last 40 frames into userdata\framedump (attach them to a bug report).
 set KYTY_GLITCH_CAPTURE=40
 rem Files in userdata\overrides replace the game's file of the same name without touching the
@@ -82,7 +82,7 @@ rem shader). Remove the --skip-shaders option below to run them.
 rem Ours: 4c582eb7/be2a9db1 draw a white plane in one building room, d6ec1c4b a white wedge on a
 rem rooftop (light volumes), 4d2a3a54 floods the screen orange in fights (a fight effect).
 rem Nothing visible goes missing without them.
-set "SKIP=--skip-shaders bad108e74fb72e9f,4e7f2c6bb9b158a1,8bfd230b9cd875a2,c4df2a00067e0666,dc76e1223a9bf673,e6d76d24f59f8015,4c582eb7319682a3,be2a9db103759bff,d6ec1c4ba883d308,4d2a3a54c74938ad"
+set "SKIP=--skip-shaders bad108e74fb72e9f,4e7f2c6bb9b158a1,8bfd230b9cd875a2,c4df2a00067e0666,dc76e1223a9bf673,e6d76d24f59f8015,4c582eb7319682a3,be2a9db103759bff,d6ec1c4ba883d308,4d2a3a54c74938ad,29be8047c4e86afe,fc0537b7278db60c,2ea3957af2daf690,b8b17176ff277f18,01ba288cccc11730,eabe1303d1488512"
 
 rem --amd-cpu (despite the name) replaces the guest's approximate VRSQRTPS with an exact value
 rem through a CPU exception per executed instruction. The PS5's CPU is AMD, so on an AMD PC the
@@ -113,3 +113,4 @@ if "%CODE%"=="0" (
   echo %LOG%
 )
 pause
+
