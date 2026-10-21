@@ -506,7 +506,7 @@ private:
 
 // KYTY_RESOURCE_MEMO=1 (a live switch, off by default): see ProgramCache::Materialize.
 bool ResourceMemoEnabled() {
-	static auto& enabled = Common::LiveSwitches::Get("KYTY_RESOURCE_MEMO", 0);
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_RESOURCE_MEMO", 1);
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
@@ -1366,7 +1366,8 @@ struct PipelineCache::ProgramCache {
 			return ShaderProgram {};
 		}
 		BufferCache::SetReadbackStatsShader(params.hash);
-		const auto user_data = std::span(params.user_data).first(params.user_data_count);
+		const auto       user_data = std::span(params.user_data).first(params.user_data_count);
+		ShaderReadChunks read_chunks(ShaderReadChunks::Mode());
 		{
 			KYTY_PROFILER_BLOCK("ProgramCache::BuildKey");
 			lookup_key.stage           = stage;
@@ -1386,7 +1387,7 @@ struct PipelineCache::ProgramCache {
 			lookup_key.function_code.clear();
 			if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 				ExpandShaderFunctions(params, user_data, input_info.wave_size,
-				                      lookup_key.function_code);
+				                      lookup_key.function_code, &read_chunks);
 			}
 		}
 		auto entry = programs.end();
@@ -1398,7 +1399,6 @@ struct PipelineCache::ProgramCache {
 			entry = programs.find(lookup_key);
 		}
 		NotePredictability(stage, entry != programs.end() ? &entry->second : nullptr, user_data);
-		ShaderReadChunks                 read_chunks(ShaderReadChunks::Mode());
 		ShaderRecompiler::IR::SrtRuntime runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
@@ -1774,12 +1774,13 @@ struct PipelineCache::ProgramCache {
 	// Shader function expansion decodes the shader and every callee, and a shader with table
 	// calls can be dispatched hundreds of times a frame; the expander keeps what it can reuse.
 	void ExpandShaderFunctions(const ShaderParams& params, std::span<const uint32_t> user_data,
-	                           uint32_t wave_size, std::vector<uint32_t>& expanded) {
+	                           uint32_t wave_size, std::vector<uint32_t>& expanded,
+	                           ShaderReadChunks* read_chunks) {
 		std::string reason;
 		if (!function_expander.Expand(
 		        params.code, params.Base(), user_data,
-		        [](uint64_t address, std::span<uint32_t> words) {
-			        return ReadShaderGuestMemoryRaw(nullptr, address, words);
+		        [read_chunks](uint64_t address, std::span<uint32_t> words) {
+			        return ReadShaderGuestMemoryRaw(read_chunks, address, words);
 		        },
 		        expanded, reason, wave_size)) {
 			static std::atomic<uint32_t> reports {0};
