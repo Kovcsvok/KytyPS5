@@ -995,7 +995,14 @@ uint32_t EmitReadClockRealtime64(ValueEmitContext& ctx) {
 	const auto high = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, clock, 0);
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, clock, 1);
-	constexpr uint32_t ClockShift = 3;
+	// A fixed 3 suited NVIDIA's 1 GHz clock only: on AMD (100 MHz) the guest saw time pass 8x
+	// too slowly, and Wolverine's GPU wait shader (0x7c5c0785877c0999) held every frame.
+	const uint32_t ClockShift = GetRealtimeClockShift();
+	if (ClockShift == 0u) {
+		const auto unscaled = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeConstruct, TypeU64(state), unscaled, low, high);
+		return unscaled;
+	}
 	const auto low_shifted = Binary(state, spv::OpShiftRightLogical, TypeU32(state), low,
 	                                ConstantU32(state, ClockShift));
 	const auto high_carried = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), high,

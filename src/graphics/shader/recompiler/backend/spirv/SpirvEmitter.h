@@ -21,6 +21,11 @@ struct HostImageFeatures {
 void              SetHostImageFeatures(const HostImageFeatures& features);
 HostImageFeatures GetHostImageFeatures();
 
+// Right shift from the host's device-scope shader clock to the guest's 100 MHz S_MEMREALTIME:
+// 3 for a 1 GHz clock (NVIDIA), 0 for a 100 MHz one (AMD). Set once by the device layer.
+void     SetRealtimeClockShift(uint32_t shift);
+uint32_t GetRealtimeClockShift();
+
 // Why a mesh program cannot run in passes (ShaderMeshInputInfo::passes), or nullptr.
 [[nodiscard]] const char* MeshPassesUnsupported(const IR::Program& program);
 

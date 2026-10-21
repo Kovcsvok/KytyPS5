@@ -448,6 +448,18 @@ HostImageFeatures GetHostImageFeatures() {
 	return {.min_lod = g_image_min_lod.load(std::memory_order_relaxed)};
 }
 
+namespace {
+std::atomic<uint32_t> g_realtime_clock_shift {3};
+} // namespace
+
+void SetRealtimeClockShift(uint32_t shift) {
+	g_realtime_clock_shift.store(shift, std::memory_order_relaxed);
+}
+
+uint32_t GetRealtimeClockShift() {
+	return g_realtime_clock_shift.load(std::memory_order_relaxed);
+}
+
 std::vector<uint32_t> EmitProgram(const IR::Program& program,
                                   ShaderStageInputInfo input_info) {
 	using namespace Emitter;

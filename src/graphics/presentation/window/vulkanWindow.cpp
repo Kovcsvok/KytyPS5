@@ -619,6 +619,23 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	    supported_features2.features.shaderResourceMinLod == VK_TRUE;
 	device_features.shaderResourceMinLod = shader_resource_min_lod ? VK_TRUE : VK_FALSE;
 	ShaderRecompiler::Spirv::SetHostImageFeatures({.min_lod = shader_resource_min_lod});
+	{
+		// S_MEMREALTIME counts at 100 MHz. The device-scope shader clock runs at the timestamp
+		// rate here (NVIDIA 1 GHz, AMD 100 MHz): shift by the nearest power of two of the ratio.
+		// KYTY_SHADER_CLOCK_SHIFT=N overrides it (part of the program cache signature).
+		const double period_ns = physical_device.getProperties().limits.timestampPeriod;
+		uint32_t     shift     = 0;
+		for (double ratio = period_ns > 0.0 ? 10.0 / period_ns : 1.0; ratio >= 1.5 && shift < 8;
+		     ratio /= 2.0) {
+			shift++;
+		}
+		if (const char* value = std::getenv("KYTY_SHADER_CLOCK_SHIFT"); value != nullptr) {
+			shift = static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) & 15u;
+		}
+		ShaderRecompiler::Spirv::SetRealtimeClockShift(shift);
+		std::printf("Shader clock: timestamp period %.3f ns, S_MEMREALTIME shift %u\n", period_ns,
+		            shift);
+	}
 	LOGF("Vulkan shaderResourceMinLod (IMAGE_SAMPLE*_CL): %s\n",
 	     shader_resource_min_lod ? "true" : "false");
 	device_features.independentBlend                     = VK_TRUE;
