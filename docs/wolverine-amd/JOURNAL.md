@@ -98,3 +98,7 @@ Kísérleti kapcsolók: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=1` (élő, host: az �
 ## 2026-10-21 — Opus — T7x A (placeholder) eredmény
 `run_2026-10-21_224533.log`: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=1` mellett túljutott a korábbi crash-ponton; sok POPS draw (0x4fa6faa57bc9a97a, 0xfcfb268bca438b2d) `[done]`. Később séta közben device lost: `HUNG? DrawIndex args=256,36 VS 0x845545cc4ff30ff8 / PS 0x50478b85c50aad13` – ez a PS is bindless storage író (T4fix-ben „dropped”), és a régi HangMarkers-naplókban is gyanúsított volt. Mozgás közben 5 FPS-ig esik (a T7 program-cache csonka volt → sok fordítás), állva ~23.
 Értelmezés: a 0x2464-es vér-draw a valódi célképpel fagy, placeholderrel nem (célkép-probléma); a 0x5047 placeholderrel is fagy (shader-szintű gyanú, pl. helper/exact-mode ciklus). Következő: B (`KYTY_SHADER_BALLOT_NO_HELPERS=1`, valódi írás).
+
+## 2026-10-21 — Opus — T7x B eredmény + placeholder=2
+B (`KYTY_SHADER_BALLOT_NO_HELPERS=1`, valódi írás): azonnal device lost a ráugrásnál, a célkép ismét a HDR target (`image 542 ... is a render target`). → A helper-elmélet a vér-draw-ra cáfolva; a fagyás a **render targetbe írás** (A: placeholderrel nincs fagyás).
+Új mód: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=2` (élő): csak a render targetként is használt képek írása megy a placeholderbe, a többi (pl. a két 1664x936 RGBA16F) valódi. Teszt: lunge + séta; figyelni a 0x5047-es véletlen fagyást is.

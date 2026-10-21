@@ -912,13 +912,15 @@ bool RenderExecutor::ResolveBindlessKey(BindlessTable::Heap& heap, uint32_t key)
 		table.SetTranslation(heap, key, 0u);
 		return false;
 	}
-	// KYTY_BINDLESS_STORAGE_PLACEHOLDER=1 (live, research, read when a key settles): bindless
+	// KYTY_BINDLESS_STORAGE_PLACEHOLDER (live, research, read when a key settles): 1 = bindless
 	// writes go to the 1x1 storage placeholder and the shader stays the same, to tell a hang in
-	// the written image from one in the shader itself.
+	// the written image from one in the shader itself; 2 = only writes to render targets do.
+	// Wolverine 2026-10-21: the POPS blood draw loses the device writing the HDR color buffer it
+	// renders to (even in GENERAL), and not with the placeholder.
 	static auto& storage_placeholder =
 	    Common::LiveSwitches::Get("KYTY_BINDLESS_STORAGE_PLACEHOLDER", 0);
-	if (BindlessTable::IsStorage(heap.binding) &&
-	    storage_placeholder.load(std::memory_order_relaxed) != 0) {
+	const auto placeholder_mode = storage_placeholder.load(std::memory_order_relaxed);
+	if (BindlessTable::IsStorage(heap.binding) && placeholder_mode == 1) {
 		stats.shape++;
 		table.SetTranslation(heap, key, 0u);
 		return false;
@@ -932,8 +934,17 @@ bool RenderExecutor::ResolveBindlessKey(BindlessTable::Heap& heap, uint32_t key)
 		return false;
 	}
 	const bool storage = BindlessTable::IsStorage(heap.binding);
-	if (storage && (image->info.IsDepth() || image->info.IsBlock())) {
-		// No storage view: its writes go to the storage placeholder.
+	if (storage && (image->info.IsDepth() || image->info.IsBlock() ||
+	                (placeholder_mode == 2 &&
+	                 (image->usage.render_target || image->binding.is_target)))) {
+		// No storage view (or KYTY_BINDLESS_STORAGE_PLACEHOLDER=2 and a render target): its
+		// writes go to the storage placeholder.
+		static std::atomic<uint32_t> reported = 0;
+		if (!image->info.IsDepth() && !image->info.IsBlock() && reported.fetch_add(1) < 16) {
+			std::printf("Bindless storage: key %u -> render target image %u (guest 0x%016" PRIx64
+			            ") left to the placeholder\n",
+			            key, binding.image_id.index, image->info.data.address);
+		}
 		stats.shape++;
 		table.SetTranslation(heap, key, 0u);
 		return false;
