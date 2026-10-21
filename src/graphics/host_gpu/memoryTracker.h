@@ -48,9 +48,13 @@ public:
 			}
 		});
 	}
-	// Removes protection from a range and flushes GPU-owned data when required.
+	// Removes protection from a range and flushes GPU-owned data when required. With widen (a
+	// power of two, in bytes), the other tracked pages of the aligned block around the range that
+	// hold no GPU-written bytes become CPU-dirty too: a game writing a buffer front to back then
+	// takes one fault per block instead of one per page, for an upload of the pages it skipped.
 	template <typename Flush>
-	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {
+	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush,
+	                      uint64_t widen = 0) noexcept {
 		static_assert(std::is_invocable_v<Flush&>);
 		CheckNotInUploadCallback();
 
@@ -68,6 +72,23 @@ public:
 					return true;
 				}
 				manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
+				if (widen > TRACKER_PAGE_SIZE && widen <= TRACKER_REGION_SIZE) {
+					const uint64_t begin = offset / widen * widen;
+					const uint64_t end   = (offset + bytes + widen - 1) / widen * widen;
+					uint64_t       run   = begin;
+					for (uint64_t page = begin; page <= end; page += TRACKER_PAGE_SIZE) {
+						if (page < end &&
+						    !manager->IsModified<DirtySource::Gpu>(page, TRACKER_PAGE_SIZE) &&
+						    !manager->IsModified<DirtySource::Cpu>(page, TRACKER_PAGE_SIZE)) {
+							continue;
+						}
+						if (page > run) {
+							manager->ChangeState<DirtySource::Cpu, true>(
+							    manager->GetCpuAddr() + run, page - run);
+						}
+						run = page + TRACKER_PAGE_SIZE;
+					}
+				}
 				return false;
 			}();
 			if (should_flush) {

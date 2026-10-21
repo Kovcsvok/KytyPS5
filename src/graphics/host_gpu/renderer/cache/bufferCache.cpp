@@ -733,13 +733,13 @@ BufferCache::~BufferCache() {
 	m_buffers.clear();
 }
 
-void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
+void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size, uint64_t widen) {
 	KYTY_PROFILER_FUNCTION();
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
-	m_memory_tracker.InvalidateRegion(vaddr, size,
-	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
+	m_memory_tracker.InvalidateRegion(
+	    vaddr, size, [this, vaddr, size] { ReadMemory(vaddr, size, true); }, widen);
 }
 
 bool BufferCache::WriteClean(uint64_t vaddr, const void* data, uint64_t size) {
