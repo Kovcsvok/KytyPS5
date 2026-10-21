@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
@@ -1075,6 +1076,15 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return;
 	}
 	if (op == IR::ValueOpcode::ImageRead) {
+		static const bool pops_zero_load = [] {
+			const char* value = std::getenv("KYTY_SHADER_POPS_ZERO_LOAD");
+			return value != nullptr && value[0] == '1';
+		}();
+		if (pops_zero_load && state.program.stage == ShaderType::Pixel &&
+		    image.resource_class == IR::ImageResourceClass::Storage) {
+			ctx.Define(inst, ConstantU32CompositeZero(state, 4));
+			return;
+		}
 		const auto  dimension      = image.dimension;
 		const auto& dimension_info = ImageDimensionInfoFor(dimension);
 		const auto  numeric_class  = image.numeric_class;
@@ -1104,6 +1114,13 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return;
 	}
 	if (op == IR::ValueOpcode::ImageWrite) {
+		static const bool pops_no_store = [] {
+			const char* value = std::getenv("KYTY_SHADER_POPS_NO_STORE");
+			return value != nullptr && value[0] == '1';
+		}();
+		if (pops_no_store && state.program.stage == ShaderType::Pixel) {
+			return;
+		}
 		const bool uint_image = image.numeric_class == Prospero::TextureNumericClass::Uint;
 		const auto dimension  = image.dimension;
 		EmitIfCondition(state, ctx.Arg(inst, 3), [&]() {

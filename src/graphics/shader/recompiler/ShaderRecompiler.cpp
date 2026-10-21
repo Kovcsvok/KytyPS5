@@ -864,19 +864,48 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		const char* value = std::getenv("KYTY_SKIP_POPS_SHADERS");
 		return value != nullptr && value[0] == '1';
 	}();
-	if (skip_pops && options.stage == ShaderType::Pixel &&
+	static const auto pops_allow_all_and_hashes = [] {
+		bool                  allow_all = false;
+		std::vector<uint64_t> hashes;
+		if (const char* raw = std::getenv("KYTY_POPS_ALLOW"); raw != nullptr && *raw != '\0') {
+			std::string_view list(raw);
+			if (list == "all" || list == "*") {
+				allow_all = true;
+			} else {
+				size_t start = 0;
+				while (start < list.size()) {
+					const auto end = std::min(list.find(',', start), list.size());
+					if (end > start) {
+						hashes.push_back(std::strtoull(
+						    std::string(list.substr(start, end - start)).c_str(), nullptr, 0));
+					}
+					start = end + 1;
+				}
+			}
+		}
+		return std::pair {allow_all, std::move(hashes)};
+	}();
+	if (options.stage == ShaderType::Pixel &&
 	    std::ranges::any_of(decoded.instructions, [](const Decoder::Instruction& inst) {
 		    const auto pops = [](const Decoder::Operand& operand) {
 			    return operand.kind == Decoder::OperandKind::PopsExitingWaveId;
 		    };
 		    return pops(inst.src0) || pops(inst.src1) || pops(inst.src2) || pops(inst.src3);
 	    })) {
+		const bool allowed =
+		    pops_allow_all_and_hashes.first ||
+		    std::ranges::find(pops_allow_all_and_hashes.second, options.shader_hash) !=
+		        pops_allow_all_and_hashes.second.end();
+		if (skip_pops && !allowed) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "POPS: skipping pixel shader 0x{:016x} (KYTY_SKIP_POPS_SHADERS=1)\n",
+			    options.shader_hash));
+			TranslateResult skipped;
+			skipped.unsupported = true;
+			return skipped;
+		}
 		Log::WriteToConsoleAndLog(fmt::format(
-		    "POPS: skipping pixel shader 0x{:016x} (KYTY_SKIP_POPS_SHADERS=1)\n",
-		    options.shader_hash));
-		TranslateResult skipped;
-		skipped.unsupported = true;
-		return skipped;
+		    "POPS: compiling pixel shader 0x{:016x} (allowed={})\n", options.shader_hash, allowed));
 	}
 
 	std::string decoded_dump;

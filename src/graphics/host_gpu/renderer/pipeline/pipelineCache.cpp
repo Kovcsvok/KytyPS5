@@ -506,7 +506,7 @@ private:
 
 // KYTY_RESOURCE_MEMO=1 (a live switch, off by default): see ProgramCache::Materialize.
 bool ResourceMemoEnabled() {
-	static auto& enabled = Common::LiveSwitches::Get("KYTY_RESOURCE_MEMO", 1);
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_RESOURCE_MEMO", 0);
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 

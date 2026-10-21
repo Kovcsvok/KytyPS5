@@ -291,15 +291,34 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
       m_buffer_cache(buffer_cache),
       m_readback_linear_images(Config::ReadbackLinearImagesEnabled()) {
 	if (m_graphics.CanReportMemoryUsage()) {
-		constexpr int64_t GiB = 1024ll * 1024 * 1024;
+		constexpr int64_t MiB = 1024ll * 1024;
+		constexpr int64_t GiB = 1024ll * MiB;
 		const auto        budget =
 		    static_cast<int64_t>(std::min<uint64_t>(m_graphics.GetTotalMemoryBudget(), INT64_MAX));
-		const auto threshold = std::min<int64_t>(budget, 8 * GiB);
-		m_pressure_gc_memory = static_cast<uint64_t>(
-		    std::max<int64_t>(std::min(budget - 6 * threshold / 10, budget - GiB), GiB + GiB / 2));
-		m_critical_gc_memory = static_cast<uint64_t>(
-		    std::max<int64_t>(std::min(budget - 2 * threshold / 10, budget - GiB / 2), 3 * GiB));
-		m_trigger_gc_memory = static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
+		const char* prop_env     = std::getenv("KYTY_VRAM_GC_PROPORTIONAL");
+		const bool  proportional = prop_env == nullptr || prop_env[0] != '0';
+		if (proportional) {
+			m_trigger_gc_memory =
+			    static_cast<uint64_t>(std::max<int64_t>(budget * 40 / 100, 512 * MiB));
+			m_pressure_gc_memory = static_cast<uint64_t>(
+			    std::max<int64_t>(std::min(budget * 70 / 100, budget - GiB), GiB + GiB / 2));
+			m_critical_gc_memory = static_cast<uint64_t>(
+			    std::max<int64_t>(std::min(budget * 88 / 100, budget - GiB / 2), 3 * GiB));
+		} else {
+			const auto threshold = std::min<int64_t>(budget, 8 * GiB);
+			m_pressure_gc_memory = static_cast<uint64_t>(std::max<int64_t>(
+			    std::min(budget - 6 * threshold / 10, budget - GiB), GiB + GiB / 2));
+			m_critical_gc_memory = static_cast<uint64_t>(std::max<int64_t>(
+			    std::min(budget - 2 * threshold / 10, budget - GiB / 2), 3 * GiB));
+			m_trigger_gc_memory =
+			    static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
+		}
+		std::printf("TextureCache: VRAM budget %" PRId64 " MiB, GC levels trigger=%" PRIu64
+		            " MiB pressure=%" PRIu64 " MiB critical=%" PRIu64 " MiB (%s)\n",
+		            budget / MiB, m_trigger_gc_memory / static_cast<uint64_t>(MiB),
+		            m_pressure_gc_memory / static_cast<uint64_t>(MiB),
+		            m_critical_gc_memory / static_cast<uint64_t>(MiB),
+		            proportional ? "proportional" : "legacy");
 	}
 }
 

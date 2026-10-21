@@ -194,6 +194,15 @@ option(KYTY_BUILD_LAUNCHER "Build Qt launcher" ON)
 config_compiler_and_linker()
 
 add_subdirectory("${KYTY_THIRD_PARTY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/3rdparty")
+
+set(KYTY_HOST_ARCH "" CACHE STRING "Target host CPU architecture (e.g. x86-64-v3)")
+if(KYTY_HOST_ARCH)
+	if(KYTY_CLANG_CL)
+		add_compile_options("/clang:-march=${KYTY_HOST_ARCH}")
+	else()
+		add_compile_options("-march=${KYTY_HOST_ARCH}")
+	endif()
+endif()
 add_subdirectory("${KYTY_SOURCE_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/common")
 
 file(GLOB kyty_emulator_src CONFIGURE_DEPENDS

@@ -848,6 +848,7 @@ bool AffectsTranslation(std::string_view name) {
 	    "KYTY_MESH_CULL",                  "KYTY_NO_FLOAT_CONTROLS",
 	    "KYTY_SKIP_BVH_DISPATCHES",        "KYTY_VALIDATE_IR",
 	    "KYTY_WATCH_EXTENTS",             "KYTY_VS_LANE_WRAP32",
+	    "KYTY_SKIP_POPS_SHADERS",         "KYTY_POPS_ALLOW",
 	};
 	for (const auto known: Known) {
 		if (name == known) {
