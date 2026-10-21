@@ -1038,8 +1038,8 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  image_arg = inst.Arg(0);
 	ctx.ResourceIndex(image_arg, IR::ValueOpcode::GetImageResource);
 	const auto& image   = state.program.info.images.at(mem.resource);
-	// A pixel shader's bindless write the storage arrays cannot take (atomics, cube and 3D images,
-	// or KYTY_SHADER_BINDLESS_STORAGE_WRITES=0) is dropped, and an atomic returns 0: through the
+	// A pixel shader's bindless write the storage arrays do not take (KYTY_SHADER_BINDLESS_STORAGE_
+	// WRITES unset or 0, atomics, cube and 3D images) is dropped, and an atomic returns 0: through the
 	// storage-typed alias of a sampled array AMD hosts corrupt nearby textures and then lose the
 	// device (Wolverine's POPS blood shaders, e.g. 0x2464e975d88b7f15, 2026-10-21).
 	if (image.bindless && image.resource_class == IR::ImageResourceClass::Storage &&

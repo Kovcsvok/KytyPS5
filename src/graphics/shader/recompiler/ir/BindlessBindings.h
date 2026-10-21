@@ -116,17 +116,18 @@ inline std::atomic<bool>& BindlessStorageAvailable() {
 	return available;
 }
 
-// KYTY_SHADER_BINDLESS_STORAGE_WRITES (environment, read once): unset = 2D and 2D-array bindless
-// image writes go through the storage arrays (their images stay GENERAL); 0 = a pixel shader's
-// bindless writes are dropped (3ddfd07); 1 = the old storage-typed alias of the sampled arrays
-// (AMD hosts corrupt textures and lose the device: Wolverine's POPS blood shaders).
+// KYTY_SHADER_BINDLESS_STORAGE_WRITES (environment, read once): 0 (the default) = a pixel
+// shader's bindless writes are dropped (3ddfd07); 2 = 2D and 2D-array bindless image writes go
+// through the storage arrays (their images stay GENERAL); 1 = the old storage-typed alias of the
+// sampled arrays. Wolverine's POPS blood draw still loses AMD devices with 1 and 2 whenever it
+// writes a real image (2026-10-21, T7), so 0 stays the default.
 inline int BindlessStorageWritesMode() {
 	static const int mode = [] {
 		const char* value = std::getenv("KYTY_SHADER_BINDLESS_STORAGE_WRITES");
 		if (value == nullptr || value[0] == '\0') {
-			return 2;
+			return 0;
 		}
-		return value[0] == '0' ? 0 : value[0] == '1' ? 1 : 2;
+		return value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
 	}();
 	return mode;
 }

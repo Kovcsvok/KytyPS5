@@ -104,3 +104,8 @@ B (`KYTY_SHADER_BALLOT_NO_HELPERS=1`, valódi írás): azonnal device lost a rá
 Új mód: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=2` (élő): csak a render targetként is használt képek írása megy a placeholderbe, a többi (pl. a két 1664x936 RGBA16F) valódi. Teszt: lunge + séta; figyelni a 0x5047-es véletlen fagyást is.
 Upstream `2864818` (AMD float min/max natívan, náluk a nehéz compute shaderek 37–59%-kal gyorsabbak): perf, nem crash-javítás. A forkban már natív NMin/NMax volt egy nulla-javító select-tel; átvéve az AMD-s rövidítés (`SetHostNativeFloatMinMax`, vendor 0x1002, `KYTY_EMULATED_FLOAT_MIN_MAX=1` kikapcsolja). Shader-fordítást érint → új program-cache.
 `db93f06` CI kész → `C:\Games\Wolverine-AMD-T7y` (`Test T7 RT Placeholder.bat`, placeholder=2, 3bf3d11 cache).
+
+## 2026-10-21 — Opus — T7y (placeholder=2): crash ugyanott → alapértelmezés vissza
+`run_2026-10-21_230418.log`: a HDR target (948) a placeholderbe ment, a valódi célok csak a két 1664x936 RGBA16F (972, 85) és egy 1024x1024 R16F (1264) – mégis fagy a `1280`-as blood draw. → **Bármely valódi kép írása fagy**, csak a 1x1 placeholder nem (A). A régi RGD (`C:\KytyDiagnostics\rgd\lunge1.txt`) szerint a fagyáskor nincs futó shader, egy barrier áll → inkább tömörítési metaadat-sérülés / fixed-function hang, mint shader-ciklus.
+Döntés: `KYTY_SHADER_BINDLESS_STORAGE_WRITES` alapértelmezése **0** (írás eldobva, mint 3ddfd07/T5w – stabil); a T7 kód `=2`-vel marad kutatásra. A következő build (min/max átvétel + ez) a játszható változat.
+Következő kutatási lépés (T7): RGD Hardware Crash Analysis a `=2` beállítással (execution marker + in-flight shader), illetve a storage nézet formátumának / DCC-jének ellenőrzése.
