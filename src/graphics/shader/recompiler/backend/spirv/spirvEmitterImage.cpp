@@ -5,6 +5,7 @@
 #include "graphics/shader/recompiler/frontend/decode/ImageOps.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -1037,6 +1038,27 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto  image_arg = inst.Arg(0);
 	ctx.ResourceIndex(image_arg, IR::ValueOpcode::GetImageResource);
 	const auto& image   = state.program.info.images.at(mem.resource);
+	// KYTY_SHADER_BINDLESS_STORAGE_WRITES=1 (environment) keeps them: a pixel shader's write to a
+	// bindless image goes through a storage-image array aliased onto set 1's sampled-image binding
+	// (BindlessTable has no storage arrays) whose images stay in SHADER_READ_ONLY_OPTIMAL. AMD hosts
+	// corrupt nearby textures and then lose the device (Wolverine's POPS blood shaders, e.g.
+	// 0x2464e975d88b7f15, 2026-10-21), so the writes are dropped and atomics return 0.
+	static const bool bindless_storage_writes = [] {
+		const char* value = std::getenv("KYTY_SHADER_BINDLESS_STORAGE_WRITES");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (!bindless_storage_writes && image.bindless && state.program.stage == ShaderType::Pixel &&
+	    (op == IR::ValueOpcode::ImageWrite || image_info.access == IR::ImageAccess::Atomic)) {
+		static std::atomic<uint32_t> reported = 0;
+		if (reported.fetch_add(1) < 16) {
+			std::printf("Bindless storage: dropped a pixel shader write (shader 0x%016llx)\n",
+			            static_cast<unsigned long long>(state.program.shader_hash));
+		}
+		if (op != IR::ValueOpcode::ImageWrite) {
+			ctx.Define(inst, image.atomic64 ? ConstantU64(state, 0) : ConstantU32(state, 0));
+		}
+		return;
+	}
 	state.bindless_slot = image.bindless ? BindlessSlot(ctx, image, image_arg) : 0u;
 	state.bindless_sampler_slot = 0u;
 	if (image_info.needs_sampler && inst.NumArgs() > 1u &&
