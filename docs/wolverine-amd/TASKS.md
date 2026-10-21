@@ -44,3 +44,6 @@ Ismert: a CPU a GPU label-jére vár. A New Game (Trask Outpost) átvezető alat
 ## T7 – Valódi bindless storage image támogatás (Opus) [KÓD KÉSZ, TESZTELENDŐ]
 Ok: a `DefineBindlessImages` a bindless storage image-hez `Sampled=2` tömböt deklarál a set 1 sampled bindingjére; a `BindlessTable`-ben nincs storage tömb, a képek `SHADER_READ_ONLY_OPTIMAL`-ban vannak. `3ddfd07` óta a pixel shader írásai kimaradnak (crash megszűnt, de a vérfolt villog/rossz).
 Terv: 1) `BindlessTable`: `eStorageImage` tömbök (2D, 2DArray) ugyanazzal a slot-indexszel; storage-képes képekhez storage nézet (sRGB → UNORM nézet, `MUTABLE_FORMAT`), egyébként placeholder. 2) Az írt bindless képek layoutja `GENERAL` (a sampled descriptor is `GENERAL`-lal), STORAGE usage. 3) Emitter: storage tömb a saját bindingre. 4) Írás után a kép GPU-módosítottnak jelölése (texture cache). Kapcsoló: `KYTY_SHADER_BINDLESS_STORAGE_WRITES`.
+
+## T8 – Árnyék-villogás [NYITOTT]
+Az árnyékok gyorsan váltakozva eltűnnek/visszajönnek (POPS-tól és a laphiba-szélesítéstől független, a régebbi buildekben is volt). `KYTY_KEEP_GPU_IMAGES=1` nem segít, fekete foltot okoz. Nyom: `textureCache.cpp` ~1580 komment (1664x936 GPU-írt képek minden második frame-ben újrafeltöltve a buffer cache-ből). Következő: `KYTY_IMAGE_STATS=1`/feltöltés-statisztika egy árnyékos jelenetben, F9 frame-dump.
