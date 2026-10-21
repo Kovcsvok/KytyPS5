@@ -94,3 +94,7 @@ Javítás (`renderDraw.cpp` `AcquireRenderTargets`): ha a target `bindless_stora
 Kísérleti kapcsolók: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=1` (élő, host: az írás az 1x1 placeholderbe megy, a shader ugyanaz) és `KYTY_SHADER_BALLOT_NO_HELPERS=1` (env, PS ballotok kihagyják a helper invocationöket; új program-cache).
 `KYTY_KEEP_GPU_IMAGES=1` (élő, T5w-ben): az árnyék-villogás marad, és fekete folt jelenik meg időnként → visszaállítva 0-ra. Az árnyék-villogás külön feladat (T8).
 `a3a3543` CI kész → `C:\Games\Wolverine-AMD-T7x`: `Test A Placeholder.bat` (userdata-a, 3bf3d11 cache, `KYTY_BINDLESS_STORAGE_PLACEHOLDER=1` a live fájlban) és `Test B NoHelpers.bat` (userdata-b, `KYTY_SHADER_BALLOT_NO_HELPERS=1`, friss cache).
+
+## 2026-10-21 — Opus — T7x A (placeholder) eredmény
+`run_2026-10-21_224533.log`: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=1` mellett túljutott a korábbi crash-ponton; sok POPS draw (0x4fa6faa57bc9a97a, 0xfcfb268bca438b2d) `[done]`. Később séta közben device lost: `HUNG? DrawIndex args=256,36 VS 0x845545cc4ff30ff8 / PS 0x50478b85c50aad13` – ez a PS is bindless storage író (T4fix-ben „dropped”), és a régi HangMarkers-naplókban is gyanúsított volt. Mozgás közben 5 FPS-ig esik (a T7 program-cache csonka volt → sok fordítás), állva ~23.
+Értelmezés: a 0x2464-es vér-draw a valódi célképpel fagy, placeholderrel nem (célkép-probléma); a 0x5047 placeholderrel is fagy (shader-szintű gyanú, pl. helper/exact-mode ciklus). Következő: B (`KYTY_SHADER_BALLOT_NO_HELPERS=1`, valódi írás).
