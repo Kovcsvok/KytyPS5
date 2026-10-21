@@ -1069,19 +1069,33 @@ uint32_t ValueEmitContext::HalfArg(const IR::Inst& inst, size_t index, uint32_t 
 uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	const auto ballot_type = TypeU32Vector(state, 4);
 	const auto scope       = ConstantU32(state, spv::ScopeSubgroup);
-	const auto low         = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, low, scope,
-	                          other_half == nullptr || half == 0 ? Def(predicate)
-	                                                             : other_half->Def(predicate));
+	// KYTY_SHADER_BALLOT_NO_HELPERS=1 (DefineModule): helper invocations vote false.
+	const auto live = [&](uint32_t value) {
+		if (state.helper_invocation_variable == 0) {
+			return value;
+		}
+		const auto helper = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeBool(state), helper,
+		                          state.helper_invocation_variable);
+		const auto not_helper = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), not_helper, helper);
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), result, value, not_helper);
+		return result;
+	};
+	const auto low_vote = live(other_half == nullptr || half == 0 ? Def(predicate)
+	                                                              : other_half->Def(predicate));
+	const auto low      = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, low, scope, low_vote);
 	if (other_half == nullptr) {
 		return low;
 	}
+	const auto high_vote = live(half == 1 ? Def(predicate) : other_half->Def(predicate));
 	const auto high      = state.builder.AllocateId();
 	const auto low_word  = state.builder.AllocateId();
 	const auto high_word = state.builder.AllocateId();
 	const auto ballot    = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, high, scope,
-	                          half == 1 ? Def(predicate) : other_half->Def(predicate));
+	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, high, scope, high_vote);
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low_word, low, 0);
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high_word, high, 0);
 	state.builder.AddFunction(spv::OpCompositeConstruct, ballot_type, ballot, low_word, high_word,

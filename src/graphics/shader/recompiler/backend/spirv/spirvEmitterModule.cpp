@@ -786,6 +786,20 @@ void DefineModule(EmitterState& state) {
 	state.interface_variables.reserve(state.program.info.inputs.size() +
 	                                  state.program.info.outputs.size());
 	DefineInputs(state);
+	// KYTY_SHADER_BALLOT_NO_HELPERS=1 (environment, research): pixel shader ballots leave out helper
+	// invocations. The guest's exec starts without its helper lanes, the emulated one with them;
+	// a loop that clears ballot bits until none is left (Wolverine's POPS blood shaders) never ends
+	// if the host disables helpers inside it.
+	static const bool ballot_no_helpers = [] {
+		const char* value = std::getenv("KYTY_SHADER_BALLOT_NO_HELPERS");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (ballot_no_helpers && state.program.stage == ShaderType::Pixel) {
+		state.helper_invocation_variable = DefineInterfaceVariable(
+		    state, TypeBool(state), spv::StorageClassInput, "gl_HelperInvocation");
+		state.builder.AddAnnotation(spv::OpDecorate, state.helper_invocation_variable,
+		                            spv::DecorationBuiltIn, spv::BuiltInHelperInvocation);
+	}
 	DefineOutputs(state);
 	DefineTessellationInterfaces(state);
 	DefineDescriptors(state);

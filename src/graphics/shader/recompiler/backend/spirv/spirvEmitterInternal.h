@@ -146,6 +146,8 @@ struct EmitterState {
 	uint32_t                                         bindless_slot                 = 0;
 	uint32_t                                         bindless_sampler_variable     = 0;
 	uint32_t                                         bindless_sampler_slot         = 0;
+	// Pixel stage, KYTY_SHADER_BALLOT_NO_HELPERS=1: the HelperInvocation input (ValueEmitContext::Ballot).
+	uint32_t                                         helper_invocation_variable    = 0;
 	uint32_t                   sampler_variable                      = 0;
 	uint32_t                   main_func                             = 0;
 	uint32_t                   mesh_guest_func                       = 0;

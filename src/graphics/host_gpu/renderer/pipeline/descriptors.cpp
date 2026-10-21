@@ -912,6 +912,17 @@ bool RenderExecutor::ResolveBindlessKey(BindlessTable::Heap& heap, uint32_t key)
 		table.SetTranslation(heap, key, 0u);
 		return false;
 	}
+	// KYTY_BINDLESS_STORAGE_PLACEHOLDER=1 (live, research, read when a key settles): bindless
+	// writes go to the 1x1 storage placeholder and the shader stays the same, to tell a hang in
+	// the written image from one in the shader itself.
+	static auto& storage_placeholder =
+	    Common::LiveSwitches::Get("KYTY_BINDLESS_STORAGE_PLACEHOLDER", 0);
+	if (BindlessTable::IsStorage(heap.binding) &&
+	    storage_placeholder.load(std::memory_order_relaxed) != 0) {
+		stats.shape++;
+		table.SetTranslation(heap, key, 0u);
+		return false;
+	}
 	auto binding = ResolveTexture(heap.resource, value);
 	auto& texture_cache = m_context.GetTextureCache();
 	auto* image = texture_cache.m_slot_images.try_get(binding.image_id);
