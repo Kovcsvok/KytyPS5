@@ -40,3 +40,7 @@ Elvégzett előkészületek:
 
 ## T6 – Átvezetők 1 FPS (kutatás) [NYITOTT]
 Ismert: a CPU a GPU label-jére vár. A New Game (Trask Outpost) átvezető alatt a naplóban: `Label waits (5 s): suspended 220–349, forwardable 0, forwarded 236–302`. Profilozz egy átvezetőt (`tracy-capture`), és nézd meg, melyik várakozás dominál (`CommandScheduler::Wait`, `WaitRegMem`, `Finish`).
+
+## T7 – Valódi bindless storage image támogatás (Opus) [NYITOTT]
+Ok: a `DefineBindlessImages` a bindless storage image-hez `Sampled=2` tömböt deklarál a set 1 sampled bindingjére; a `BindlessTable`-ben nincs storage tömb, a képek `SHADER_READ_ONLY_OPTIMAL`-ban vannak. `3ddfd07` óta a pixel shader írásai kimaradnak (crash megszűnt, de a vérfolt villog/rossz).
+Terv: 1) `BindlessTable`: `eStorageImage` tömbök (2D, 2DArray) ugyanazzal a slot-indexszel; storage-képes képekhez storage nézet (sRGB → UNORM nézet, `MUTABLE_FORMAT`), egyébként placeholder. 2) Az írt bindless képek layoutja `GENERAL` (a sampled descriptor is `GENERAL`-lal), STORAGE usage. 3) Emitter: storage tömb a saját bindingre. 4) Írás után a kép GPU-módosítottnak jelölése (texture cache). Kapcsoló: `KYTY_SHADER_BINDLESS_STORAGE_WRITES`.

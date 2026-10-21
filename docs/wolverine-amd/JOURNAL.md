@@ -69,3 +69,5 @@ A „T4fix-teszt” valójában a `T3b`-ben futott (POPS skip, `run_2026-10-21_2
 
 ## 2026-10-21 — Opus — T4fix (3ddfd07) eredmény
 `Test POPS Fix.bat` (`KYTY_SKIP_POPS_SHADERS=0`, 41 POPS shader fordítva): **nincs crash, nincs talaj-villogás, van vérfröccsenés** (`run_2026-10-21_210508.log`, exit 0). Kihagyott bindless storage írás: `0x8e9120bea897cb4a`, `0x2464e975d88b7f15`, `0x50478b85c50aad13` (ez utóbbi korábban szintén „hang suspect” volt). Új jelenség: vöröses folt Wolverine hátán/karján a vérrel – lehet a játék saját vérfoltja, vagy a kihagyott maszk-írás mellékhatása (tisztázandó). A felhasználó a `KYTY_PIPELINE_CACHE_CHECKPOINT_S`-t állítgatta (ez csak a driver-cache mentési gyakorisága; visszaállítva 0-ra).
+Pontosítás (felhasználó): a vörösség **hiba** – a vérfolt villog, el-eltűnik, fura színű; a levegőben lógó vércseppek is gyanúsak. → A kihagyott bindless írás mellékhatása (a vér-maszk/akkumuláció nem frissül), a valódi megoldás a T7.
+`a7fdf95` CI kész → `C:\Games\Wolverine-AMD-T5w` (`Test Fault Widen.bat`, a 3ddfd07 program-cache-ét használja revízió-felülírással; `KYTY_FAULT_WIDEN_KB` élőben 0/64/256).
