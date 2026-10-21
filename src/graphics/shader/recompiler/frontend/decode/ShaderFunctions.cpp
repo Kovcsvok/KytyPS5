@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <cstdlib>
 #include <limits>
 #include <map>
 #include <memory>
@@ -643,11 +642,10 @@ bool InlineShaderFunctions(std::span<const uint32_t> code, uint64_t base,
 
 struct ShaderFunctionExpander::Impl {
 	struct Expansion {
-		uint64_t                                   base            = 0;
-		uint32_t                                   wave_size       = 0;
-		size_t                                     user_data_count = 0;
-		std::vector<std::pair<uint32_t, uint32_t>> deps;
-		std::vector<CallSite>                      sites;
+		uint64_t              base            = 0;
+		uint32_t              wave_size       = 0;
+		size_t                user_data_count = 0;
+		std::vector<CallSite> sites;
 		Reads                 reads;  // the callee code, as read
 		Reads                 failed; // reads that failed: (address, requested words)
 		bool                  ok = false;
@@ -701,54 +699,31 @@ bool ShaderFunctionExpander::Expand(std::span<const uint32_t> code, uint64_t bas
 		reason = "shader calls combined with indirect branches are unsupported";
 		return false;
 	}
-	static const bool fast_expand = [] {
-		const char* v = std::getenv("KYTY_FAST_FUNC_EXPAND");
-		return v == nullptr || v[0] != '0';
-	}();
-	if (fast_expand) {
-		for (const auto& expansion: shader.expansions) {
-			if (expansion.base == base && expansion.wave_size == wave_size &&
-			    expansion.user_data_count == user_data.size() &&
-			    std::all_of(expansion.deps.begin(), expansion.deps.end(), [&](const auto& d) {
-				    return d.first < user_data.size() && user_data[d.first] == d.second;
-			    }) &&
-			    m_impl->StillReads(expansion, read)) {
-				expanded = expansion.code;
-				reason   = expansion.reason;
-				return expansion.ok;
-			}
+	std::vector<CallSite> sites;
+	std::set<uint32_t>    dependencies;
+	if (!ResolveCalls(analysis, base, user_data, read, wave_size, sites, dependencies, reason)) {
+		return false;
+	}
+	for (const auto& expansion: shader.expansions) {
+		if (expansion.base == base && expansion.wave_size == wave_size &&
+		    expansion.user_data_count == user_data.size() && expansion.sites == sites &&
+		    m_impl->StillReads(expansion, read)) {
+			expanded = expansion.code;
+			reason   = expansion.reason;
+			return expansion.ok;
 		}
 	}
 	Impl::Expansion expansion;
 	expansion.base            = base;
 	expansion.wave_size       = wave_size;
 	expansion.user_data_count = user_data.size();
+	expansion.sites           = std::move(sites);
 	const ShaderCodeReader recording = [&](uint64_t address, std::span<uint32_t> words) {
 		const bool ok = read(address, words);
 		(ok ? expansion.reads : expansion.failed)
 		    .emplace_back(address, std::vector<uint32_t>(words.begin(), words.end()));
 		return ok;
 	};
-	std::vector<CallSite> sites;
-	std::set<uint32_t>    dependencies;
-	if (!ResolveCalls(analysis, base, user_data, recording, wave_size, sites, dependencies, reason)) {
-		return false;
-	}
-	for (const uint32_t reg: dependencies) {
-		if (reg < user_data.size()) {
-			expansion.deps.emplace_back(reg, user_data[reg]);
-		}
-	}
-	for (const auto& cached: shader.expansions) {
-		if (cached.base == base && cached.wave_size == wave_size &&
-		    cached.user_data_count == user_data.size() && cached.sites == sites &&
-		    m_impl->StillReads(cached, read)) {
-			expanded = cached.code;
-			reason   = cached.reason;
-			return cached.ok;
-		}
-	}
-	expansion.sites = std::move(sites);
 	expansion.ok = BuildExpansion(analysis, base, expansion.sites, dependencies, recording,
 	                              wave_size, expansion.code, expansion.reason);
 	MergeReads(expansion.reads);
