@@ -21,6 +21,11 @@ struct HostImageFeatures {
 void              SetHostImageFeatures(const HostImageFeatures& features);
 HostImageFeatures GetHostImageFeatures();
 
+// AMD hosts: V_MIN/V_MAX_F32 are plain GLSL.std.450 NMin/NMax, whose zeros the hardware orders
+// like the guest (upstream 2864818). Set once by the device layer.
+void SetHostNativeFloatMinMax(bool native);
+bool GetHostNativeFloatMinMax();
+
 // Right shift from the host's device-scope shader clock to the guest's 100 MHz S_MEMREALTIME:
 // 3 for a 1 GHz clock (NVIDIA), 0 for a 100 MHz one (AMD). Set once by the device layer.
 void     SetRealtimeClockShift(uint32_t shift);

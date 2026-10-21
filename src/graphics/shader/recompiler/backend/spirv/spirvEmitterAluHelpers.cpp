@@ -1,3 +1,4 @@
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
 #include <cstdlib>
@@ -213,6 +214,9 @@ uint32_t EmitMinMaxF32Value(EmitterState& state, uint32_t lhs, uint32_t rhs, boo
 		// of. Two zeros give the AND (max) or OR (min) of their bits.
 		const auto numeric   = max_value ? EmitGlsl<GLSLstd450NMax, IR::Type::F32>(state, lhs, rhs)
 		                                 : EmitGlsl<GLSLstd450NMin, IR::Type::F32>(state, lhs, rhs);
+		if (GetHostNativeFloatMinMax()) {
+			return numeric; // AMD hosts order the zeros like the guest (upstream 2864818)
+		}
 		const auto lhs_bits  = EmitBitcastF32ToU32(state, lhs);
 		const auto rhs_bits  = EmitBitcastF32ToU32(state, rhs);
 		const auto both_zero = EmitCompareU32Constant(

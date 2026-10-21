@@ -102,3 +102,4 @@ Kísérleti kapcsolók: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=1` (élő, host: az �
 ## 2026-10-21 — Opus — T7x B eredmény + placeholder=2
 B (`KYTY_SHADER_BALLOT_NO_HELPERS=1`, valódi írás): azonnal device lost a ráugrásnál, a célkép ismét a HDR target (`image 542 ... is a render target`). → A helper-elmélet a vér-draw-ra cáfolva; a fagyás a **render targetbe írás** (A: placeholderrel nincs fagyás).
 Új mód: `KYTY_BINDLESS_STORAGE_PLACEHOLDER=2` (élő): csak a render targetként is használt képek írása megy a placeholderbe, a többi (pl. a két 1664x936 RGBA16F) valódi. Teszt: lunge + séta; figyelni a 0x5047-es véletlen fagyást is.
+Upstream `2864818` (AMD float min/max natívan, náluk a nehéz compute shaderek 37–59%-kal gyorsabbak): perf, nem crash-javítás. A forkban már natív NMin/NMax volt egy nulla-javító select-tel; átvéve az AMD-s rövidítés (`SetHostNativeFloatMinMax`, vendor 0x1002, `KYTY_EMULATED_FLOAT_MIN_MAX=1` kikapcsolja). Shader-fordítást érint → új program-cache.

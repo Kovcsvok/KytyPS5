@@ -631,6 +631,11 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	    supported_features2.features.shaderResourceMinLod == VK_TRUE;
 	device_features.shaderResourceMinLod = shader_resource_min_lod ? VK_TRUE : VK_FALSE;
 	ShaderRecompiler::Spirv::SetHostImageFeatures({.min_lod = shader_resource_min_lod});
+	// KYTY_EMULATED_FLOAT_MIN_MAX=1 (part of the program cache signature) keeps the zero
+	// ordering emulated on AMD too.
+	ShaderRecompiler::Spirv::SetHostNativeFloatMinMax(
+	    physical_device.getProperties().vendorID == 0x1002u &&
+	    std::getenv("KYTY_EMULATED_FLOAT_MIN_MAX") == nullptr);
 	{
 		// S_MEMREALTIME counts at 100 MHz. The device-scope shader clock runs at the timestamp
 		// rate here (NVIDIA 1 GHz, AMD 100 MHz): shift by the nearest power of two of the ratio.

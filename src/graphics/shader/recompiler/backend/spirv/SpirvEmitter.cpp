@@ -449,6 +449,18 @@ HostImageFeatures GetHostImageFeatures() {
 }
 
 namespace {
+std::atomic_bool g_native_float_min_max {false};
+} // namespace
+
+void SetHostNativeFloatMinMax(bool native) {
+	g_native_float_min_max.store(native, std::memory_order_relaxed);
+}
+
+bool GetHostNativeFloatMinMax() {
+	return g_native_float_min_max.load(std::memory_order_relaxed);
+}
+
+namespace {
 std::atomic<uint32_t> g_realtime_clock_shift {3};
 } // namespace
 
