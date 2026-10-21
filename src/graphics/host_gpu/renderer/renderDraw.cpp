@@ -554,9 +554,16 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		auto&      image      = cache.GetImage(target.image_id);
 		EXIT_IF(image.backing.samples != target.desc.info.samples || image_view == nullptr);
 		const auto& view   = target.desc.view_info;
-		const auto  layout = image.binding.is_bound ? vk::ImageLayout::eGeneral
-		                                            : vk::ImageLayout::eColorAttachmentOptimal;
+		// A target that shaders also write through a bindless storage slot (Wolverine's POPS
+		// blood shaders blend into the HDR color buffer they render to) stays GENERAL: in
+		// COLOR_ATTACHMENT_OPTIMAL its compressed color and the storage writes corrupt each other
+		// and AMD hosts lose the device (T7 diagnostics, 2026-10-21).
+		const bool  shader_access = image.binding.is_bound || image.bindless_storage;
+		const auto  layout        = shader_access ? vk::ImageLayout::eGeneral
+		                                          : vk::ImageLayout::eColorAttachmentOptimal;
 		image.binding.attachment_layout = layout;
+		// (No shader-write access here: Image::Transit then fences every later draw to the target,
+		// and this is the frame's main color buffer.)
 		image.binding.attachment_access =
 		    vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite;
 		image.Transit(layout, image.binding.attachment_access,
