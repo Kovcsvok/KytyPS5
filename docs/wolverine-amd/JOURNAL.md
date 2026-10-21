@@ -18,3 +18,7 @@ Push: d090e54 → CI fut (nem ellenőriztem). T1 első lépése: CI-állapot. Ha
 ## 2026-10-21 — Sonnet — T1 (CI-javítás)
 A 59889a6 build elbukott: spirvEmitterFlow.cpp(1000): 'GetRealtimeClockShift' nincs deklarálva (0da13e0; a fájl nem includolta a SpirvEmitter.h-t). Javítva az include hozzáadásával, ujra-push. Más fordítási hiba még lehet (ninja az elsőnél megállt).
 T2 elő: 70668fb átültetve a helyi wolverine-v3-t2-perf ágon (d806b6e), kapcsoló: KYTY_LEGACY_GLOBAL_BARRIERS=1 a régi viselkedéshez. A T1 build után kerül a fő ágra.
+
+## 2026-10-21 — Gemini — T1 eredmény + T2 1. csomag
+T1 (e5fbd3f, shift 0, KYTY_SHADER_LOOP_WATCHDOG=0): a menü 3–6 FPS-ről 24 FPS-re nőtt, de elmarad a watchdogos 38 FPS-től. Ok (0x7c5c0785877c0999 RDNA dump): a shader a CPU-tól kapott s[4:5] cél-időbélyegre vár max s6 tickig (~16 ms @ 100 MHz); eltérő CPU/GPU óra-epoch miatt mindig kifutja az s6 korlátot (shift 3-mal 8x16=133 ms -> 5 FPS, shift 0-val 1x16 ms -> 24 FPS, watchdog=1-gyel 4095 iteráció -> 38 FPS). A Play Wolverine.bat-ban a KYTY_SHADER_LOOP_WATCHDOG=1 alapértelmezés marad; a logokban kizárólag a 0x7c5c0785877c0999 akadt fenn a watchdogon.
+T2 1. csomag átültetve: 95193a8 (upstream 70668fb: PM4 globális barrierek elhagyása, KYTY_LEGACY_GLOBAL_BARRIERS=1 visszakapcsolja), f879c99 (upstream 4bb4be5: agc atomi log_count eltávolítása), 0871a86 (upstream 75d7a43: ismételt SSA bitcastok megosztása).
