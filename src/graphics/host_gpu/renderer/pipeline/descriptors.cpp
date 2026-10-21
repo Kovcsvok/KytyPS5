@@ -945,6 +945,22 @@ bool RenderExecutor::ResolveBindlessKey(BindlessTable::Heap& heap, uint32_t key)
 		return false;
 	}
 	stats.resolved++;
+	if (storage) {
+		// Research (T7): which images the bindless writes land in.
+		static std::atomic<uint32_t> reported = 0;
+		if (reported.fetch_add(1) < 32) {
+			std::printf("Bindless storage: key %u of heap 0x%016" PRIx64 "+0x%x -> image %u guest "
+			            "0x%016" PRIx64 " size 0x%" PRIx64 " %ux%u layers %u levels %u format %d "
+			            "slot %u%s%s\n",
+			            key, heap.base, heap.table_offset, binding.image_id.index,
+			            image->info.data.address, image->info.data.size, image->info.extent.width,
+			            image->info.extent.height, image->info.resources.layers,
+			            image->info.resources.levels, static_cast<int>(image->info.pixel_format),
+			            slot, image->usage.render_target ? " (was a render target)" : "",
+			            image->usage.texture ? " (sampled too)" : "");
+			std::fflush(stdout);
+		}
+	}
 	const bool first_write = storage && !image->bindless_storage;
 	image->bindless_storage |= storage;
 	const auto layout = image->bindless_storage ? vk::ImageLayout::eGeneral
@@ -1720,6 +1736,17 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			        : 0;
 			for (size_t i = begin; i < resolved.size(); i++) {
 				auto* image = m_context.GetTextureCache().m_slot_images.try_get(resolved[i]);
+				if (image != nullptr && image->binding.is_target &&
+				    BindlessTable::IsStorage(heap->binding)) {
+					// Research (T7): the draw renders to an image its shader may also write.
+					static std::atomic<uint32_t> reported = 0;
+					if (reported.fetch_add(1) < 16) {
+						std::printf("Bindless storage: image %u (guest 0x%016" PRIx64
+						            ") is a render target of a draw of shader 0x%016llx\n",
+						            resolved[i].index, image->info.data.address,
+						            static_cast<unsigned long long>(program.shader_hash));
+					}
+				}
 				if (image == nullptr || !image->registered || image->binding.is_target ||
 				    image->info.data.Empty()) {
 					continue;
