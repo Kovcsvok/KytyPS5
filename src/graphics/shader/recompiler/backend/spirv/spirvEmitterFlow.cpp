@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"

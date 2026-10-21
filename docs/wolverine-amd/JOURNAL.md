@@ -14,3 +14,7 @@ A watchdog nélkül 3–6 FPS, vele 30–40. Ok: a `0x7c5c0785877c0999` S_MEMREA
 ## 2026-10-21 – Opus – upstream/forkok, átadás
 Átvéve: e87fb8c, be9e139. Ütközik (→ T2): 70668fb, 8cc5f53, 3c4124d, 75d7a43, f6f1ac8, 4bb4be5. Forkokban nincs POPS/óra-megoldás. Ígéretes: liberda-soft perf/foundation (x86-64-v3) → T3. Következő: T1, majd T2/T3/T4.
 Push: d090e54 → CI fut (nem ellenőriztem). T1 első lépése: CI-állapot. Ha fordítási hiba van, az valószínűleg a 0da13e0/6a8a35a/2952489-ben van; javítsd, vagy reverteld a 6a8a35a/2952489-et.
+
+## 2026-10-21 — Sonnet — T1 (CI-javítás)
+A 59889a6 build elbukott: spirvEmitterFlow.cpp(1000): 'GetRealtimeClockShift' nincs deklarálva (0da13e0; a fájl nem includolta a SpirvEmitter.h-t). Javítva az include hozzáadásával, ujra-push. Más fordítási hiba még lehet (ninja az elsőnél megállt).
+T2 elő: 70668fb átültetve a helyi wolverine-v3-t2-perf ágon (d806b6e), kapcsoló: KYTY_LEGACY_GLOBAL_BARRIERS=1 a régi viselkedéshez. A T1 build után kerül a fő ágra.
