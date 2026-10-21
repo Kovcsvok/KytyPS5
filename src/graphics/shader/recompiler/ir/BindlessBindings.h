@@ -17,10 +17,14 @@ inline constexpr uint32_t BindlessImages2D       = 0;
 inline constexpr uint32_t BindlessImages2DArray  = 1;
 inline constexpr uint32_t BindlessImagesCube     = 2;
 inline constexpr uint32_t BindlessImages3D       = 3;
-inline constexpr uint32_t BindlessTranslation    = 4;
-inline constexpr uint32_t BindlessFeedback       = 5;
+// Storage views of the bindless images pixel shaders write (Wolverine's POPS blood shaders), in
+// GENERAL layout. Their keys translate through heaps of their own.
+inline constexpr uint32_t BindlessStorageImages2D      = 4;
+inline constexpr uint32_t BindlessStorageImages2DArray = 5;
+inline constexpr uint32_t BindlessTranslation    = 6;
+inline constexpr uint32_t BindlessFeedback       = 7;
 // Samplers mirrored from guest sampler heaps (16-byte S# records); slot 0 is the default sampler.
-inline constexpr uint32_t BindlessSamplers       = 6;
+inline constexpr uint32_t BindlessSamplers       = 8;
 // A translation entry for a key whose texture is not resident yet; the shader samples slot 0.
 inline constexpr uint32_t BindlessPending        = 0xffffffffu;
 // Feedback flags a shader stores per key it samples: the texture is pending, or resident and used.
@@ -103,6 +107,33 @@ inline constexpr uint32_t BindlessSamplerKinds            = 8u;
 inline std::atomic<bool>& BindlessSamplerKindSlotsAvailable() {
 	static std::atomic<bool> available {false};
 	return available;
+}
+
+// Set by the host's bindless table when the device takes update-after-bind storage image arrays
+// indexed non-uniformly. Without them a pixel shader's bindless image writes are dropped.
+inline std::atomic<bool>& BindlessStorageAvailable() {
+	static std::atomic<bool> available {false};
+	return available;
+}
+
+// KYTY_SHADER_BINDLESS_STORAGE_WRITES (environment, read once): unset = 2D and 2D-array bindless
+// image writes go through the storage arrays (their images stay GENERAL); 0 = a pixel shader's
+// bindless writes are dropped (3ddfd07); 1 = the old storage-typed alias of the sampled arrays
+// (AMD hosts corrupt textures and lose the device: Wolverine's POPS blood shaders).
+inline int BindlessStorageWritesMode() {
+	static const int mode = [] {
+		const char* value = std::getenv("KYTY_SHADER_BINDLESS_STORAGE_WRITES");
+		if (value == nullptr || value[0] == '\0') {
+			return 2;
+		}
+		return value[0] == '0' ? 0 : value[0] == '1' ? 1 : 2;
+	}();
+	return mode;
+}
+
+inline bool BindlessStorageArrays() {
+	return BindlessStorageWritesMode() == 2 &&
+	       BindlessStorageAvailable().load(std::memory_order_acquire);
 }
 
 inline bool BindlessSamplerClassDefaults() {

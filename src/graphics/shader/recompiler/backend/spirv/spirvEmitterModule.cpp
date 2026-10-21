@@ -263,24 +263,23 @@ uint32_t F32ArrayType(EmitterState& state, uint32_t count) {
 }
 
 // Set 1 (BindlessBindings.h): one runtime array per image type, aliasing the binding of its
-// dimension, and the translation buffer. Declared before the entry point collects globals.
+// dimension (written 2D images get the storage arrays), and the translation buffer. Declared
+// before the entry point collects globals.
 void DefineBindlessImages(EmitterState& state) {
 	for (const auto& image: state.program.info.images) {
 		if (!image.bindless) {
 			continue;
 		}
+		const auto binding = BindlessImageBinding(state, image);
+		if (binding == UINT32_MAX) {
+			continue; // its writes are dropped (EmitImage)
+		}
 		const auto type = ImageType(state, image);
 		if (state.bindless_image_variables.contains(type)) {
 			continue;
 		}
-		uint32_t binding = IR::BindlessImages2D;
-		if (image.cube) {
-			binding = IR::BindlessImagesCube;
-		} else if (image.dimension == ImageDimension::Dim3D) {
-			binding = IR::BindlessImages3D;
-		} else if (image.dimension == ImageDimension::Dim2DArray ||
-		           image.dimension == ImageDimension::Dim2DMsaaArray) {
-			binding = IR::BindlessImages2DArray;
+		if (binding == IR::BindlessStorageImages2D || binding == IR::BindlessStorageImages2DArray) {
+			state.builder.RequireCapability(spv::CapabilityStorageImageArrayNonUniformIndexing);
 		}
 		const auto array    = state.builder.Type(spv::OpTypeRuntimeArray, type);
 		const auto variable = state.builder.DefineGlobalVariable(

@@ -86,6 +86,8 @@ struct GraphicContext {
 	bool                               bindless_enabled                      = false;
 	uint32_t                           bindless_max_sampled_images           = 0;
 	uint32_t                           bindless_max_samplers                 = 0;
+	// Update-after-bind storage image arrays indexed non-uniformly (bindless image writes).
+	uint32_t                           bindless_max_storage_images           = 0;
 	vk::DescriptorSetLayout            bindless_layout                       = nullptr;
 	vk::DescriptorSet                  bindless_set                          = nullptr;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};

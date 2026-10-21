@@ -345,6 +345,9 @@ uint32_t ImageVectorType(EmitterState& state, Prospero::TextureNumericClass nume
                          uint32_t components);
 
 uint32_t ImageType(EmitterState& state, const IR::ImageResource& image);
+// The set 1 binding of a bindless image's array, or UINT32_MAX for a written image whose writes
+// are dropped (KYTY_SHADER_BINDLESS_STORAGE_WRITES, BindlessBindings.h).
+uint32_t BindlessImageBinding(const EmitterState& state, const IR::ImageResource& image);
 
 uint32_t ImageViewSizeType(EmitterState& state, ImageDimension dimension);
 

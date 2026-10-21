@@ -226,10 +226,12 @@ void RenderContext::DispatchFault(PageFaultAccess access, uint64_t fault_vaddr) 
 	const auto         site       = stats ? FaultStats::FaultSite() : 0;
 	const auto         start      = stats ? std::chrono::steady_clock::now()
 	                                      : std::chrono::steady_clock::time_point {};
-	// KYTY_FAULT_WIDEN_KB=N (live, default 0): a write fault also makes the other tracked pages of
-	// the aligned N KiB block CPU-dirty (MemoryTracker::InvalidateRegion). Wolverine's stealth
-	// section takes ~150k write faults/s on ~25k buffer pages, each page several times a frame.
-	static auto& widen_kb = Common::LiveSwitches::Get("KYTY_FAULT_WIDEN_KB", 0);
+	// KYTY_FAULT_WIDEN_KB=N (live, default 64, rounded down to a power of two; 0 = off): a write
+	// fault also makes the other tracked pages of the aligned N KiB block CPU-dirty
+	// (MemoryTracker::InvalidateRegion). Wolverine's stealth section takes ~150k write faults/s on
+	// ~25k buffer pages, each page several times a frame; 64 took it from 10-14 to 15-19 fps while
+	// moving, 256 to 8-12 (2026-10-21).
+	static auto& widen_kb = Common::LiveSwitches::Get("KYTY_FAULT_WIDEN_KB", 64);
 	const auto   widen_kb_value = std::max<int64_t>(widen_kb.load(std::memory_order_relaxed), 0);
 	const auto   widen          = std::bit_floor(static_cast<uint64_t>(widen_kb_value) << 10u);
 	if (access == PageFaultAccess::Write) {

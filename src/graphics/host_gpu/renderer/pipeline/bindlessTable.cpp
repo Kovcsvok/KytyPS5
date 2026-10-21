@@ -33,11 +33,18 @@ BindlessTable::BindlessTable(GraphicContext& graphics, CommandScheduler& schedul
 		return;
 	}
 	m_images_per_array =
-	    std::min(MaxImagesPerArray, graphics.bindless_max_sampled_images / ImageArrays);
+	    std::min(MaxImagesPerArray, graphics.bindless_max_sampled_images / SampledArrays);
 	if (m_images_per_array == 0) {
 		LOGF("Bindless table: the device allows no update-after-bind sampled images\n");
 		return;
 	}
+	const auto storage_images =
+	    std::min(MaxStorageImagesPerArray,
+	             graphics.bindless_max_storage_images / (ImageArrays - SampledArrays));
+	const bool storage_enabled = storage_images > PlaceholderColors;
+	m_storage_images_per_array = storage_enabled ? storage_images : PlaceholderColors;
+	ShaderRecompiler::IR::BindlessStorageAvailable().store(storage_enabled,
+	                                                       std::memory_order_release);
 
 	constexpr auto image_flags = vk::DescriptorBindingFlagBits::ePartiallyBound |
 	                             vk::DescriptorBindingFlagBits::eUpdateAfterBind |
@@ -54,7 +61,10 @@ BindlessTable::BindlessTable(GraphicContext& graphics, CommandScheduler& schedul
 	                                                                std::memory_order_release);
 	m_sampler_regions.Reset(kind_slots ? ShaderRecompiler::IR::BindlessSamplerKinds : 1u,
 	                        m_samplers_per_array);
-	const std::array<vk::DescriptorSetLayoutBinding, 7> bindings {{
+	// Without storage support the storage arrays hold only their placeholders, written once.
+	const auto storage_flags = storage_enabled ? vk::DescriptorBindingFlags {image_flags}
+	                                           : vk::DescriptorBindingFlags {};
+	const std::array<vk::DescriptorSetLayoutBinding, 9> bindings {{
 	    {Images2D, vk::DescriptorType::eSampledImage, m_images_per_array, vk::ShaderStageFlagBits::eAll,
 	     nullptr},
 	    {Images2DArray, vk::DescriptorType::eSampledImage, m_images_per_array,
@@ -63,13 +73,18 @@ BindlessTable::BindlessTable(GraphicContext& graphics, CommandScheduler& schedul
 	     vk::ShaderStageFlagBits::eAll, nullptr},
 	    {Images3D, vk::DescriptorType::eSampledImage, m_images_per_array, vk::ShaderStageFlagBits::eAll,
 	     nullptr},
+	    {StorageImages2D, vk::DescriptorType::eStorageImage, m_storage_images_per_array,
+	     vk::ShaderStageFlagBits::eAll, nullptr},
+	    {StorageImages2DArray, vk::DescriptorType::eStorageImage, m_storage_images_per_array,
+	     vk::ShaderStageFlagBits::eAll, nullptr},
 	    {Translation, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eAll, nullptr},
 	    {Feedback, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eAll, nullptr},
 	    {Samplers, vk::DescriptorType::eSampler, std::max(m_samplers_per_array, 1u),
 	     vk::ShaderStageFlagBits::eAll, nullptr},
 	}};
-	const std::array<vk::DescriptorBindingFlags, 7> binding_flags {
-	    image_flags, image_flags, image_flags, image_flags, buffer_flags, buffer_flags, image_flags};
+	const std::array<vk::DescriptorBindingFlags, 9> binding_flags {
+	    image_flags,   image_flags,  image_flags,  image_flags, storage_flags,
+	    storage_flags, buffer_flags, buffer_flags, image_flags};
 	vk::DescriptorSetLayoutBindingFlagsCreateInfo flags_info {};
 	flags_info.bindingCount  = static_cast<uint32_t>(binding_flags.size());
 	flags_info.pBindingFlags = binding_flags.data();
@@ -81,8 +96,9 @@ BindlessTable::BindlessTable(GraphicContext& graphics, CommandScheduler& schedul
 	RequireVulkanSuccess(graphics.device.createDescriptorSetLayout(&layout_info, nullptr, &m_layout),
 	                     "create bindless descriptor layout");
 
-	const std::array<vk::DescriptorPoolSize, 3> sizes {{
-	    {vk::DescriptorType::eSampledImage, m_images_per_array * ImageArrays},
+	const std::array<vk::DescriptorPoolSize, 4> sizes {{
+	    {vk::DescriptorType::eSampledImage, m_images_per_array * SampledArrays},
+	    {vk::DescriptorType::eStorageImage, m_storage_images_per_array * (ImageArrays - SampledArrays)},
 	    {vk::DescriptorType::eStorageBuffer, 2},
 	    {vk::DescriptorType::eSampler, std::max(m_samplers_per_array, 1u)},
 	}};
@@ -136,8 +152,10 @@ BindlessTable::BindlessTable(GraphicContext& graphics, CommandScheduler& schedul
 	CreatePlaceholders(scheduler);
 	graphics.bindless_layout = m_layout;
 	graphics.bindless_set    = m_set;
-	LOGF("Bindless table: %u images per array, %u translation entries, %u samplers\n",
-	     m_images_per_array, TranslationEntries, m_samplers_per_array);
+	LOGF("Bindless table: %u images per array, %u storage images per array, %u translation "
+	     "entries, %u samplers\n",
+	     m_images_per_array, storage_enabled ? m_storage_images_per_array : 0u, TranslationEntries,
+	     m_samplers_per_array);
 }
 
 void BindlessTable::DropSamplerHeapsExcept(uint32_t fields) {
@@ -218,11 +236,13 @@ void BindlessTable::ReportSamplerStats() {
 	                                   0u) {
 		std::printf("Bindless images (5 s): resolved %u (re-resolved before a draw %u, kept old view "
 		            "%u), deferred %u; black placeholder: unreadable %u, null %u, non-float %u, shape %u, "
-		            "empty %u, array full %u; slots 2D %u 2DArray %u Cube %u 3D %u of %u\n",
+		            "empty %u, array full %u; slots 2D %u 2DArray %u Cube %u 3D %u of %u, storage 2D %u "
+		            "2DArray %u of %u\n",
 		            i.resolved, i.reresolved, i.kept_old, i.deferred, i.unreadable, i.null_desc,
 		            i.non_float, i.shape,
 		            i.empty, i.array_full, m_next_slot[0], m_next_slot[1], m_next_slot[2],
-		            m_next_slot[3], m_images_per_array);
+		            m_next_slot[3], m_images_per_array, m_next_slot[StorageImages2D],
+		            m_next_slot[StorageImages2DArray], m_storage_images_per_array);
 		std::fflush(stdout);
 	}
 	m_image_stats = {};
@@ -380,7 +400,14 @@ void BindlessTable::CreatePlaceholders(CommandScheduler& /*scheduler*/) {
 	    {vk::ImageType::e2D, vk::ImageViewType::e2DArray, 1, {}},
 	    {vk::ImageType::e2D, vk::ImageViewType::eCube, 6, vk::ImageCreateFlagBits::eCubeCompatible},
 	    {vk::ImageType::e3D, vk::ImageViewType::e3D, 1, {}},
+	    {vk::ImageType::e2D, vk::ImageViewType::e2D, 1, {}},
+	    {vk::ImageType::e2D, vk::ImageViewType::e2DArray, 1, {}},
 	}};
+	// The storage placeholders take the writes of keys that are not resident (and stay GENERAL).
+	const auto layout_of = [](uint32_t i) {
+		return IsStorage(i % ImageArrays) ? vk::ImageLayout::eGeneral
+		                                  : vk::ImageLayout::eShaderReadOnlyOptimal;
+	};
 	for (uint32_t i = 0; i < Placeholders; i++) {
 		vk::ImageCreateInfo info {};
 		info.flags         = kinds[i % ImageArrays].flags;
@@ -391,7 +418,9 @@ void BindlessTable::CreatePlaceholders(CommandScheduler& /*scheduler*/) {
 		info.arrayLayers   = kinds[i % ImageArrays].layers;
 		info.samples       = vk::SampleCountFlagBits::e1;
 		info.tiling        = vk::ImageTiling::eOptimal;
-		info.usage         = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+		info.usage         = (IsStorage(i % ImageArrays) ? vk::ImageUsageFlagBits::eStorage
+		                                                 : vk::ImageUsageFlagBits::eSampled) |
+		                     vk::ImageUsageFlagBits::eTransferDst;
 		info.initialLayout = vk::ImageLayout::eUndefined;
 		EXIT_IF(!m_graphics.CreateImage(info, m_placeholders[i]));
 		vk::ImageViewCreateInfo view {};
@@ -439,8 +468,11 @@ void BindlessTable::CreatePlaceholders(CommandScheduler& /*scheduler*/) {
 		to_read[i]                         = to_transfer[i];
 		to_read[i].srcAccessMask           = vk::AccessFlagBits::eTransferWrite;
 		to_read[i].dstAccessMask           = vk::AccessFlagBits::eShaderRead;
+		if (IsStorage(i % ImageArrays)) {
+			to_read[i].dstAccessMask |= vk::AccessFlagBits::eShaderWrite;
+		}
 		to_read[i].oldLayout               = vk::ImageLayout::eTransferDstOptimal;
-		to_read[i].newLayout               = vk::ImageLayout::eShaderReadOnlyOptimal;
+		to_read[i].newLayout               = layout_of(i);
 	}
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
 	                        vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 0, nullptr,
@@ -502,13 +534,13 @@ void BindlessTable::CreatePlaceholders(CommandScheduler& /*scheduler*/) {
 	std::array<vk::DescriptorImageInfo, Placeholders> infos {};
 	std::array<vk::WriteDescriptorSet, Placeholders> writes {};
 	for (uint32_t i = 0; i < Placeholders; i++) {
-		infos[i]                  = {nullptr, m_placeholder_views[i],
-		                             vk::ImageLayout::eShaderReadOnlyOptimal};
+		infos[i]                  = {nullptr, m_placeholder_views[i], layout_of(i)};
 		writes[i].dstSet          = m_set;
 		writes[i].dstBinding      = Images2D + i % ImageArrays;
 		writes[i].dstArrayElement = i / ImageArrays;
 		writes[i].descriptorCount = 1;
-		writes[i].descriptorType  = vk::DescriptorType::eSampledImage;
+		writes[i].descriptorType  = IsStorage(i % ImageArrays) ? vk::DescriptorType::eStorageImage
+		                                                       : vk::DescriptorType::eSampledImage;
 		writes[i].pImageInfo      = &infos[i];
 	}
 	m_graphics.device.updateDescriptorSets(Placeholders, writes.data(), 0, nullptr);
@@ -631,7 +663,7 @@ uint32_t BindlessTable::AllocateSlot(uint32_t binding) {
 		m_slot_free[binding][slot] = 0;
 		return slot;
 	}
-	if (m_next_slot[binding] >= m_images_per_array) {
+	if (m_next_slot[binding] >= Capacity(binding)) {
 		return 0;
 	}
 	return m_next_slot[binding]++;
@@ -707,15 +739,35 @@ void BindlessTable::WriteSlot(uint32_t binding, uint32_t slot, vk::ImageView vie
 			}
 		}
 	}
-	const vk::DescriptorImageInfo info {nullptr, view, layout};
+	const bool                    storage = IsStorage(binding);
+	const vk::DescriptorImageInfo info {nullptr, view,
+	                                    storage ? vk::ImageLayout::eGeneral : layout};
 	vk::WriteDescriptorSet        write {};
 	write.dstSet          = m_set;
 	write.dstBinding      = binding;
 	write.dstArrayElement = slot;
 	write.descriptorCount = 1;
-	write.descriptorType  = vk::DescriptorType::eSampledImage;
+	write.descriptorType  = storage ? vk::DescriptorType::eStorageImage
+	                                : vk::DescriptorType::eSampledImage;
 	write.pImageInfo      = &info;
 	m_graphics.device.updateDescriptorSets(1, &write, 0, nullptr);
+}
+
+void BindlessTable::MarkStorage(ImageId id) {
+	const auto refs = m_image_refs.find(ImageKey(id));
+	if (refs == m_image_refs.end()) {
+		return;
+	}
+	for (const auto& [heap, key]: refs->second) {
+		if (IsStorage(heap->binding) || key >= heap->slots.size()) {
+			continue;
+		}
+		const auto  slot  = heap->slots[key];
+		const auto& views = m_slot_views[heap->binding];
+		if (slot >= PlaceholderColors && slot < views.size() && views[slot] != nullptr) {
+			WriteSlot(heap->binding, slot, views[slot], vk::ImageLayout::eGeneral);
+		}
+	}
 }
 
 void BindlessTable::SetTranslation(const Heap& heap, uint32_t key, uint32_t slot) {

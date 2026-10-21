@@ -31,25 +31,34 @@ class SamplerCache;
 class BindlessTable {
 public:
 	enum Binding : uint32_t {
-		Images2D      = 0,
-		Images2DArray = 1,
-		ImagesCube    = 2,
-		Images3D      = 3,
-		Translation   = 4,
-		Feedback      = 5,
-		Samplers      = 6,
+		Images2D             = 0,
+		Images2DArray        = 1,
+		ImagesCube           = 2,
+		Images3D             = 3,
+		StorageImages2D      = 4,
+		StorageImages2DArray = 5,
+		Translation          = 6,
+		Feedback             = 7,
+		Samplers             = 8,
 	};
 	static_assert(Images2D == ShaderRecompiler::IR::BindlessImages2D &&
 	              Images2DArray == ShaderRecompiler::IR::BindlessImages2DArray &&
 	              ImagesCube == ShaderRecompiler::IR::BindlessImagesCube &&
 	              Images3D == ShaderRecompiler::IR::BindlessImages3D &&
+	              StorageImages2D == ShaderRecompiler::IR::BindlessStorageImages2D &&
+	              StorageImages2DArray == ShaderRecompiler::IR::BindlessStorageImages2DArray &&
 	              Translation == ShaderRecompiler::IR::BindlessTranslation &&
 	              Feedback == ShaderRecompiler::IR::BindlessFeedback &&
 	              Samplers == ShaderRecompiler::IR::BindlessSamplers);
-	static constexpr uint32_t ImageArrays        = 4;
+	static constexpr uint32_t SampledArrays      = 4;
+	static constexpr uint32_t ImageArrays        = 6; // the sampled arrays, then the storage ones
 	static constexpr uint32_t PlaceholderColors  = 3;
 	static constexpr uint32_t Placeholders       = ImageArrays * PlaceholderColors;
 	static constexpr uint32_t MaxImagesPerArray  = 16384;
+	static constexpr uint32_t MaxStorageImagesPerArray = 4096;
+	[[nodiscard]] static constexpr bool IsStorage(uint32_t binding) noexcept {
+		return binding == StorageImages2D || binding == StorageImages2DArray;
+	}
 	static constexpr uint32_t TranslationEntries = 1u << 20u;
 	static constexpr uint32_t MaxSamplers        = 4096;
 
@@ -99,7 +108,11 @@ public:
 	[[nodiscard]] uint32_t AllocateSlot(uint32_t binding);
 	// Queue a slot for reuse once the GPU is past the current tick (at most once).
 	void FreeSlot(uint32_t binding, uint32_t slot);
+	// A storage array's slot is written as a storage image in GENERAL layout, whatever layout says.
 	void WriteSlot(uint32_t binding, uint32_t slot, vk::ImageView view, vk::ImageLayout layout);
+	// The image was resolved for a bindless write: it stays in GENERAL from now on, so the slots
+	// that sample it are written again with that layout.
+	void MarkStorage(ImageId id);
 	// Resolve a key to a slot (0 = placeholder), or back to pending.
 	void SetTranslation(const Heap& heap, uint32_t key, uint32_t slot);
 	// The host reads the feedback flags from a copy in host-cached memory. The feedback buffer
@@ -228,8 +241,13 @@ private:
 	std::deque<Heap>        m_heaps;
 	std::unordered_map<uint64_t, std::vector<std::pair<Heap*, uint32_t>>> m_image_refs;
 	std::vector<std::pair<Heap*, uint32_t>> m_reresolve;
+	[[nodiscard]] uint32_t Capacity(uint32_t binding) const noexcept {
+		return IsStorage(binding) ? m_storage_images_per_array : m_images_per_array;
+	}
+
 	uint32_t                m_next_region = 1; // translation[0] is the out-of-range entry
 	std::array<uint32_t, ImageArrays> m_next_slot {PlaceholderColors, PlaceholderColors,
+	                                               PlaceholderColors, PlaceholderColors,
 	                                               PlaceholderColors, PlaceholderColors};
 	// Slots of unregistered images per array, with the tick after which no command buffer reads
 	// them.
@@ -247,6 +265,8 @@ private:
 	vk::DescriptorSetLayout m_layout = nullptr;
 	vk::DescriptorSet       m_set    = nullptr;
 	uint32_t                m_images_per_array = 0;
+	// PlaceholderColors (only the placeholders, no slot to allocate) without storage support.
+	uint32_t                m_storage_images_per_array = 0;
 	uint32_t                m_samplers_per_array = 0;
 	// Slot 0 (and 1..7 with class defaults) is the default sampler.
 	BindlessSamplerRecords::RegionAllocator m_sampler_regions;

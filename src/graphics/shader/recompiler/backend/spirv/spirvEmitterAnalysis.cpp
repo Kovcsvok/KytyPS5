@@ -2,9 +2,37 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
+#include "graphics/shader/recompiler/ir/BindlessBindings.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
+
+uint32_t BindlessImageBinding(const EmitterState& state, const IR::ImageResource& image) {
+	if (image.resource_class == IR::ImageResourceClass::Storage) {
+		// RenderExecutor's BindlessBindingFor picks the same heaps on the host.
+		const bool plain_2d = image.dimension == ImageDimension::Dim2D;
+		if (!image.atomic && !image.cube && image.mip_mode == IR::ImageMipMode::None &&
+		    IR::BindlessStorageArrays() &&
+		    (plain_2d || image.dimension == ImageDimension::Dim2DArray)) {
+			return plain_2d ? IR::BindlessStorageImages2D : IR::BindlessStorageImages2DArray;
+		}
+		// Other stages keep the storage-typed alias of the sampled arrays they always had.
+		if (state.program.stage == ShaderType::Pixel && IR::BindlessStorageWritesMode() != 1) {
+			return UINT32_MAX;
+		}
+	}
+	if (image.cube) {
+		return IR::BindlessImagesCube;
+	}
+	if (image.dimension == ImageDimension::Dim3D) {
+		return IR::BindlessImages3D;
+	}
+	if (image.dimension == ImageDimension::Dim2DArray ||
+	    image.dimension == ImageDimension::Dim2DMsaaArray) {
+		return IR::BindlessImages2DArray;
+	}
+	return IR::BindlessImages2D;
+}
 
 uint32_t PixelParameterLocation(const EmitterState& state, uint32_t attr) {
 	std::array<uint32_t, 32> active_inputs {};

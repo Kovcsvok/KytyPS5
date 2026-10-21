@@ -833,6 +833,19 @@ void RenderExecutor::ResetBindings() {
 
 static uint32_t BindlessBindingFor(const ShaderRecompiler::IR::ImageResource& resource) {
 	using ShaderRecompiler::Decoder::ImageDimension;
+	// Written images get storage views from heaps of their own (DefineBindlessImages declares the
+	// same bindings; other storage shapes are dropped there and fall through to a sampled heap).
+	if (resource.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage &&
+	    !resource.atomic && !resource.cube &&
+	    resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::None &&
+	    ShaderRecompiler::IR::BindlessStorageArrays()) {
+		if (resource.dimension == ImageDimension::Dim2D) {
+			return ShaderRecompiler::IR::BindlessStorageImages2D;
+		}
+		if (resource.dimension == ImageDimension::Dim2DArray) {
+			return ShaderRecompiler::IR::BindlessStorageImages2DArray;
+		}
+	}
 	if (resource.cube) {
 		return ShaderRecompiler::IR::BindlessImagesCube;
 	}
@@ -857,11 +870,10 @@ static bool BindlessCompatible(const ShaderTextureResource& descriptor, uint32_t
 	}
 	switch (descriptor.Type()) {
 		case Prospero::ImageType::kColor2D:
-			return binding == ShaderRecompiler::IR::BindlessImages2D ||
-			       binding == ShaderRecompiler::IR::BindlessImages2DArray;
 		case Prospero::ImageType::kColor2DArray:
 			return binding == ShaderRecompiler::IR::BindlessImages2D ||
-			       binding == ShaderRecompiler::IR::BindlessImages2DArray;
+			       binding == ShaderRecompiler::IR::BindlessImages2DArray ||
+			       BindlessTable::IsStorage(binding);
 		case Prospero::ImageType::kCube: return binding == ShaderRecompiler::IR::BindlessImagesCube;
 		case Prospero::ImageType::kColor3D: return binding == ShaderRecompiler::IR::BindlessImages3D;
 		default: return false;
@@ -895,6 +907,11 @@ bool RenderExecutor::ResolveBindlessKey(BindlessTable::Heap& heap, uint32_t key)
 		table.SetTranslation(heap, key, 0u);
 		return false;
 	}
+	if (BindlessTable::IsStorage(heap.binding) && !IsSupportedStorageImageResource(heap.resource)) {
+		stats.shape++; // ResolveTexture would stop on it
+		table.SetTranslation(heap, key, 0u);
+		return false;
+	}
 	auto binding = ResolveTexture(heap.resource, value);
 	auto& texture_cache = m_context.GetTextureCache();
 	auto* image = texture_cache.m_slot_images.try_get(binding.image_id);
@@ -903,7 +920,14 @@ bool RenderExecutor::ResolveBindlessKey(BindlessTable::Heap& heap, uint32_t key)
 		table.SetTranslation(heap, key, 0u);
 		return false;
 	}
-	BindImage(binding.image_id, false);
+	const bool storage = BindlessTable::IsStorage(heap.binding);
+	if (storage && (image->info.IsDepth() || image->info.IsBlock())) {
+		// No storage view: its writes go to the storage placeholder.
+		stats.shape++;
+		table.SetTranslation(heap, key, 0u);
+		return false;
+	}
+	BindImage(binding.image_id, storage);
 	const auto view = texture_cache.FindTexture(binding.image_id, binding.desc);
 	image           = texture_cache.m_slot_images.try_get(binding.image_id);
 	if (image != nullptr && !image->registered) {
@@ -921,16 +945,24 @@ bool RenderExecutor::ResolveBindlessKey(BindlessTable::Heap& heap, uint32_t key)
 		return false;
 	}
 	stats.resolved++;
-	const auto layout = image->info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-	                                          : vk::ImageLayout::eShaderReadOnlyOptimal;
+	const bool first_write = storage && !image->bindless_storage;
+	image->bindless_storage |= storage;
+	const auto layout = image->bindless_storage ? vk::ImageLayout::eGeneral
+	                    : image->info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
+	                                            : vk::ImageLayout::eShaderReadOnlyOptimal;
 	table.WriteSlot(heap.binding, slot, view, layout);
 	heap.slots[key]         = slot;
 	heap.images[key]        = binding.image_id;
 	image->bindless_pinned  = true;
-	image->usage.texture    = true;
+	(storage ? image->usage.storage : image->usage.texture) = true;
 	heap.resolved.push_back(binding.image_id);
 	table.AddImageReference(binding.image_id, heap, key);
 	table.SetTranslation(heap, key, slot);
+	if (first_write) {
+		// Its sampled slots were written for SHADER_READ_ONLY_OPTIMAL; it stays GENERAL now.
+		table.MarkStorage(binding.image_id);
+		NoteBindlessStateChange(*image);
+	}
 	return true;
 }
 
@@ -1658,12 +1690,16 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			    shader_stages, vk::DependencyFlags {}, 0, nullptr, 1, &barrier, 0, nullptr);
 		}
 
-		// Bindless textures are sampled through set 1 with a read-only layout. A heap holds
-		// thousands of resolved images; one whose images' states did not change since it was
+		// Bindless textures are sampled through set 1 with a read-only layout, and the images a
+		// shader writes through the storage arrays (Image::bindless_storage) stay GENERAL. A heap
+		// holds thousands of resolved images; one whose images' states did not change since it was
 		// last checked (g_bindless_state_generation) needs a look only at the images resolved
 		// since. KYTY_BINDLESS_VERIFY=1 checks every image and stops if a skipped one needed it.
 		static const bool verify = std::getenv("KYTY_BINDLESS_VERIFY") != nullptr;
 		for (auto* heap: descriptors.bindless_heaps) {
+			const auto access = BindlessTable::IsStorage(heap->binding)
+			                        ? vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite
+			                        : vk::AccessFlags2 {vk::AccessFlagBits2::eShaderRead};
 			const auto& resolved = heap->resolved;
 			size_t      begin =
 			    heap->checked_generation ==
@@ -1688,7 +1724,8 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				    image->info.data.Empty()) {
 					continue;
 				}
-				const auto layout = image->info.IsDepth()
+				const auto layout = image->bindless_storage ? vk::ImageLayout::eGeneral
+				                    : image->info.IsDepth()
 				                        ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
 				                        : vk::ImageLayout::eShaderReadOnlyOptimal;
 				if (image->backing.state.layout != layout) {
@@ -1697,7 +1734,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 						     " changed layout without a state generation change\n",
 						     static_cast<uint32_t>(i), heap->base);
 					}
-					image->Transit(layout, vk::AccessFlagBits2::eShaderRead, {}, vk_buffer);
+					image->Transit(layout, access, {}, vk_buffer);
 				}
 			}
 			// After the transitions above, which bump the generation themselves.
@@ -1744,6 +1781,10 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 				image.Transit(vk::ImageLayout::eGeneral,
 				              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
 				              range, vk_buffer);
+			} else if (image.bindless_storage) {
+				// Its bindless slots say GENERAL; the same draw may sample it through them.
+				image.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderRead, range,
+				              vk_buffer);
 			} else {
 				image.Transit(image.info.IsDepth() ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
 				                                   : vk::ImageLayout::eShaderReadOnlyOptimal,

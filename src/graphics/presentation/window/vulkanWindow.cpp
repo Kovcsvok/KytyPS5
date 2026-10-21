@@ -535,6 +535,14 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 		features12.descriptorBindingUpdateUnusedWhilePending    = VK_TRUE;
 	}
+	const bool bindless_storage =
+	    graphics.bindless_enabled &&
+	    supported_features12.shaderStorageImageArrayNonUniformIndexing == VK_TRUE &&
+	    supported_features12.descriptorBindingStorageImageUpdateAfterBind == VK_TRUE;
+	if (bindless_storage) {
+		features12.shaderStorageImageArrayNonUniformIndexing    = VK_TRUE;
+		features12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+	}
 
 	vk::PhysicalDeviceSubgroupSizeControlProperties subgroup_size_control {};
 
@@ -560,9 +568,13 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	        ? std::min(properties12.maxDescriptorSetUpdateAfterBindSamplers,
 	                   properties12.maxPerStageDescriptorUpdateAfterBindSamplers)
 	        : 0u;
-	LOGF("Vulkan bindless images: %s (update-after-bind sampled images %u)\n",
+	graphics.bindless_max_storage_images =
+	    bindless_storage ? std::min(properties12.maxDescriptorSetUpdateAfterBindStorageImages,
+	                                properties12.maxPerStageDescriptorUpdateAfterBindStorageImages)
+	                     : 0u;
+	LOGF("Vulkan bindless images: %s (update-after-bind sampled images %u, storage images %u)\n",
 	     graphics.bindless_enabled ? "enabled" : "unsupported",
-	     graphics.bindless_max_sampled_images);
+	     graphics.bindless_max_sampled_images, graphics.bindless_max_storage_images);
 	graphics.subgroup_size                 = properties11.subgroupSize;
 	graphics.min_subgroup_size             = subgroup_size_control.minSubgroupSize;
 	graphics.max_subgroup_size             = subgroup_size_control.maxSubgroupSize;
