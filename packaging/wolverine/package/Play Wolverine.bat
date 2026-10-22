@@ -62,11 +62,11 @@ rem AMD: some shader loops run far past their guest bound here (main menu 3-6 fp
 rem 30-40). The loop watchdog ends every loop after 4096 iterations and names it in the log
 rem ("Loop watchdog:"). It changes shader translation, so it has its own shader cache.
 if not defined KYTY_SHADER_LOOP_WATCHDOG set KYTY_SHADER_LOOP_WATCHDOG=1
-rem AMD: draws with pixel shaders that order overlapping pixels with POPS (blood, hit and some
-rem cutscene effects) lose the GPU in combat. Skipping them was the only setting that played
-rem through the lunge, the baton hit and the AA-gun cutscene (2026-10-17). Those effects are missing.
-rem KYTY_SKIP_POPS_SHADERS=0 draws them (expect the combat crash).
-if not defined KYTY_SKIP_POPS_SHADERS set KYTY_SKIP_POPS_SHADERS=1
+rem AMD: pixel shaders that order overlapping pixels with POPS (blood, hit and some cutscene
+rem effects) lost the GPU in combat by writing bindless images; since 95572c5 those writes are
+rem dropped, so they are drawn (the blood stain on Wolverine may flicker). KYTY_SKIP_POPS_SHADERS=1
+rem skips them again (no blood or hit effects).
+if not defined KYTY_SKIP_POPS_SHADERS set KYTY_SKIP_POPS_SHADERS=0
 rem Live switches for testing: write NAME=value lines into this file while the game runs.
 set KYTY_LIVE_FILE=%USERDATA%\kyty_live.txt
 rem Keep existing kyty_live.txt

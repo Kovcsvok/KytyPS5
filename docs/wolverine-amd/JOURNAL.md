@@ -109,3 +109,6 @@ Upstream `2864818` (AMD float min/max natívan, náluk a nehéz compute shaderek
 `run_2026-10-21_230418.log`: a HDR target (948) a placeholderbe ment, a valódi célok csak a két 1664x936 RGBA16F (972, 85) és egy 1024x1024 R16F (1264) – mégis fagy a `1280`-as blood draw. → **Bármely valódi kép írása fagy**, csak a 1x1 placeholder nem (A). A régi RGD (`C:\KytyDiagnostics\rgd\lunge1.txt`) szerint a fagyáskor nincs futó shader, egy barrier áll → inkább tömörítési metaadat-sérülés / fixed-function hang, mint shader-ciklus.
 Döntés: `KYTY_SHADER_BINDLESS_STORAGE_WRITES` alapértelmezése **0** (írás eldobva, mint 3ddfd07/T5w – stabil); a T7 kód `=2`-vel marad kutatásra. A következő build (min/max átvétel + ez) a játszható változat.
 Következő kutatási lépés (T7): RGD Hardware Crash Analysis a `=2` beállítással (execution marker + in-flight shader), illetve a storage nézet formátumának / DCC-jének ellenőrzése.
+
+## 2026-10-22 — Opus — játszható csomag
+`95572c5` → `C:\Games\Wolverine-AMD-Play` (`Play Wolverine AMD.bat`: POPS be, bindless írás eldobva, `KYTY_FAULT_WIDEN_KB=64`, natív min/max; `userdata` a T7y legújabb mentésével + driver cache; első indításkor teljes shader-fordítás). A csomag sablonjában (`packaging/.../Play Wolverine.bat`) a `KYTY_SKIP_POPS_SHADERS` alapértelmezése 0 lett (a következő buildtől).
