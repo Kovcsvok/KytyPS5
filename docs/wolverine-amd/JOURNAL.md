@@ -201,3 +201,4 @@ Saját idő (minden szál, profilozóval): `MaterializeResources` 4,8 s + `Shade
 Új kísérleti, élő kapcsolók (shader-fordítást nem érintik):
 - `KYTY_READBACK_STALE_ALL=1`: a vendégszálak GPU-írt memóriaolvasása visszaolvasás/várakozás nélkül a vendégmemóriából (esetleg elavult adat; a lap védett marad, minden olvasás emulált). Napló: `Stale-all reads (5 s)`. Ez a visszaolvasási várakozás „plafon-mérése”, képhibát okozhat.
 - `KYTY_INDIRECT_DRAW_GUARD` most élő (eddig csak env): 0 = az indirekt rajzolások elé nem kerül ellenőrző dispatch + barrier + render pass törés.
+`09212da` CI kész → `Wolverine-AMD-Async\emulator` (régi: `emulator-8d06dd7`). Váltók: `Exp 0 - normal / 1 - both off / 2 - no readback wait / 3 - no draw guard.bat`.
