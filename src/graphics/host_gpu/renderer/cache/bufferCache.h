@@ -258,6 +258,17 @@ private:
 	void                           BeginBackgroundReadback(uint64_t vaddr, uint64_t size);
 	void                           EndBackgroundReadback(uint64_t begin, uint64_t end, uint64_t tick);
 	void                   CompletePendingWriteReadback(size_t index);
+	void                   UnmarkPublishedRange(uint64_t begin, uint64_t end);
+	// KYTY_READBACK_SPARSE_KB (see bufferCache.cpp).
+	bool WidenSparseReadback(const Buffer& buffer, uint64_t& window_begin, uint64_t& window_end);
+	struct SparseReadbackStats {
+		uint64_t                              widened  = 0;
+		uint64_t                              declined = 0;
+		uint64_t                              bytes    = 0;
+		std::chrono::steady_clock::time_point report   = std::chrono::steady_clock::now();
+	};
+	SparseReadbackStats m_sparse_stats;
+	void                ReportSparseReadbacks();
 	void                   CompletePendingWriteReadbacks(uint64_t begin, uint64_t end);
 	[[nodiscard]] bool     OverlapsPendingWriteReadback(uint64_t begin, uint64_t end) const;
 

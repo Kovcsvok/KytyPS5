@@ -942,8 +942,9 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 	const uint64_t WindowSize   = ReadbackWindowSize();
 	const auto     buffer_begin = buffer.CpuAddress();
 	const auto     buffer_end   = buffer_begin + buffer.Size();
-	const auto     window_begin = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
-	const auto window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
+	auto           window_begin = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
+	auto window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
+	(void)WidenSparseReadback(buffer, window_begin, window_end);
 
 	if (TryDirectReadback(buffer, vaddr, size, is_write, window_begin, window_end)) {
 		stats.SetOutcome(ReadbackStats::DirectRead);
@@ -1267,6 +1268,7 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 		window_begin = std::max(page_begin, buffer_begin);
 		window_end   = std::min(page_end, buffer_end);
 	}
+	(void)WidenSparseReadback(buffer, window_begin, window_end);
 
 	// KYTY_DIRECT_READBACK: the bytes are in host-visible device memory, no download needed.
 	if (DirectReadbackEnabled()) {
@@ -1552,9 +1554,76 @@ void BufferCache::CompletePendingWriteReadback(size_t index) {
 	                                static_cast<std::ptrdiff_t>(index));
 	m_scheduler.Wait(pending.tick);
 	m_scheduler.WaitPriorityOperations(pending.tick);
-	if (!HasGpuDirtyBytes(pending.begin, pending.end - pending.begin)) {
-		m_memory_tracker.UnmarkRegionAsGpuModified(pending.begin, pending.end - pending.begin);
+	UnmarkPublishedRange(pending.begin, pending.end);
+}
+
+// After a readback of [begin, end) was published: the range stops being GPU-owned unless the GPU
+// wrote it again. A range wider than a readback window (KYTY_READBACK_SPARSE_KB) is released in
+// window steps, so bytes the GPU wrote again in one part keep only that part protected.
+void BufferCache::UnmarkPublishedRange(uint64_t begin, uint64_t end) {
+	if (!HasGpuDirtyBytes(begin, end - begin)) {
+		m_memory_tracker.UnmarkRegionAsGpuModified(begin, end - begin);
+		return;
 	}
+	const uint64_t step = ReadbackWindowSize();
+	if (end - begin <= step) {
+		return;
+	}
+	for (uint64_t at = begin; at < end;) {
+		const auto next = std::min(Common::AlignDown(at, step) + step, end);
+		if (!HasGpuDirtyBytes(at, next - at)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(at, next - at);
+		}
+		at = next;
+	}
+}
+
+// KYTY_READBACK_SPARSE_KB=N (live, default 0 = off): a readback of a buffer holding at most N KiB
+// of GPU-written bytes in all downloads all of them, instead of the window around the fault.
+// Wolverine combat 2026-10-22 (KYTY_READBACK_STATS): 3743 guest reads per 5 s of the 2.8 GB heap
+// 0x1210000000 on 332 pages, 2.7 KiB downloaded each; every one waited for the GPU (~1 ms), from
+// up to seven guest threads at once. One readback of the heap's few GPU-written bytes serves
+// them all until the GPU writes it again.
+bool BufferCache::WidenSparseReadback(const Buffer& buffer, uint64_t& window_begin,
+                                      uint64_t& window_end) {
+	static auto& sparse_kb = Common::LiveSwitches::Get("KYTY_READBACK_SPARSE_KB", 0);
+	const auto   limit =
+	    static_cast<uint64_t>(std::max<int64_t>(sparse_kb.load(std::memory_order_relaxed), 0)) << 10u;
+	const auto begin = buffer.CpuAddress();
+	const auto end   = begin + buffer.Size();
+	if (limit == 0 || (window_begin <= begin && end <= window_end)) {
+		return false;
+	}
+	uint64_t dirty = 0;
+	{
+		std::shared_lock lock(m_dirty_ranges_mutex);
+		m_gpu_modified_ranges.ForEachInRange(
+		    begin, end - begin, [&](uint64_t start, uint64_t stop) { dirty += stop - start; });
+	}
+	if (dirty == 0 || dirty > limit || OverlapsPendingWriteReadback(begin, end)) {
+		m_sparse_stats.declined++;
+		ReportSparseReadbacks();
+		return false;
+	}
+	window_begin = begin;
+	window_end   = end;
+	m_sparse_stats.widened++;
+	m_sparse_stats.bytes += dirty;
+	ReportSparseReadbacks();
+	return true;
+}
+
+// KYTY_READBACK_SPARSE_KB, every 5 s (GPU thread).
+void BufferCache::ReportSparseReadbacks() {
+	const auto now = std::chrono::steady_clock::now();
+	if (now - m_sparse_stats.report < std::chrono::seconds(5)) {
+		return;
+	}
+	::printf("Sparse readbacks (5 s): %" PRIu64 " widened to the whole buffer (%" PRIu64
+	         " KiB), %" PRIu64 " declined\n",
+	         m_sparse_stats.widened, m_sparse_stats.bytes / 1024u, m_sparse_stats.declined);
+	std::fflush(stdout);
+	m_sparse_stats = {.report = now};
 }
 
 void BufferCache::CompletePendingWriteReadbacks(uint64_t begin, uint64_t end) {
