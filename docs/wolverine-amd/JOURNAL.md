@@ -113,3 +113,7 @@ Következő kutatási lépés (T7): RGD Hardware Crash Analysis a `=2` beállít
 ## 2026-10-22 — Opus — játszható csomag
 `95572c5` → `C:\Games\Wolverine-AMD-Play` (`Play Wolverine AMD.bat`: POPS be, bindless írás eldobva, `KYTY_FAULT_WIDEN_KB=64`, natív min/max; `userdata` a T7y legújabb mentésével + driver cache; első indításkor teljes shader-fordítás). A csomag sablonjában (`packaging/.../Play Wolverine.bat`) a `KYTY_SKIP_POPS_SHADERS` alapértelmezése 0 lett (a következő buildtől).
 Felhasználói teszt (`Wolverine-AMD-Play`, `95572c5`): **nincs crash**, a játék tovább megy; mozgás közben 19–26 FPS (néha 28–32), a vérfolt-hiba egy idő után eltűnt. Ez a jelenlegi ajánlott beállítás.
+
+## 2026-10-22 — Opus — shader-betöltési akadás (9 FPS) elemzése
+Felhasználó: új shaderek fordításakor 9 FPS, egyébként 19–26. `Wolverine-AMD-Play` első futása (`run_2026-10-22_081523.log`): a program-cache üresen indult, 1969 rekorddal zárt (a 2. indítás ugyanott már lemezről tölt). Fordítási sorozatokban 5 s alatt ~6500 → 770–2600 cmdbuf, de a SPIR-V fordítás (`compile ... on misses`) csak 30–200 ms / 5 s → a költség a GPU-szálon a transzlációban (`TranslateProgram`) és/vagy a pipeline-okban (új grafikus: 20 ms várakozás/pipeline, memóriát író grafikus és minden compute: szinkron driver-fordítás).
+A/B (build nélkül, mindkettő ugyanazzal a cache-sel, `KYTY_SHADER_STATS=1` élőben): `Test A Normal.bat` (`userdata-a`) és `Test B Gyors shader.bat` (`userdata-b`: `KYTY_ASYNC_SHADERS=1` + `KYTY_PIPELINE_WAIT_MS=3`; egyik sem része a program-cache aláírásának).
