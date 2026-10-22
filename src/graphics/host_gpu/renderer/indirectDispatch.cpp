@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/indirectDispatch.h"
 
 #include "common/assert.h"
+#include "common/liveSwitches.h"
 #include "gpu_tiler_shaders/dispatch_indirect_groups_spv.h"
 #include "gpu_tiler_shaders/draw_indirect_guard_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -136,12 +137,11 @@ IndirectDispatchGroups::Convert(const CommandRecorder& command, vk::DeviceAddres
 	        m_groups.BufferDeviceAddress() + offset + 4u * sizeof(uint32_t)};
 }
 
+// KYTY_INDIRECT_DRAW_GUARD (live, default 1): 0 sends indirect draws to the GPU without the
+// validating dispatch (and its barriers and render pass break) in front of each.
 bool IndirectDrawGuard::Enabled() {
-	static const bool enabled = [] {
-		const char* value = std::getenv("KYTY_INDIRECT_DRAW_GUARD");
-		return value == nullptr || value[0] != '0';
-	}();
-	return enabled;
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_INDIRECT_DRAW_GUARD", 1);
+	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
 IndirectDrawGuard::IndirectDrawGuard(GraphicContext& graphics, CommandScheduler& scheduler)

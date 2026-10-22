@@ -334,6 +334,32 @@ bool AsyncReadReadbackEnabled() {
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
+// KYTY_READBACK_STALE_ALL=1 (live, research, default 0): every guest-thread read of GPU-written
+// memory is served from guest memory as it is (the bytes of the last download), with no download
+// and no wait; the page stays GPU-owned, so each later read faults and is served the same way.
+// Measures what the guest threads' readback waits cost (Wolverine combat 2026-10-22: the main
+// guest thread waited 50-70 ms of a 66-83 ms frame). Stale data can show as glitches.
+bool StaleAllReadsEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_READBACK_STALE_ALL", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
+void NoteStaleAllRead() {
+	static std::atomic<uint64_t> served {0};
+	static std::atomic<int64_t>  report_ms {0};
+	const auto count  = served.fetch_add(1, std::memory_order_relaxed) + 1;
+	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count();
+	if (auto last = report_ms.load(std::memory_order_relaxed);
+	    now_ms - last >= 5000 && report_ms.compare_exchange_strong(last, now_ms)) {
+		std::printf("Stale-all reads (5 s): %" PRIu64 " guest reads served without a readback\n",
+		            count);
+		std::fflush(stdout);
+		served.store(0, std::memory_order_relaxed);
+	}
+}
+
 // A guest fault on GPU-written memory downloads an aligned window around the faulting bytes, so
 // nearby accesses share one GPU drain. KYTY_READBACK_WINDOW_KB (a live switch; a power of two,
 // at least the tracker page) changes its width for A/B measurements. The default, 2 MiB, measured
@@ -813,6 +839,12 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	                         !Libs::LibKernel::Memory::ForceSyncReadback() &&
 	                         StaleInflightReadsEnabled();
 	if (stale_reads && ServeStaleRead(vaddr)) {
+		Libs::LibKernel::Memory::RequestServeFromBacking();
+		return;
+	}
+	if (!is_write && !GuestGpu::IsGpuThread() && !Libs::LibKernel::Memory::ForceSyncReadback() &&
+	    StaleAllReadsEnabled()) {
+		NoteStaleAllRead();
 		Libs::LibKernel::Memory::RequestServeFromBacking();
 		return;
 	}

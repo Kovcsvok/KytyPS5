@@ -1277,9 +1277,9 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	}
 	Buffer*  indirect_buffer = nullptr;
 	uint64_t indirect_offset = 0;
+	const bool guard = emit.indirect_args != 0 && IndirectDrawGuard::Enabled();
 	if (emit.indirect_args != 0) {
 		EXIT_IF(mesh_active || (emit.indirect_args & 3u) != 0);
-		const bool guard = IndirectDrawGuard::Enabled();
 		const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 		    emit.indirect_args, draw.IsIndexed() ? sizeof(vk::DrawIndexedIndirectCommand)
 		                                         : sizeof(vk::DrawIndirectCommand),
@@ -1334,7 +1334,7 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	if (indirect_buffer != nullptr) {
 		// Earlier passes wrote the arguments; indirect reads happen outside the render pass.
 		buffer.EndRendering();
-		if (m_indirect_draw_guard != nullptr) {
+		if (guard && m_indirect_draw_guard != nullptr) {
 			const auto guarded = m_indirect_draw_guard->Guard(
 			    vk_buffer, indirect_buffer->BufferDeviceAddress() + indirect_offset,
 			    draw.IsIndexed());
