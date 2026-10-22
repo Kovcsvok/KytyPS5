@@ -69,4 +69,4 @@ Ami segített: az összes POPS-shader kihagyása (crash), watchdog vagy óra-jav
 ## Szabályok
 - A játékfájlokat, a mentéseket és a régi csomagokat ne töröld. Új teszthez új mappát vagy userdata-másolatot használj. A TDR-t (registry) ne emeld.
 - Egy CI-buildbe több kis változtatás mehet, de mindegyik legyen kapcsolóval A/B-zhető (env), és ezt írd be a `JOURNAL.md`-be.
-- Játékmappára mutató junctiont/symlinket (pl. `runpp0\d`) soha ne törölj rekurzívan: PowerShell 5.1-ben a `Remove-Item -Recurse` a célt is törli. Előbb csak a linket (`cmd /c rmdir <link>` vagy `[IO.Directory]::Delete(<link>, $false)`), ellenőrizd, hogy nem maradt reparse point, és csak utána a mappát.
+- Játékmappára mutató junctiont/symlinket (pl. `run\app0\d`) soha ne törölj rekurzívan: PowerShell 5.1-ben a `Remove-Item -Recurse` a célt is törli. Előbb csak a linket (`cmd /c rmdir <link>` vagy `[IO.Directory]::Delete(<link>, $false)`), ellenőrizd, hogy nem maradt reparse point, és csak utána a mappát.
