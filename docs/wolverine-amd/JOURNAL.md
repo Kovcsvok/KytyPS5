@@ -184,3 +184,4 @@ Megfigyelés: minden dispatch után `ShaderAccessBarrier` (compute → ALL_COMMA
 Új (shader-fordítást nem érint, `KYTY_PROGRAM_CACHE_GIT_REVISION=95572c5…` marad):
 - `KYTY_GPU_EVENT_TIME=1` (élő): minden draw/dispatch előtt-után GPU-időbélyeg; 5 s-onként `GPU events (5 s): N draws/dispatches X ms/s, between them Y ms/s` + a 15 legdrágább shader (`P` pixel/draw, `V` PS nélküli draw, `C` compute; ms/s, darab, átlag µs).
 - `KYTY_DISPATCH_BARRIERS=0` (élő, kutatás, alap 1): a dispatch körüli automatikus barrierek helyett a guest partial flush/release eseményei lesznek globális barrierek (mint `KYTY_LEGACY_GLOBAL_BARRIERS=1`); az indirekt argumentum-barrier marad. Kockázat: grafikai hiba / ritkán GPU-hang → csak élőben, harcban A/B.
+`8d06dd7` CI kész → `Wolverine-AMD-Async\emulator` (régi: `emulator-5b81c0f`). Indító: `Play Wolverine AMD Async.bat`; élő: `KYTY_GPU_EVENT_TIME=1`, `KYTY_DISPATCH_BARRIERS=1`, váltás: `Dispatch Barriers 0/1.bat` (a Direct-indítók törölve).
