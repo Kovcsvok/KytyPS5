@@ -183,9 +183,11 @@ private:
 
 	// GPU thread: a guest fault on GPU-written memory, resolved synchronously.
 	void ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write);
-	// GPU thread: KYTY_DIRECT_READBACK (see bufferCache.cpp).
+	// GPU thread: KYTY_DIRECT_READBACK (see bufferCache.cpp), for the readback window.
 	[[nodiscard]] bool TryDirectReadback(Buffer& buffer, uint64_t vaddr, uint64_t size,
-	                                     bool is_write);
+	                                     bool is_write, uint64_t window_begin, uint64_t window_end);
+	std::vector<std::pair<uint64_t, uint64_t>> m_direct_pages;
+	std::vector<std::pair<uint64_t, uint64_t>> m_direct_ranges;
 	// GPU thread: KYTY_COPY_QUEUE_READBACK (see bufferCache.cpp). Downloads the window's
 	// GPU-written bytes on the readback queue when every GPU write to the buffer has executed.
 	[[nodiscard]] bool TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin,
@@ -223,6 +225,9 @@ private:
 		uint64_t                              snapshots    = 0;
 		uint64_t                              fallbacks    = 0;
 		uint64_t                              unmapped     = 0;
+		uint64_t                              over_budget  = 0;
+		uint64_t                              bytes        = 0;
+		uint64_t                              ns           = 0;
 		std::chrono::steady_clock::time_point report       = std::chrono::steady_clock::now();
 	};
 	DirectReadbackStats m_direct_stats;

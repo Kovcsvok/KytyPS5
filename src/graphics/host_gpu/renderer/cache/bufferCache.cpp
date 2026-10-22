@@ -890,17 +890,17 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 		return;
 	}
 
-	if (TryDirectReadback(buffer, vaddr, size, is_write)) {
-		stats.SetOutcome(ReadbackStats::DirectRead);
-		return;
-	}
-
 	// Widen nearby CPU reads so they share one GPU drain.
 	const uint64_t WindowSize   = ReadbackWindowSize();
 	const auto     buffer_begin = buffer.CpuAddress();
 	const auto     buffer_end   = buffer_begin + buffer.Size();
 	const auto     window_begin = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
 	const auto window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
+
+	if (TryDirectReadback(buffer, vaddr, size, is_write, window_begin, window_end)) {
+		stats.SetOutcome(ReadbackStats::DirectRead);
+		return;
+	}
 
 	if (stats.Enabled()) {
 		stats.FindWriter([this](uint64_t tick) { return m_scheduler.IsFree(tick); });
@@ -928,41 +928,83 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 	}
 }
 
-// KYTY_DIRECT_READBACK=1 (a live switch, off by default): when the buffer lives in host-visible
-// device memory and every GPU write recorded into it has completed, the faulting pages' GPU-written
-// bytes are copied straight from the mapping into guest memory: no GPU copy, submission or drain.
+// KYTY_DIRECT_READBACK (a live switch, off by default): when the buffer lives in host-visible
+// device memory and every GPU write recorded into it has completed, the window's GPU-written bytes
+// are copied straight from the mapping into guest memory: no GPU copy, submission or drain.
 // Submissions end with a device-to-host barrier while such buffers exist (CommandScheduler).
-bool BufferCache::TryDirectReadback(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_write) {
+// The window is the one a download would cover, so as many later faults are spared; a window with
+// more than KYTY_DIRECT_READBACK_KB (live, default 32) GPU-written bytes downloads as before, since
+// the host reads the mapping uncached. Wolverine 2026-10-22, faulting pages only: ~50k direct
+// readbacks per 5 s instead of ~5k downloads, 10-12 -> 3-4 fps.
+bool BufferCache::TryDirectReadback(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_write,
+                                    uint64_t window_begin, uint64_t window_end) {
 	if (!DirectReadbackEnabled() || buffer.Mapped().empty() ||
 	    !m_scheduler.IsFree(buffer.last_gpu_write_tick)) {
 		return false;
 	}
-	const auto page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
-	const auto page_end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
-	if (!buffer.IsInBounds(page_begin, page_end - page_begin) ||
-	    OverlapsPendingWriteReadback(page_begin, page_end)) {
+	const auto begin = Common::AlignDown(window_begin, TRACKER_PAGE_SIZE);
+	const auto end   = std::min(Common::AlignUp(window_end, TRACKER_PAGE_SIZE),
+	                            buffer.CpuAddress() + buffer.Size());
+	if (end <= begin || !buffer.IsInBounds(begin, end - begin) ||
+	    OverlapsPendingWriteReadback(begin, end)) {
 		return false;
 	}
+	static auto& budget_kb = Common::LiveSwitches::Get("KYTY_DIRECT_READBACK_KB", 32);
+	const auto   budget =
+	    static_cast<uint64_t>(std::max<int64_t>(budget_kb.load(std::memory_order_relaxed), 0))
+	    << 10u;
+	KYTY_PROFILER_BLOCK("BufferCache::DirectReadback");
+	const auto start_time = std::chrono::steady_clock::now();
+	// As the downloads: the GPU-written bytes of the window's GPU-owned pages (tracker lock, then
+	// the dirty ranges, as DownloadBufferWindow).
+	auto& pages = m_direct_pages;
+	pages.clear();
+	uint64_t dirty = 0;
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    begin, end - begin, [&](uint64_t address, uint64_t bytes) noexcept {
+		    pages.emplace_back(address, bytes);
+		    std::shared_lock lock(m_dirty_ranges_mutex);
+		    m_gpu_modified_ranges.ForEachInRange(
+		        address, bytes, [&](uint64_t start, uint64_t stop) { dirty += stop - start; });
+	    });
+	if (dirty > budget) {
+		m_direct_stats.over_budget++;
+		return false;
+	}
+	uint64_t copied = 0;
 	{
-		KYTY_PROFILER_BLOCK("BufferCache::DirectReadback");
 		std::unique_lock lock(m_dirty_ranges_mutex);
 		// A queued download of these bytes would publish them again when it lands.
-		if (m_downloading_ranges.Intersects(page_begin, page_end - page_begin)) {
+		if (m_downloading_ranges.Intersects(begin, end - begin)) {
 			return false;
 		}
+		// Taken again under the lock: a guest write can have overwritten some of them since.
+		auto& ranges = m_direct_ranges;
+		ranges.clear();
+		for (const auto [address, bytes]: pages) {
+			m_gpu_modified_ranges.ForEachInRange(address, bytes,
+			                                     [&](uint64_t start, uint64_t stop) {
+				                                     ranges.emplace_back(start, stop);
+			                                     });
+		}
 		const auto* mapped = buffer.Mapped().data();
-		m_gpu_modified_ranges.ForEachInRange(
-		    page_begin, page_end - page_begin, [&](uint64_t start, uint64_t end) {
-			    Libs::LibKernel::Memory::WriteBacking(start, mapped + buffer.Offset(start),
-			                                          end - start);
-		    });
-		m_gpu_modified_ranges.Subtract(page_begin, page_end - page_begin);
+		for (const auto [start, stop]: ranges) {
+			Libs::LibKernel::Memory::WriteBacking(start, mapped + buffer.Offset(start),
+			                                      stop - start);
+			m_gpu_modified_ranges.Subtract(start, stop - start);
+			copied += stop - start;
+		}
 	}
-	m_memory_tracker.UnmarkRegionAsGpuModified(page_begin, page_end - page_begin);
+	m_memory_tracker.UnmarkRegionAsGpuModified(begin, end - begin);
 	if (is_write) {
 		m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 	}
 	m_direct_readbacks++;
+	m_direct_stats.bytes += copied;
+	m_direct_stats.ns += static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+	                                                         start_time)
+	        .count());
 	return true;
 }
 
@@ -1164,11 +1206,25 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 		return 0;
 	}
 
+	const uint64_t WindowSize   = ReadbackWindowSize();
+	const auto     buffer_begin = buffer.CpuAddress();
+	const auto     buffer_end   = buffer_begin + buffer.Size();
+	window_begin                = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
+	window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
+	if (OverlapsPendingWriteReadback(window_begin, window_end)) {
+		// The page itself is not pending (checked above), but the window shares bytes with a
+		// landing readback (neighbouring pages read by other guest threads): download only the
+		// faulting pages. Before, reads went synchronous here (run 42: ~110 ms/s left on the GPU
+		// thread for Wolverine's busiest readback buffer).
+		window_begin = std::max(page_begin, buffer_begin);
+		window_end   = std::min(page_end, buffer_end);
+	}
+
 	// KYTY_DIRECT_READBACK: the bytes are in host-visible device memory, no download needed.
 	if (DirectReadbackEnabled()) {
 		if (buffer.Mapped().empty()) {
 			m_direct_stats.unmapped++;
-		} else if (TryDirectReadback(buffer, vaddr, size, is_write)) {
+		} else if (TryDirectReadback(buffer, vaddr, size, is_write, window_begin, window_end)) {
 			m_direct_stats.immediate++;
 			ReportDirectReadbacks();
 			stats.SetOutcome(ReadbackStats::DirectRead);
@@ -1188,19 +1244,6 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 		ReportDirectReadbacks();
 	}
 
-	const uint64_t WindowSize   = ReadbackWindowSize();
-	const auto     buffer_begin = buffer.CpuAddress();
-	const auto     buffer_end   = buffer_begin + buffer.Size();
-	window_begin                = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
-	window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
-	if (OverlapsPendingWriteReadback(window_begin, window_end)) {
-		// The page itself is not pending (checked above), but the window shares bytes with a
-		// landing readback (neighbouring pages read by other guest threads): download only the
-		// faulting pages. Before, reads went synchronous here (run 42: ~110 ms/s left on the GPU
-		// thread for Wolverine's busiest readback buffer).
-		window_begin = std::max(page_begin, buffer_begin);
-		window_end   = std::min(page_end, buffer_end);
-	}
 	if (!DownloadBufferMemory(buffer, window_begin, window_end - window_begin)) {
 		stats.SetOutcome(ReadbackStats::NothingToDownload);
 		if (is_write) {
@@ -1318,8 +1361,13 @@ bool BufferCache::FinishDirectReadback(uint64_t vaddr, uint64_t size, bool is_wr
 	if (!IsRegionRegistered(vaddr, size)) {
 		return true;
 	}
-	auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
-	if (TryDirectReadback(buffer, vaddr, size, is_write)) {
+	auto&          buffer       = m_slot_buffers[FindBuffer(vaddr, size)];
+	const uint64_t WindowSize   = ReadbackWindowSize();
+	const auto     buffer_begin = buffer.CpuAddress();
+	const auto     window_begin = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
+	const auto     window_end   = std::min(std::max(window_begin + WindowSize, vaddr + size),
+	                                       buffer_begin + buffer.Size());
+	if (TryDirectReadback(buffer, vaddr, size, is_write, window_begin, window_end)) {
 		m_direct_stats.after_writer++;
 		ReportDirectReadbacks();
 		return true;
@@ -1357,10 +1405,13 @@ void BufferCache::ReportDirectReadbacks() {
 		return;
 	}
 	::printf("Direct readbacks (5 s): %" PRIu64 " from the mapping (guest threads: %" PRIu64
-	         " at once, %" PRIu64 " after the writer), %" PRIu64 " snapshots, %" PRIu64
-	         " synchronous, %" PRIu64 " faults on unmapped buffers\n",
+	         " at once, %" PRIu64 " after the writer), %" PRIu64 " KiB in %.1f ms, %" PRIu64
+	         " over the budget, %" PRIu64 " snapshots, %" PRIu64 " synchronous, %" PRIu64
+	         " faults on unmapped buffers\n",
 	         m_direct_readbacks, m_direct_stats.immediate, m_direct_stats.after_writer,
-	         m_direct_stats.snapshots, m_direct_stats.fallbacks, m_direct_stats.unmapped);
+	         m_direct_stats.bytes / 1024u, static_cast<double>(m_direct_stats.ns) / 1e6,
+	         m_direct_stats.over_budget, m_direct_stats.snapshots, m_direct_stats.fallbacks,
+	         m_direct_stats.unmapped);
 	std::fflush(stdout);
 	m_direct_readbacks = 0;
 	m_direct_stats     = {.report = now};
