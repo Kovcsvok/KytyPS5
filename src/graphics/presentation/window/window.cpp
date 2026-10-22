@@ -24,6 +24,8 @@
 #include "libs/controller.h"
 #include "loader/systemContent.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <memory>
@@ -955,11 +957,34 @@ void WindowContext::UpdateTitle() {
 	const auto frequency = Common::Timer::QueryPerformanceFrequency();
 	frame_num++;
 	fps_frames++;
+	// Every 5 s in the log: the frame rate with its worst second and longest frame, to line up
+	// FPS drops with the other 5 s reports (it was only in the title).
+	static uint64_t report_start  = now;
+	static uint64_t report_frames = 0;
+	static uint64_t last_frame    = now;
+	static uint64_t longest_frame = 0;
+	static double   worst_fps     = 0.0;
+	report_frames++;
+	longest_frame = std::max(longest_frame, now - last_frame);
+	last_frame    = now;
 	if (now - fps_start >= frequency) {
 		current_fps = static_cast<double>(fps_frames) * static_cast<double>(frequency) /
 		              static_cast<double>(now - fps_start);
 		fps_start   = now;
 		fps_frames  = 0;
+		worst_fps   = worst_fps == 0.0 ? current_fps : std::min(worst_fps, current_fps);
+	}
+	if (now - report_start >= 5 * frequency) {
+		::printf("Frames (5 s): %.1f fps, worst second %.0f fps, longest frame %.0f ms\n",
+		         static_cast<double>(report_frames) * static_cast<double>(frequency) /
+		             static_cast<double>(now - report_start),
+		         worst_fps,
+		         static_cast<double>(longest_frame) * 1000.0 / static_cast<double>(frequency));
+		std::fflush(stdout);
+		report_start  = now;
+		report_frames = 0;
+		longest_frame = 0;
+		worst_fps     = 0.0;
 	}
 
 	const auto* device_name = graphic_ctx.GetPhysicalDeviceProperties().deviceName.data();
