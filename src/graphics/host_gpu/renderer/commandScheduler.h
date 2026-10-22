@@ -65,6 +65,11 @@ public:
 		return m_last_submit_us.load(std::memory_order_relaxed);
 	}
 
+	// KYTY_GPU_EVENT_TIME (see commandScheduler.cpp): a GPU timestamp before (after = false) and
+	// after a guest draw or dispatch in the current command buffer. kind: 'P' a draw with a pixel
+	// shader, 'V' one without, 'C' a dispatch; hash: that shader.
+	void MarkGpuEvent(char kind, uint64_t hash, bool after);
+
 	// KYTY_RECORD_THREAD (see commandScheduler.cpp). Enabled for the renderer's scheduler only.
 	void EnableRecordingThread();
 	// The current command buffer's Vulkan commands are executed by the recording thread.
