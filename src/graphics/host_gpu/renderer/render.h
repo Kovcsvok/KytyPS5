@@ -284,6 +284,8 @@ private:
 	std::unique_ptr<IndirectDispatchGroups> m_indirect_groups;
 	// Created at the first indirect draw (KYTY_INDIRECT_DRAW_GUARD, on by default).
 	std::unique_ptr<IndirectDrawGuard> m_indirect_draw_guard;
+	// Created at the first mesh draw with GPU-written arguments (KYTY_DGC_DRAWS).
+	std::unique_ptr<MeshIndirectDraws> m_mesh_indirect_draws;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
 #include <array>
+#include <unordered_map>
 #include <vulkan/vulkan.hpp>
 
 namespace Libs::Graphics {
@@ -96,6 +97,66 @@ private:
 	uint32_t                m_next            = 0;
 	uint32_t                m_reported        = 0;
 	int64_t                 m_last_report_us  = 0;
+};
+
+// Guest mesh draws whose arguments an earlier pass writes on the GPU: the host path reads the
+// record on the CPU (RenderExecutor::ExecutePreparedDraw), and a GPU-written page drains the GPU
+// first (Wolverine combat 2026-10-22: ~60 a second, ~1 ms each on the GPU thread). With
+// VK_EXT_device_generated_commands (KYTY_DEVICE_GENERATED_COMMANDS=1 at start-up, KYTY_DGC_DRAWS
+// live, default 1) a one-invocation pass turns the record into one command sequence, the mesh
+// shader's six draw words as a push-constant token and the task counts, which the GPU executes.
+class MeshIndirectDraws {
+public:
+	MeshIndirectDraws(GraphicContext& graphics, CommandScheduler& scheduler);
+	~MeshIndirectDraws();
+	KYTY_CLASS_NO_COPY(MeshIndirectDraws);
+
+	[[nodiscard]] static bool Enabled(const GraphicContext& graphics);
+
+	struct Params {
+		vk::DeviceAddress record               = 0;
+		bool              indexed              = false;
+		uint32_t          max_count            = 0;
+		uint32_t          element_size         = 0;
+		uint64_t          index_address        = 0;
+		uint32_t          primitive_size       = 0;
+		uint32_t          primitive_step       = 0;
+		uint32_t          primitives_per_group = 0;
+	};
+	// Records the conversion of the record at params.record into a sequence entry and returns
+	// it. Binds a compute pipeline and push state; must be recorded outside a render pass.
+	[[nodiscard]] uint32_t Convert(const CommandRecorder& command, const Params& params);
+	// Records the generated draw of `entry` with the bound mesh `pipeline`, in the render pass.
+	void Execute(const CommandRecorder& command, vk::Pipeline pipeline,
+	             vk::PipelineLayout pipeline_layout, vk::ShaderStageFlags stages, uint32_t entry);
+
+private:
+	[[nodiscard]] vk::IndirectCommandsLayoutEXT LayoutFor(vk::PipelineLayout pipeline_layout);
+	[[nodiscard]] vk::DeviceSize PreprocessSizeFor(vk::Pipeline                  pipeline,
+	                                               vk::IndirectCommandsLayoutEXT layout);
+	void                         Report();
+
+	// Ring of sequences. Each conversion first waits for every earlier command, so neither an
+	// entry nor the preprocess buffer is rewritten while a generated draw still reads it.
+	static constexpr uint32_t Entries        = 1024;
+	static constexpr uint32_t EntryBytes     = 64;
+	static constexpr uint32_t SequenceStride = 36; // 6 draw words, then x, y, z task counts
+	static constexpr vk::DeviceSize PreprocessAlignment = 256;
+
+	GraphicContext&                                                   m_graphics;
+	CommandScheduler&                                                 m_scheduler;
+	Buffer                                                            m_sequences;
+	vk::PipelineLayout                                                m_pipeline_layout = nullptr;
+	vk::Pipeline                                                      m_pipeline        = nullptr;
+	std::unordered_map<VkPipelineLayout, VkIndirectCommandsLayoutEXT> m_layouts;
+	std::unordered_map<VkPipeline, vk::DeviceSize>                    m_preprocess_sizes;
+	vk::Buffer                                                        m_preprocess = nullptr;
+	vk::DeviceMemory  m_preprocess_memory   = nullptr;
+	vk::DeviceSize    m_preprocess_capacity = 0;
+	vk::DeviceAddress m_preprocess_address  = 0;
+	uint32_t          m_next                = 0;
+	uint64_t          m_draws               = 0;
+	int64_t           m_last_report_us      = 0;
 };
 
 } // namespace Libs::Graphics

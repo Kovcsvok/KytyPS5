@@ -1,0 +1,90 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+// DRAW_INDIRECT / DRAW_INDEX_INDIRECT of a guest mesh draw (KYTY_DGC_DRAWS): turns the guest's
+// draw record into one device-generated command sequence, as RenderExecutor::ExecutePreparedDraw
+// and ExecutePreparedDrawResolved do on the host: the mesh shader's six draw words (pushed as a
+// push-constant token) and the task counts of a draw-mesh-tasks token. A draw whose counts exceed
+// the host limits gets zero groups (the host path skips it).
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Record {
+    uint words[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Sequence {
+    uint words[];
+};
+
+layout(push_constant) uniform Push {
+    uvec2 record_address;
+    uvec2 sequence_address;
+    uvec2 index_address;
+    uint  indexed;
+    uint  max_count;
+    uint  element_size;
+    uint  primitive_size;
+    uint  primitive_step;
+    uint  primitives_per_group;
+    uint  max_groups_x;
+    uint  max_groups_y;
+    uint  max_groups_total;
+} pc;
+
+uint umulExtendedHigh(uint a, uint b) {
+    uint high;
+    uint low;
+    umulExtended(a, b, high, low);
+    return high;
+}
+
+void main() {
+    Record record = Record(pc.record_address);
+    uint count;
+    uint instances = record.words[1];
+    uint first_index = 0u;
+    uint vertex_word;
+    uint first_instance;
+    if (pc.indexed != 0u) {
+        // {index count, instances, first index, vertex offset, first instance}
+        count          = min(record.words[0], pc.max_count);
+        first_index    = record.words[2];
+        vertex_word    = record.words[3];
+        first_instance = record.words[4];
+    } else {
+        // {vertex count, instances, first vertex, first instance}
+        count          = record.words[0];
+        vertex_word    = record.words[2];
+        first_instance = record.words[3];
+    }
+    const uint primitives =
+        count < pc.primitive_size ? 0u : (count - pc.primitive_size) / pc.primitive_step + 1u;
+    uint groups = primitives == 0u || instances == 0u
+                      ? 0u
+                      : (primitives - 1u) / pc.primitives_per_group + 1u;
+    if (groups > pc.max_groups_x || instances > pc.max_groups_y ||
+        (instances != 0u && groups > pc.max_groups_total / instances)) {
+        groups    = 0u;
+        instances = 0u;
+    }
+    // index address + first index * element size, in 64 bits from two 32-bit halves
+    const uint offset = first_index * pc.element_size;
+    uint carry;
+    const uint address_low  = uaddCarry(pc.index_address.x, offset, carry);
+    const uint address_high = pc.index_address.y + carry +
+                              (pc.element_size == 0u ? 0u : umulExtendedHigh(first_index, pc.element_size));
+
+    Sequence sequence = Sequence(pc.sequence_address);
+    sequence.words[0] = count;
+    sequence.words[1] = vertex_word;
+    sequence.words[2] = first_instance;
+    sequence.words[3] = pc.element_size;
+    sequence.words[4] = address_low;
+    sequence.words[5] = address_high;
+    sequence.words[6] = groups;
+    sequence.words[7] = instances;
+    sequence.words[8] = groups == 0u ? 0u : 1u;
+}
+

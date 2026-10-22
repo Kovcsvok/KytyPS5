@@ -1158,7 +1158,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const bool mesh = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
 	const bool quad =
 	    buffer.GetUserConfig().GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy;
-	if (emit.indirect_args == 0 || (!mesh && !quad)) {
+	// KYTY_DGC_DRAWS: a mesh draw's GPU-written arguments stay on the GPU (MeshIndirectDraws).
+	if (emit.indirect_args == 0 || (!mesh && !quad) ||
+	    (mesh && MeshIndirectDraws::Enabled(m_context.GetGraphics()))) {
 		ExecutePreparedDrawResolved(submit_id, buffer, draw, state, topology, emit, index_source,
 		                            primitive_restart_enable);
 		return;
@@ -1210,6 +1212,8 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	const auto vertex_stages =
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};
 	const bool mesh_active = state.vertex_info[0].stage.program->stage == ShaderType::Mesh;
+	// KYTY_DGC_DRAWS: the counts are read on the GPU (MeshIndirectDraws, ExecutePreparedDraw).
+	const bool mesh_indirect = mesh_active && emit.indirect_args != 0;
 	uint32_t   mesh_groups = 0;
 	if (mesh_active) {
 		const auto& mesh = state.vertex_info[0].mesh;
@@ -1225,15 +1229,17 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 			     static_cast<uint32_t>(ucfg.GetPrimType()), draw.IsIndexed(), primitive_restart_enable);
 		}
 		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
-		if (primitives == 0 || draw.instance_count == 0) {
+		if (mesh_indirect) {
+			// Groups and limits are applied by the conversion pass.
+		} else if (primitives == 0 || draw.instance_count == 0) {
 			return;
 		}
-		mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
+		mesh_groups        = mesh_indirect ? 0u : (primitives - 1u) / mesh.primitives_per_group + 1u;
 		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
-		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
-		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
-		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
-		        limits.maxMeshWorkGroupTotalCount) {
+		if (!mesh_indirect && (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
+		                       draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
+		                       static_cast<uint64_t>(mesh_groups) * draw.instance_count >
+		                           limits.maxMeshWorkGroupTotalCount)) {
 			// Garbage counts (a skipped culling dispatch left its draw arguments unwritten)
 			// would only lose the device: drop the draw instead of the whole run.
 			static std::atomic<uint32_t> reported {0};
@@ -1277,15 +1283,19 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	}
 	Buffer*  indirect_buffer = nullptr;
 	uint64_t indirect_offset = 0;
-	const bool guard = emit.indirect_args != 0 && IndirectDrawGuard::Enabled();
+	const bool guard = emit.indirect_args != 0 && !mesh_indirect && IndirectDrawGuard::Enabled();
 	if (emit.indirect_args != 0) {
-		EXIT_IF(mesh_active || (emit.indirect_args & 3u) != 0);
+		EXIT_IF((mesh_active && !mesh_indirect) || (emit.indirect_args & 3u) != 0);
 		const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 		    emit.indirect_args, draw.IsIndexed() ? sizeof(vk::DrawIndexedIndirectCommand)
 		                                         : sizeof(vk::DrawIndirectCommand),
-		    false, false, {}, guard);
+		    false, false, {}, guard || mesh_indirect);
 		EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
-		EXIT_IF(guard && !args_buffer->HasDeviceAddress());
+		EXIT_IF((guard || mesh_indirect) && !args_buffer->HasDeviceAddress());
+		if (mesh_indirect && m_mesh_indirect_draws == nullptr) {
+			m_mesh_indirect_draws = std::make_unique<MeshIndirectDraws>(
+			    m_context.GetGraphics(), m_context.GetCommandScheduler());
+		}
 		indirect_buffer = args_buffer;
 		indirect_offset = args_offset;
 		if (guard && m_indirect_draw_guard == nullptr) {
@@ -1331,9 +1341,22 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	// memory.
 	const auto vk_buffer = buffer.Recorder();
 	vk::Buffer indirect_handle = indirect_buffer != nullptr ? indirect_buffer->Handle() : nullptr;
+	uint32_t   mesh_entry      = 0;
 	if (indirect_buffer != nullptr) {
 		// Earlier passes wrote the arguments; indirect reads happen outside the render pass.
 		buffer.EndRendering();
+		if (mesh_indirect) {
+			const auto& mesh = state.vertex_info[0].mesh;
+			mesh_entry       = m_mesh_indirect_draws->Convert(
+                vk_buffer, {.record        = indirect_buffer->BufferDeviceAddress() + indirect_offset,
+                            .indexed       = draw.IsIndexed(),
+                            .max_count     = draw.index_count,
+                            .element_size  = index_source.guest_element_size,
+                            .index_address = index_source.address,
+                            .primitive_size       = mesh.InputPrimitiveSize(),
+                            .primitive_step       = mesh.InputPrimitiveStep(),
+                            .primitives_per_group = mesh.primitives_per_group});
+		}
 		if (guard && m_indirect_draw_guard != nullptr) {
 			const auto guarded = m_indirect_draw_guard->Guard(
 			    vk_buffer, indirect_buffer->BufferDeviceAddress() + indirect_offset,
@@ -1376,7 +1399,9 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u, ps_hash, vs_hash);
 	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
-	if (mesh_active) {
+	if (mesh_indirect) {
+		// The generated sequence pushes the draw words.
+	} else if (mesh_active) {
 		const uint32_t draw_data[] {
 		    draw.index_count,
 		    draw.IsIndexed() ? static_cast<uint32_t>(emit.vertex_offset) : emit.first_vertex,
@@ -1429,7 +1454,16 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	const char event_kind = ps_hash != 0 ? 'P' : 'V';
 	const auto event_hash = ps_hash != 0 ? ps_hash : vs_hash;
 	m_context.GetCommandScheduler().MarkGpuEvent(event_kind, event_hash, false);
-	if (mesh_active) {
+	if (mesh_indirect) {
+		m_mesh_indirect_draws->Execute(vk_buffer, pipeline.pipeline, pipeline.pipeline_layout,
+		                               state.ps_active ? vk::ShaderStageFlagBits::eMeshEXT |
+		                                                     vk::ShaderStageFlagBits::eFragment
+		                                               : vk::ShaderStageFlags {
+		                                                     vk::ShaderStageFlagBits::eMeshEXT},
+		                               mesh_entry);
+		// Executed sequences leave the state their tokens set undefined.
+		buffer.InvalidateDynamicState();
+	} else if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit, indirect_handle, indirect_offset);

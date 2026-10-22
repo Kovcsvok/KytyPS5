@@ -798,6 +798,32 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 			graphics.device_coherent_memory_enabled = true;
 		}
 	}
+	vk::PhysicalDeviceMaintenance5FeaturesKHR                maintenance5 {};
+	vk::PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT     generated_commands {};
+	if (HasExtension(device_extensions, VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME)) {
+		vk::PhysicalDeviceMaintenance5FeaturesKHR            supported_maintenance5 {};
+		vk::PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT supported_generated {};
+		supported_generated.pNext = &supported_maintenance5;
+		vk::PhysicalDeviceFeatures2 generated_query {};
+		generated_query.pNext = &supported_generated;
+		physical_device.getFeatures2(&generated_query);
+		vk::PhysicalDeviceDeviceGeneratedCommandsPropertiesEXT generated_properties {};
+		vk::PhysicalDeviceProperties2                          generated_properties2 {};
+		generated_properties2.pNext = &generated_properties;
+		physical_device.getProperties2(&generated_properties2);
+		if (supported_generated.deviceGeneratedCommands && supported_maintenance5.maintenance5 &&
+		    (generated_properties.supportedIndirectCommandsShaderStages &
+		     vk::ShaderStageFlagBits::eMeshEXT)) {
+			maintenance5.maintenance5                  = VK_TRUE;
+			maintenance5.pNext                         = const_cast<void*>(create_info.pNext);
+			generated_commands.deviceGeneratedCommands = VK_TRUE;
+			generated_commands.pNext                   = &maintenance5;
+			create_info.pNext                          = &generated_commands;
+			graphics.device_generated_commands_enabled = true;
+		}
+		std::printf("Vulkan device-generated commands: %s\n",
+		            graphics.device_generated_commands_enabled ? "enabled" : "unsupported");
+	}
 	if (graphics.shader_image_int64_atomics_enabled) {
 		image_atomic_int64.pNext = const_cast<void*>(create_info.pNext);
 		image_atomic_int64.sparseImageInt64Atomics = VK_FALSE;
@@ -1246,6 +1272,15 @@ void WindowContext::CreateVulkan() {
 			if (HasExtension(available_extensions, extension)) {
 				device_extensions.push_back(extension);
 			}
+		}
+		// KYTY_DEVICE_GENERATED_COMMANDS=1 (environment, research): device-generated commands for
+		// guest mesh draws with GPU-written arguments (KYTY_DGC_DRAWS, RenderExecutor).
+		if (const char* dgc = std::getenv("KYTY_DEVICE_GENERATED_COMMANDS");
+		    dgc != nullptr && dgc[0] == '1' &&
+		    HasExtension(available_extensions, VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME) &&
+		    HasExtension(available_extensions, VK_KHR_MAINTENANCE_5_EXTENSION_NAME)) {
+			device_extensions.push_back(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+			device_extensions.push_back(VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME);
 		}
 		if (HasExtension(available_extensions,
 		                 VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME)) {

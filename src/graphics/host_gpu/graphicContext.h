@@ -79,6 +79,8 @@ struct GraphicContext {
 	bool                               provoking_vertex_last_enabled         = false;
 	bool                               supports_block_texel_view              = false;
 	bool                                      mesh_shader_enabled                   = false;
+	// VK_EXT_device_generated_commands with mesh tasks (KYTY_DEVICE_GENERATED_COMMANDS=1).
+	bool                               device_generated_commands_enabled     = false;
 	// Vulkan 1.2 samplerFilterMinmax: S# FILTER_MODE min/max (SamplerCache, KYTY_SAMPLER_REDUCTION).
 	bool                               sampler_filter_minmax_enabled         = false;
 	// Descriptor indexing for bindless images: runtime arrays indexed non-uniformly, partially

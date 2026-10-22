@@ -4,13 +4,16 @@
 #include "common/liveSwitches.h"
 #include "gpu_tiler_shaders/dispatch_indirect_groups_spv.h"
 #include "gpu_tiler_shaders/draw_indirect_guard_spv.h"
+#include "gpu_tiler_shaders/mesh_indirect_args_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include "common/logging/log.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +39,29 @@ struct GuardPushConstants {
 	uint32_t tag;
 	uint32_t counter;
 };
+
+struct MeshPushConstants {
+	uint32_t record_low;
+	uint32_t record_high;
+	uint32_t sequence_low;
+	uint32_t sequence_high;
+	uint32_t index_low;
+	uint32_t index_high;
+	uint32_t indexed;
+	uint32_t max_count;
+	uint32_t element_size;
+	uint32_t primitive_size;
+	uint32_t primitive_step;
+	uint32_t primitives_per_group;
+	uint32_t max_groups_x;
+	uint32_t max_groups_y;
+	uint32_t max_groups_total;
+};
+static_assert(sizeof(MeshPushConstants) == 60);
+
+// The stages of a guest mesh pipeline's push-constant range (shaders.cpp: fragment always).
+constexpr vk::ShaderStageFlags MeshDrawStages =
+    vk::ShaderStageFlagBits::eMeshEXT | vk::ShaderStageFlagBits::eFragment;
 
 IndirectDrawGuard* g_guard = nullptr;
 
@@ -320,6 +346,247 @@ IndirectDrawGuard::Result IndirectDrawGuard::Guard(const CommandRecorder& comman
 	                        vk::PipelineStageFlagBits::eDrawIndirect, {}, 1, &record_written, 0,
 	                        nullptr, 0, nullptr);
 	return {m_records.Handle(), offset};
+}
+
+bool MeshIndirectDraws::Enabled(const GraphicContext& graphics) {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_DGC_DRAWS", 1);
+	return graphics.device_generated_commands_enabled && graphics.mesh_shader_enabled &&
+	       enabled.load(std::memory_order_relaxed) != 0;
+}
+
+MeshIndirectDraws::MeshIndirectDraws(GraphicContext& graphics, CommandScheduler& scheduler)
+    : m_graphics(graphics), m_scheduler(scheduler),
+      m_sequences(graphics, scheduler, MemoryUsage::DeviceLocal, 0,
+                  vk::BufferUsageFlagBits::eStorageBuffer |
+                      vk::BufferUsageFlagBits::eIndirectBuffer |
+                      vk::BufferUsageFlagBits::eShaderDeviceAddress,
+                  Entries * EntryBytes) {
+	SetVulkanObjectNameF(graphics.device, m_sequences.Handle(), "Mesh Indirect Sequences");
+
+	const vk::PushConstantRange  push_range {vk::ShaderStageFlagBits::eCompute, 0,
+                                            sizeof(MeshPushConstants)};
+	vk::PipelineLayoutCreateInfo pipeline_layout_info {};
+	pipeline_layout_info.pushConstantRangeCount = 1;
+	pipeline_layout_info.pPushConstantRanges    = &push_range;
+	RequireVulkanSuccess(graphics.device.createPipelineLayout(&pipeline_layout_info, nullptr,
+	                                                          &m_pipeline_layout),
+	                     "create mesh-indirect pipeline layout");
+
+	const auto                        module = CompileSPV(MESH_INDIRECT_ARGS_SPV, graphics.device);
+	vk::PipelineShaderStageCreateInfo stage {};
+	stage.stage  = vk::ShaderStageFlagBits::eCompute;
+	stage.module = module;
+	stage.pName  = "main";
+	vk::ComputePipelineCreateInfo pipeline_info {};
+	pipeline_info.stage  = stage;
+	pipeline_info.layout = m_pipeline_layout;
+	const auto result =
+	    graphics.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &m_pipeline);
+	graphics.device.destroyShaderModule(module, nullptr);
+	RequireVulkanSuccess(result, "create mesh-indirect pipeline");
+	std::printf("Mesh indirect draws: device-generated commands in use\n");
+	std::fflush(stdout);
+}
+
+MeshIndirectDraws::~MeshIndirectDraws() {
+	auto device = m_graphics.device;
+	for (const auto& [pipeline_layout, layout]: m_layouts) {
+		device.destroyIndirectCommandsLayoutEXT(vk::IndirectCommandsLayoutEXT {layout}, nullptr);
+	}
+	if (m_preprocess) {
+		device.destroyBuffer(m_preprocess, nullptr);
+		device.freeMemory(m_preprocess_memory, nullptr);
+	}
+	device.destroyPipeline(m_pipeline, nullptr);
+	device.destroyPipelineLayout(m_pipeline_layout, nullptr);
+}
+
+vk::IndirectCommandsLayoutEXT MeshIndirectDraws::LayoutFor(vk::PipelineLayout pipeline_layout) {
+	const auto found = m_layouts.find(static_cast<VkPipelineLayout>(pipeline_layout));
+	if (found != m_layouts.end()) {
+		return vk::IndirectCommandsLayoutEXT {found->second};
+	}
+	constexpr uint32_t DrawWordsBytes =
+	    ShaderRecompiler::IR::PushData::MeshDrawDwordCount * sizeof(uint32_t);
+	vk::IndirectCommandsPushConstantTokenEXT push_token {};
+	push_token.updateRange = vk::PushConstantRange {MeshDrawStages, 0, DrawWordsBytes};
+	std::array<vk::IndirectCommandsLayoutTokenEXT, 2> tokens {};
+	tokens[0].type               = vk::IndirectCommandsTokenTypeEXT::ePushConstant;
+	tokens[0].data.pPushConstant = &push_token;
+	tokens[0].offset             = 0;
+	tokens[1].type               = vk::IndirectCommandsTokenTypeEXT::eDrawMeshTasks;
+	tokens[1].offset             = DrawWordsBytes;
+	vk::IndirectCommandsLayoutCreateInfoEXT info {};
+	info.shaderStages   = MeshDrawStages;
+	info.indirectStride = SequenceStride;
+	info.pipelineLayout = pipeline_layout;
+	info.tokenCount     = static_cast<uint32_t>(tokens.size());
+	info.pTokens        = tokens.data();
+	vk::IndirectCommandsLayoutEXT layout = nullptr;
+	RequireVulkanSuccess(m_graphics.device.createIndirectCommandsLayoutEXT(&info, nullptr, &layout),
+	                     "create mesh indirect commands layout");
+	m_layouts.emplace(static_cast<VkPipelineLayout>(pipeline_layout),
+	                  static_cast<VkIndirectCommandsLayoutEXT>(layout));
+	return layout;
+}
+
+// The preprocess buffer is sized for the largest requirement seen; a larger one replaces it
+// once the GPU is done with the old one.
+vk::DeviceSize MeshIndirectDraws::PreprocessSizeFor(vk::Pipeline                  pipeline,
+                                                    vk::IndirectCommandsLayoutEXT layout) {
+	const auto found = m_preprocess_sizes.find(static_cast<VkPipeline>(pipeline));
+	if (found != m_preprocess_sizes.end()) {
+		return found->second;
+	}
+	auto                                           device = m_graphics.device;
+	vk::GeneratedCommandsPipelineInfoEXT           pipeline_info {pipeline};
+	vk::GeneratedCommandsMemoryRequirementsInfoEXT info {};
+	info.pNext                  = &pipeline_info;
+	info.indirectCommandsLayout = layout;
+	info.maxSequenceCount       = 1;
+	info.maxDrawCount           = 1;
+	vk::MemoryRequirements2 requirements {};
+	device.getGeneratedCommandsMemoryRequirementsEXT(&info, &requirements);
+	const auto& memory = requirements.memoryRequirements;
+	const auto  size   = std::max<vk::DeviceSize>(memory.size, 4);
+	EXIT_IF(memory.alignment > PreprocessAlignment);
+	m_preprocess_sizes.emplace(static_cast<VkPipeline>(pipeline), size);
+	if (size + PreprocessAlignment <= m_preprocess_capacity) {
+		return size;
+	}
+	if (m_preprocess) {
+		m_scheduler.DeferOperation([device, buffer = m_preprocess, old = m_preprocess_memory] {
+			device.destroyBuffer(buffer, nullptr);
+			device.freeMemory(old, nullptr);
+		});
+		m_preprocess        = nullptr;
+		m_preprocess_memory = nullptr;
+	}
+	const auto capacity = std::max<vk::DeviceSize>(2 * (size + PreprocessAlignment), 64 * 1024);
+	vk::BufferUsageFlags2CreateInfo usage {};
+	usage.usage = vk::BufferUsageFlagBits2::ePreprocessBufferEXT |
+	              vk::BufferUsageFlagBits2::eShaderDeviceAddress;
+	vk::BufferCreateInfo buffer_info {};
+	buffer_info.pNext = &usage;
+	buffer_info.size  = capacity;
+	RequireVulkanSuccess(device.createBuffer(&buffer_info, nullptr, &m_preprocess),
+	                     "create mesh indirect preprocess buffer");
+	vk::MemoryRequirements buffer_memory {};
+	device.getBufferMemoryRequirements(m_preprocess, &buffer_memory);
+	const auto types  = buffer_memory.memoryTypeBits & memory.memoryTypeBits;
+	const auto props  = m_graphics.physical_device.getMemoryProperties();
+	uint32_t   chosen = UINT32_MAX;
+	for (uint32_t i = 0; i < props.memoryTypeCount; i++) {
+		if ((types & (1u << i)) == 0) {
+			continue;
+		}
+		const bool local =
+		    static_cast<bool>(props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal);
+		if (chosen == UINT32_MAX || local) {
+			chosen = i;
+		}
+		if (local) {
+			break;
+		}
+	}
+	EXIT_IF(chosen == UINT32_MAX);
+	vk::MemoryAllocateFlagsInfo flags {};
+	flags.flags = vk::MemoryAllocateFlagBits::eDeviceAddress;
+	vk::MemoryAllocateInfo allocate {};
+	allocate.pNext           = &flags;
+	allocate.allocationSize  = buffer_memory.size;
+	allocate.memoryTypeIndex = chosen;
+	RequireVulkanSuccess(device.allocateMemory(&allocate, nullptr, &m_preprocess_memory),
+	                     "allocate mesh indirect preprocess memory");
+	RequireVulkanSuccess(device.bindBufferMemory(m_preprocess, m_preprocess_memory, 0),
+	                     "bind mesh indirect preprocess memory");
+	vk::BufferDeviceAddressInfo address_info {};
+	address_info.buffer   = m_preprocess;
+	m_preprocess_address  = device.getBufferAddress(address_info);
+	m_preprocess_capacity = capacity;
+	return size;
+}
+
+uint32_t MeshIndirectDraws::Convert(const CommandRecorder& command, const Params& params) {
+	Report();
+	const auto entry = m_next;
+	m_next           = (m_next + 1u) % Entries;
+
+	// The record comes from earlier shader or transfer writes; every earlier generated draw
+	// (which reads its entry and the preprocess buffer) must finish before this one is written.
+	vk::MemoryBarrier record_ready {};
+	record_ready.srcAccessMask = vk::AccessFlagBits::eShaderWrite |
+	                             vk::AccessFlagBits::eTransferWrite |
+	                             vk::AccessFlagBits::eIndirectCommandRead;
+	record_ready.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+	command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                        vk::PipelineStageFlagBits::eComputeShader, {}, 1, &record_ready, 0,
+	                        nullptr, 0, nullptr);
+
+	const auto& limits   = m_graphics.mesh_shader_properties;
+	const auto  sequence = m_sequences.BufferDeviceAddress() + vk::DeviceSize {entry} * EntryBytes;
+	const MeshPushConstants push {
+	    static_cast<uint32_t>(params.record),
+	    static_cast<uint32_t>(params.record >> 32u),
+	    static_cast<uint32_t>(sequence),
+	    static_cast<uint32_t>(sequence >> 32u),
+	    static_cast<uint32_t>(params.index_address),
+	    static_cast<uint32_t>(params.index_address >> 32u),
+	    params.indexed ? 1u : 0u,
+	    params.max_count,
+	    params.element_size,
+	    params.primitive_size,
+	    std::max(params.primitive_step, 1u),
+	    std::max(params.primitives_per_group, 1u),
+	    limits.maxMeshWorkGroupCount[0],
+	    limits.maxMeshWorkGroupCount[1],
+	    limits.maxMeshWorkGroupTotalCount};
+	command.bindPipeline(vk::PipelineBindPoint::eCompute, m_pipeline);
+	command.pushConstants(m_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push),
+	                      &push);
+	command.dispatch(1, 1, 1);
+
+	// The draw reads the sequence as indirect commands, preprocessed as part of its execution.
+	vk::MemoryBarrier2 sequence_ready {};
+	sequence_ready.srcStageMask  = vk::PipelineStageFlagBits2::eComputeShader;
+	sequence_ready.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+	sequence_ready.dstStageMask  = vk::PipelineStageFlagBits2::eDrawIndirect |
+	                              vk::PipelineStageFlagBits2::eCommandPreprocessEXT;
+	sequence_ready.dstAccessMask = vk::AccessFlagBits2::eIndirectCommandRead |
+	                               vk::AccessFlagBits2::eCommandPreprocessReadEXT;
+	vk::DependencyInfo dependency {};
+	dependency.memoryBarrierCount = 1;
+	dependency.pMemoryBarriers    = &sequence_ready;
+	command.pipelineBarrier2(dependency);
+	m_draws++;
+	return entry;
+}
+
+void MeshIndirectDraws::Execute(const CommandRecorder& command, vk::Pipeline pipeline,
+                                vk::PipelineLayout pipeline_layout, vk::ShaderStageFlags stages,
+                                uint32_t entry) {
+	const auto layout          = LayoutFor(pipeline_layout);
+	const auto preprocess_size = PreprocessSizeFor(pipeline, layout);
+	const auto preprocess =
+	    (m_preprocess_address + PreprocessAlignment - 1) & ~(PreprocessAlignment - 1);
+	command.executeGeneratedCommandsEXT(
+	    pipeline, stages, layout,
+	    m_sequences.BufferDeviceAddress() + vk::DeviceSize {entry} * EntryBytes, SequenceStride,
+	    preprocess, preprocess_size);
+}
+
+void MeshIndirectDraws::Report() {
+	const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+	                     std::chrono::steady_clock::now().time_since_epoch())
+	                     .count();
+	if (now - m_last_report_us < 5000000) {
+		return;
+	}
+	m_last_report_us = now;
+	std::printf("Mesh indirect draws (5 s): %llu generated on the GPU\n",
+	            static_cast<unsigned long long>(m_draws));
+	std::fflush(stdout);
+	m_draws = 0;
 }
 
 } // namespace Libs::Graphics

@@ -57,6 +57,28 @@ public:
 	void drawMeshTasksEXT(uint32_t x, uint32_t y, uint32_t z) const {
 		Run([=](vk::CommandBuffer command) { command.drawMeshTasksEXT(x, y, z); });
 	}
+	// One sequence of `layout` at `sequence`, with the bound `pipeline` (no execution set),
+	// preprocessed as part of the execution (MeshIndirectDraws).
+	void executeGeneratedCommandsEXT(vk::Pipeline pipeline, vk::ShaderStageFlags stages,
+	                                 vk::IndirectCommandsLayoutEXT layout,
+	                                 vk::DeviceAddress sequence, vk::DeviceSize sequence_size,
+	                                 vk::DeviceAddress preprocess,
+	                                 vk::DeviceSize    preprocess_size) const {
+		Run([=](vk::CommandBuffer command) {
+			vk::GeneratedCommandsPipelineInfoEXT pipeline_info {pipeline};
+			vk::GeneratedCommandsInfoEXT         info {};
+			info.pNext                  = &pipeline_info;
+			info.shaderStages           = stages;
+			info.indirectCommandsLayout = layout;
+			info.indirectAddress        = sequence;
+			info.indirectAddressSize    = sequence_size;
+			info.preprocessAddress      = preprocess;
+			info.preprocessSize         = preprocess_size;
+			info.maxSequenceCount       = 1;
+			info.maxDrawCount           = 1;
+			command.executeGeneratedCommandsEXT(VK_FALSE, info);
+		});
+	}
 	void dispatch(uint32_t x, uint32_t y, uint32_t z) const {
 		Run([=](vk::CommandBuffer command) { command.dispatch(x, y, z); });
 	}
