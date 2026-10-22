@@ -12,10 +12,10 @@ Napló: `JOURNAL.md` (mindenki ide ír, röviden). Feladatok: `TASKS.md`. Prompt
   - **T3 (`570283e` + `8478aef`):** `KYTY_HOST_ARCH=x86-64-v3` (`/clang:-march=x86-64-v3` a `3rdparty` után) + arányos VRAM GC küszöbök (`40% / 70% / 88%` = `5758 / 10076 / 12668 MiB`, `KYTY_VRAM_GC_PROPORTIONAL=0` a régi). **Mérés (`8478aef`, `C:\Games\Wolverine-AMD-T3b`):** főmenü **40 FPS**, lopakodós rész állva **23–25 FPS** (`6544 cmdbuf / 5 s`, +20% a `T2a`-hoz és +90% a `Guard2`-höz képest!), mozgás/ráugrás közben időszakos 1–6 FPS-es megakadásokkal (4 ok azonosítva a `JOURNAL.md`-ben és a `TASKS.md`-ben).
 
 ## Állapot (2026-10-22 este – friss, ezt olvasd először)
-- **Ajánlott:** `C:\Games\Wolverine-AMD-Async\Play Wolverine AMD Async.bat` (`8d06dd7`), alapból **kihagyja a `0x618eca57f179de7d` POPS pixel shadert** (`kyty_live.txt`: `KYTY_LIVE_SKIP=1`, `userdata\skip_live.txt`): harcban **5–10 → 13–15 FPS**, látható különbség nélkül. Váltók: `Skip Shaders - default / plus 2209 / none.bat`.
+- **Ajánlott:** `C:\Games\Wolverine-AMD-Async\Play Wolverine AMD Async.bat` (`8d06dd7`), alapból **kihagyja a `0x618eca57f179de7d` POPS pixel shadert** (`kyty_live.txt`: `KYTY_LIVE_SKIP=1`, `userdata\skip_live.txt`): harcban **5–10 → 13–15 FPS**, látható különbség nélkül. Váltók: `Skip Shaders - default / none.bat`.
 - **Mérőeszköz:** `KYTY_GPU_EVENT_TIME=1` (élő): shaderenkénti GPU-idő 5 s-onként a naplóban (`GPU events`); `KYTY_GPU_TIME=1`: GPU-foglaltság. Harcban a GPU volt a plafon (77–81%), nem a CPU-visszaolvasás.
 - **Lezárt kísérletek (nem segítettek):** `KYTY_DIRECT_READBACK` + `KYTY_MAPPED_DEVICE_BUFFERS` (T12a), `KYTY_DISPATCH_BARRIERS=0` (lassabb). A kód kapcsolóval bent maradt.
-- **Nyitott:** `0x2209aa9404e8606a` (POPS) kihagyásának tesztje; crash checkpoint-betöltéskor (vendégkód, null handle – figyelendő); T7, T8, T12b.
+- **Nyitott:** (a `0x2209aa9404e8606a` kihagyása tesztelve: nincs nyereség, a GPU már csak 50–60%-ban foglalt → most a CPU-oldal, **T12b** a következő); crash checkpoint-betöltéskor (vendégkód, null handle – figyelendő); T7, T8, T12b.
 
 ## Állapot (2026-10-22 délután – korábbi)
 - **T12a (új build, tesztelendő):** a lassú (5–10 FPS-es) szakaszokban nem a draw-költség, hanem a vendégszálak GPU-visszaolvasása a plafon (fő szál 70–90%-ban vár, GPU-szál félig tétlen). Új: `KYTY_DIRECT_READBACK=1|2` az aszinkron visszaolvasási úton is, `KYTY_MAPPED_DEVICE_BUFFERS=1` induláskor (ReBAR be van kapcsolva). Részletek: `JOURNAL.md` „T12: a lassú szakaszokban…”.
