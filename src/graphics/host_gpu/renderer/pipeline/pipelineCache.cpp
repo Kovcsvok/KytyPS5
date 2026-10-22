@@ -753,13 +753,16 @@ std::size_t PipelineCache::GraphicsPipelineKeyHash::operator()(const GraphicsPip
 // memory-writing programs still compile on the GPU thread. Translation stays on the GPU thread
 // (it reads guest memory and builds the resource plan). The recompiler's entry points are
 // serialized by one mutex while the switch is on, since they were written single-threaded.
-// KYTY_ASYNC_SHADERS=2 (environment, research): the worker also translates graphics programs
-// and makes the shader modules of disk-cache hits. Wolverine 2026-10-22 (KYTY_SHADER_STATS): a
-// new pixel shader cost the GPU thread 40-65 ms of translation and ~45 ms of module creation;
-// =1 took only the compile and module, and the user saw little difference.
+// KYTY_ASYNC_SHADERS=2 (environment, research): the worker also translates graphics programs.
+// Wolverine 2026-10-22 (KYTY_SHADER_STATS): a new pixel shader cost the GPU thread 40-65 ms of
+// translation and ~45 ms of module creation; =1 took only the compile and module, and the user
+// saw little difference.
+// KYTY_ASYNC_SHADERS=3: also the shader modules of disk-cache hits. Wolverine eb052d9: letters
+// missing in the main menu (glyph draws skipped while their modules were made), and the modules
+// took ~10 ms each on 4 workers against ~0.9 ms on the GPU thread.
 static const int g_async_shaders_mode = [] {
 	const char* value = std::getenv("KYTY_ASYNC_SHADERS");
-	return value != nullptr && (value[0] == '1' || value[0] == '2') ? value[0] - '0' : 0;
+	return value != nullptr && value[0] >= '1' && value[0] <= '3' ? value[0] - '0' : 0;
 }();
 static const bool g_async_shaders = g_async_shaders_mode >= 1;
 static std::mutex g_recompiler_mutex;
@@ -1693,9 +1696,9 @@ struct PipelineCache::ProgramCache {
 					g_shader_stats.disk_hits.fetch_add(1, std::memory_order_relaxed);
 					ReportDiskCache();
 					DumpShaderSpirv(stage_name, options.shader_hash, spirv);
-					// KYTY_ASYNC_SHADERS=2: the module is made on the worker (Wolverine: 812 hits
+					// KYTY_ASYNC_SHADERS=3: the module is made on the worker (Wolverine: 812 hits
 					// in 5 s after a load took the GPU thread 752 ms).
-					if (g_async_shaders_mode >= 2 && stage != ShaderType::Compute &&
+					if (g_async_shaders_mode >= 3 && stage != ShaderType::Compute &&
 					    !WritesMemory(entry->second.resource_plan)) {
 						auto job = MakeAsyncJob(stage_name, options, input_info, push_data_cursor);
 						job->spirv          = std::move(spirv);
