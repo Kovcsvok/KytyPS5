@@ -146,3 +146,12 @@ f6c9af0 teszt (`Wolverine-AMD-Async`, `run_2026-10-22_093321.log`, 15 perc): men
 - Exporthoz: `tracy-csvexport -e` = saját idő (a `-u` minden eseményt kiír, 9 GB!).
 - Felvétel után (sok új shader, 10–51 async transzláció / 5 s): 1–1,9 s-os frame-ek. Ok-jelölt: a GPU-szál a `RecompilerLock`-ra vár, amit a 4 worker felváltva tart (~60 ms/transzláció; a std::mutex nem fair), és a workerből jött resource plan beszúrása is lockot kért fölöslegesen. Javítás: a GPU-szál elsőbbséget kap (a worker nem lockol, amíg a GPU-szál vár), a worker-plan beszúrása lock nélkül.
 - Következő mérés: `KYTY_READBACK_STATS=1` (élő) előre haladás közben → melyik puffer/shader írja, amit a CPU visszaolvas.
+
+## 2026-10-22 — Opus — readback-statisztika (d4b5a9f, `run_2026-10-22_102725.log`)
+FPS (új sor): menü 40–46, előre haladva **4–6 FPS** (a `KYTY_READBACK_STATS` maga is lassít: minden letöltést bájtonként összevet, 5 s alatt 6–9 GB-ot → mérés után kapcsold ki!). Letöltés 5 s-onként 0,3–9 GB, ebből csak ~1–2 MB változik.
+Két fő puffer (GPU-szál idő / 5 s):
+- **A `0x1187184000`** (22,7 MB, 4 rögzített lap: 0x11871ed000, 0x118723e000, 0x1187245000, 0x118724b000): csak olvasás, ~2/frame; írók `0x167ca721fb0a378a` + `0x85a58319a7a75e48`, az olvasások **~50%-ánál az író még fut** → 0,45–2,8 s.
+- **B `0x1193020000`/`0x11935d0000`** (~105 MB): írók `0x9624ac5a3699f070`, `0x7b779927d3dcd963`, `0x37ab7d3ab9bff0b9`; 130–900 olvasás, ~50% futó íróval → 0,1–0,8 s, 0,3–2,2 GB letöltés.
+- C `0x12c0000000` (70 MB): vendég-írások GPU-írt lapokra (700–1500), író `0xeaa507075716aa3b` → 0,05–0,26 s.
+Ok: futó íróval a visszaolvasás `Flush` + `DrainRecording` + várás mindenre, ami addig felvételre került.
+Új: `KYTY_STALE_INFLIGHT_READS=1` (élő, alap 0): olvasás + még futó író + a lapot ≤`KYTY_STALE_INFLIGHT_READS_MS` (élő, 100) ms-on belül már letöltöttük → a vendég a memóriát úgy olvassa, ahogy van (`RequestServeFromBacking`, utasítás-emuláció), letöltés/flush/várás nélkül; a lap védett marad, a további olvasások a vendégszálon (GPU-szál nélkül) szolgálódnak ki az író tickjéig. Indok: `KYTY_LABELS_AFTER_GPU` mellett a vendég még nem szinkronizált a futó íróval, PS5-ön is a pillanatnyi tartalmat látná. Napló: `Stale reads (5 s): N ...`.

@@ -11,12 +11,15 @@
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -212,6 +215,17 @@ private:
 	                         uint64_t window_end, uint64_t tick, bool snapshot = false);
 	// Reads served from a download the GPU overwrote afterwards (KYTY_ASYNC_READ_SNAPSHOT).
 	uint64_t               m_snapshot_reads = 0;
+	// KYTY_STALE_INFLIGHT_READS: the still-running writer tick BeginWriteReadback found (GPU
+	// thread; the faulting guest thread takes it after its command), and the pages whose guest
+	// reads are served from guest memory as it is until that tick (any thread).
+	uint64_t                               m_stale_read_until = 0;
+	std::mutex                             m_stale_mutex;
+	std::unordered_map<uint64_t, uint64_t> m_stale_pages;
+	std::atomic<uint64_t>                  m_stale_reads {0};
+	// When a guest read last downloaded each page (GPU thread).
+	std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> m_page_downloaded;
+	bool                                   ServeStaleRead(uint64_t vaddr);
+	void                                   NoteStaleRead(uint64_t vaddr, uint64_t until);
 	void                   CompletePendingWriteReadback(size_t index);
 	void                   CompletePendingWriteReadbacks(uint64_t begin, uint64_t end);
 	[[nodiscard]] bool     OverlapsPendingWriteReadback(uint64_t begin, uint64_t end) const;

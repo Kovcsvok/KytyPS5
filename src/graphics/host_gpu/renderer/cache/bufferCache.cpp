@@ -303,6 +303,18 @@ bool AsyncReadSnapshotEnabled() {
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
+// KYTY_STALE_INFLIGHT_READS=1 (live, research, default 0): a guest read of GPU-written memory
+// whose writer has not finished on the host GPU is served from guest memory as it is (the bytes
+// of the last download), with no download, flush or wait; the page stays GPU-owned. Labels are
+// published after the GPU work (KYTY_LABELS_AFTER_GPU), so the guest has not synchronized with
+// that writer yet: on the PS5 it would read whatever memory held at that moment. Wolverine
+// 2026-10-22 (KYTY_READBACK_STATS, walking into new areas): about half the reads of its two
+// busiest readback buffers met a running writer, 0.5-2.8 s of the GPU thread per 5 s.
+bool StaleInflightReadsEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_STALE_INFLIGHT_READS", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
 bool AsyncReadReadbackEnabled() {
 	// Run 37 A/B at the Wolverine spot: readback time on the GPU thread 147 -> 113 ms/s, mean
 	// frame 73.5 -> 72.5 ms. The busiest buffer gains nothing: the GPU rewrites its pages before
@@ -786,16 +798,30 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	// KYTY_ASYNC_READBACK=1 (live, default 0) does the same for guest reads. Wolverine run 36
 	// (KYTY_READBACK_STATS): every readback at the spot came from a guest thread, and serving
 	// them synchronously cost the GPU thread ~1.3 s per 5 s, mostly waiting for the GPU.
+	const bool stale_reads = !is_write && !GuestGpu::IsGpuThread() &&
+	                         !Libs::LibKernel::Memory::ForceSyncReadback() &&
+	                         StaleInflightReadsEnabled();
+	if (stale_reads && ServeStaleRead(vaddr)) {
+		Libs::LibKernel::Memory::RequestServeFromBacking();
+		return;
+	}
 	if (!GuestGpu::IsGpuThread() && !Libs::LibKernel::Memory::ForceSyncReadback() &&
 	    (is_write ? AsyncWriteReadbackEnabled() : AsyncReadReadbackEnabled())) {
 		uint64_t tick         = 0;
 		uint64_t window_begin = 0;
 		uint64_t window_end   = 0;
+		uint64_t stale_until  = 0;
 		gpu.SendCommandSync([&] {
 			ReadbackStats::s_forwarded = true;
 			tick = BeginWriteReadback(vaddr, size, is_write, window_begin, window_end);
+			stale_until = std::exchange(m_stale_read_until, 0);
 			ReadbackStats::s_forwarded = false;
 		});
+		if (stale_until != 0) {
+			NoteStaleRead(vaddr, stale_until);
+			Libs::LibKernel::Memory::RequestServeFromBacking();
+			return;
+		}
 		if (tick != 0) {
 			{
 				KYTY_PROFILER_BLOCK("BufferCache::WaitWriteReadback");
@@ -1100,6 +1126,21 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 	}
 	auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 	stats.SetBuffer(buffer.CpuAddress(), buffer.Size());
+	const auto read_page = vaddr / TRACKER_PAGE_SIZE;
+	if (!is_write && StaleInflightReadsEnabled() && !Libs::LibKernel::Memory::ForceSyncReadback() &&
+	    !m_scheduler.IsFree(buffer.last_gpu_write_tick)) {
+		// KYTY_STALE_INFLIGHT_READS: the guest reads guest memory as it is, if a download
+		// refreshed this page within KYTY_STALE_INFLIGHT_READS_MS (live, default 100). A large
+		// buffer always has some writer running, and its pages would otherwise never refresh.
+		static auto& max_age_ms = Common::LiveSwitches::Get("KYTY_STALE_INFLIGHT_READS_MS", 100);
+		const auto   found      = m_page_downloaded.find(read_page);
+		if (found != m_page_downloaded.end() &&
+		    std::chrono::steady_clock::now() - found->second <=
+		        std::chrono::milliseconds(max_age_ms.load(std::memory_order_relaxed))) {
+			m_stale_read_until = buffer.last_gpu_write_tick;
+			return 0;
+		}
+	}
 
 	// As in ReadMemoryOnGpu: a GPU-owned page without bytes to download only needs unprotecting.
 	if (m_memory_tracker.IsRegionGpuModified(page_begin, page_end - page_begin) &&
@@ -1133,10 +1174,65 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 		return 0;
 	}
 	stats.SetOutcome(ReadbackStats::Downloaded);
+	if (StaleInflightReadsEnabled()) {
+		if (m_page_downloaded.size() >= 65536) {
+			m_page_downloaded.clear();
+		}
+		m_page_downloaded[read_page] = std::chrono::steady_clock::now();
+	}
 	const auto tick = m_scheduler.CurrentTick();
 	m_scheduler.Flush();
 	m_pending_write_readbacks.push_back({window_begin, window_end, tick});
 	return tick;
+}
+
+// KYTY_STALE_INFLIGHT_READS, any guest thread: true while reads of this page are served from guest
+// memory as it is (its writer has not finished), with a report every 5 s.
+bool BufferCache::ServeStaleRead(uint64_t vaddr) {
+	uint64_t until = 0;
+	{
+		std::scoped_lock lock(m_stale_mutex);
+		const auto       found = m_stale_pages.find(vaddr / TRACKER_PAGE_SIZE);
+		if (found == m_stale_pages.end()) {
+			return false;
+		}
+		until = found->second;
+	}
+	if (m_scheduler.IsFree(until)) {
+		std::scoped_lock lock(m_stale_mutex);
+		if (const auto found = m_stale_pages.find(vaddr / TRACKER_PAGE_SIZE);
+		    found != m_stale_pages.end() && found->second == until) {
+			m_stale_pages.erase(found);
+		}
+		return false;
+	}
+	const auto served = m_stale_reads.fetch_add(1, std::memory_order_relaxed) + 1;
+	static std::atomic<int64_t> report_ms {0};
+	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count();
+	if (auto last = report_ms.load(std::memory_order_relaxed);
+	    now_ms - last >= 5000 && report_ms.compare_exchange_strong(last, now_ms)) {
+		size_t pages = 0;
+		{
+			std::scoped_lock lock(m_stale_mutex);
+			pages = m_stale_pages.size();
+		}
+		std::printf("Stale reads (5 s): %" PRIu64 " guest reads served from guest memory, %zu pages\n",
+		            served, pages);
+		std::fflush(stdout);
+		m_stale_reads.store(0, std::memory_order_relaxed);
+	}
+	return true;
+}
+
+void BufferCache::NoteStaleRead(uint64_t vaddr, uint64_t until) {
+	std::scoped_lock lock(m_stale_mutex);
+	if (m_stale_pages.size() >= 4096) {
+		m_stale_pages.clear();
+	}
+	m_stale_pages[vaddr / TRACKER_PAGE_SIZE] = until;
+	m_stale_reads.fetch_add(1, std::memory_order_relaxed);
 }
 
 // GPU thread, after the guest waited for the readback's tick and its publication.
