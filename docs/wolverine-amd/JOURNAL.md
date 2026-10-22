@@ -112,3 +112,4 @@ Következő kutatási lépés (T7): RGD Hardware Crash Analysis a `=2` beállít
 
 ## 2026-10-22 — Opus — játszható csomag
 `95572c5` → `C:\Games\Wolverine-AMD-Play` (`Play Wolverine AMD.bat`: POPS be, bindless írás eldobva, `KYTY_FAULT_WIDEN_KB=64`, natív min/max; `userdata` a T7y legújabb mentésével + driver cache; első indításkor teljes shader-fordítás). A csomag sablonjában (`packaging/.../Play Wolverine.bat`) a `KYTY_SKIP_POPS_SHADERS` alapértelmezése 0 lett (a következő buildtől).
+Felhasználói teszt (`Wolverine-AMD-Play`, `95572c5`): **nincs crash**, a játék tovább megy; mozgás közben 19–26 FPS (néha 28–32), a vérfolt-hiba egy idő után eltűnt. Ez a jelenlegi ajánlott beállítás.
