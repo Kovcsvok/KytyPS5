@@ -1418,13 +1418,19 @@ void BufferCache::BeginBackgroundReadback(uint64_t vaddr, uint64_t size) {
 	}
 }
 
-// GPU thread, once the background readback's download has landed: as FinishWriteReadback after
-// a waited readback, the window is published and, unless the GPU wrote it again, unprotected.
+// GPU thread, a deferred operation after the background readback's download has landed: as
+// CompletePendingWriteReadback, unless the GPU wrote the window again it stops being GPU-owned.
+// No waits: a deferred operation runs after its tick and that tick's priority operations, so
+// the download is published already (and a deferred operation must not wait for them).
 void BufferCache::EndBackgroundReadback(uint64_t begin, uint64_t end, uint64_t tick) {
 	for (size_t i = 0; i < m_pending_write_readbacks.size(); i++) {
 		const auto& pending = m_pending_write_readbacks[i];
 		if (pending.begin == begin && pending.end == end && pending.tick == tick) {
-			CompletePendingWriteReadback(i);
+			m_pending_write_readbacks.erase(m_pending_write_readbacks.begin() +
+			                                static_cast<std::ptrdiff_t>(i));
+			if (!HasGpuDirtyBytes(begin, end - begin)) {
+				m_memory_tracker.UnmarkRegionAsGpuModified(begin, end - begin);
+			}
 			break;
 		}
 	}
