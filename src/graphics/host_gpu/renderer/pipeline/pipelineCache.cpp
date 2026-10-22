@@ -775,9 +775,26 @@ static const bool g_recompiler_lock = [] {
 	return value == nullptr || value[0] != '0';
 }();
 
-static std::unique_lock<std::mutex> RecompilerLock() {
-	return g_async_shaders && g_recompiler_lock ? std::unique_lock<std::mutex>(g_recompiler_mutex)
-	                                            : std::unique_lock<std::mutex>();
+// The GPU thread goes first: a worker does not take the lock while the GPU thread waits for it, so
+// the GPU thread waits for the translation or compile in progress, not for every queued one.
+// Wolverine eaf6a2d (KYTY_ASYNC_SHADERS=2, 4 workers): frames of 1-1.9 s while 10-51 programs a
+// 5 s were translated on the workers.
+static std::atomic<int> g_recompiler_gpu_waiting {0};
+
+static std::unique_lock<std::mutex> RecompilerLock(bool worker = false) {
+	if (!g_async_shaders || !g_recompiler_lock) {
+		return {};
+	}
+	if (worker) {
+		while (g_recompiler_gpu_waiting.load(std::memory_order_acquire) != 0) {
+			std::this_thread::sleep_for(std::chrono::microseconds(200));
+		}
+		return std::unique_lock<std::mutex>(g_recompiler_mutex);
+	}
+	g_recompiler_gpu_waiting.fetch_add(1, std::memory_order_acq_rel);
+	std::unique_lock<std::mutex> lock(g_recompiler_mutex);
+	g_recompiler_gpu_waiting.fetch_sub(1, std::memory_order_acq_rel);
+	return lock;
 }
 
 // KYTY_SHADER_STATS=1 (live): every 5 s, where shader compile time goes, on all threads:
@@ -948,7 +965,7 @@ void AsyncShaderCompiler::Compile(AsyncPermutationJob& job) {
 	}
 	if (job.translate) {
 		job.options.read_code = ReadShaderCode;
-		auto       lock       = RecompilerLock();
+		auto       lock       = RecompilerLock(true);
 		const auto start      = std::chrono::steady_clock::now();
 		job.translated        = ShaderRecompiler::TranslateProgram(job.code, job.options);
 		job.options.read_code = {};
@@ -972,7 +989,7 @@ void AsyncShaderCompiler::Compile(AsyncPermutationJob& job) {
 	}
 	std::vector<uint32_t> spirv = std::move(job.spirv);
 	if (spirv.empty()) {
-		auto       lock   = RecompilerLock();
+		auto       lock   = RecompilerLock(true);
 		const auto start  = std::chrono::steady_clock::now();
 		auto       result = ShaderRecompiler::CompileProgram(std::move(job.translated), job.options,
 		                                                     job.specialization, job.push_data_cursor);
@@ -1812,7 +1829,9 @@ struct PipelineCache::ProgramCache {
 			return ShaderProgram {};
 		}
 		if (entry == programs.end()) {
-			auto plan_lock = RecompilerLock();
+			// A plan the worker extracted needs no lock (the workers hold it most of the time).
+			auto plan_lock = translated_plan.has_value() ? std::unique_lock<std::mutex>()
+			                                             : RecompilerLock();
 			entry = programs.try_emplace(lookup_key, translated_plan.has_value()
 			                                             ? std::move(*translated_plan)
 			                                             : ShaderRecompiler::IR::ExtractResourcePlan(
