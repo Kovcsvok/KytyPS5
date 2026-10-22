@@ -284,9 +284,20 @@ private:
 	inline static std::atomic<uint64_t> s_compared_bytes {0};
 };
 
+// KYTY_DIRECT_READBACK (live, default 0): see TryDirectReadback. The buffers must be created in
+// host-visible device memory (KYTY_MAPPED_DEVICE_BUFFERS=1 at start-up; Resizable BAR). 1 also
+// serves guest-thread faults (KYTY_ASYNC_READBACK) from the mapping once the buffer's writers have
+// finished, with no download, submission or wait; 2 also waits for a running writer's tick only,
+// not for everything recorded after it, and then copies from the mapping. Wolverine 2026-10-22
+// (forward_2026-10-22_100601.tracy, 5-10 fps stretches): the main guest thread spent 70-90 % of
+// each frame in ~40 readbacks, ~0.85 ms each, while the GPU thread was half idle.
+int64_t DirectReadbackMode() {
+	static auto& mode = Common::LiveSwitches::Get("KYTY_DIRECT_READBACK", 0);
+	return mode.load(std::memory_order_relaxed);
+}
+
 bool DirectReadbackEnabled() {
-	static auto& enabled = Common::LiveSwitches::Get("KYTY_DIRECT_READBACK", 0);
-	return enabled.load(std::memory_order_relaxed) != 0;
+	return DirectReadbackMode() != 0;
 }
 
 bool AsyncWriteReadbackEnabled() {
@@ -1153,6 +1164,30 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 		return 0;
 	}
 
+	// KYTY_DIRECT_READBACK: the bytes are in host-visible device memory, no download needed.
+	if (DirectReadbackEnabled()) {
+		if (buffer.Mapped().empty()) {
+			m_direct_stats.unmapped++;
+		} else if (TryDirectReadback(buffer, vaddr, size, is_write)) {
+			m_direct_stats.immediate++;
+			ReportDirectReadbacks();
+			stats.SetOutcome(ReadbackStats::DirectRead);
+			return 0;
+		} else if (DirectReadbackMode() >= 2 && !m_scheduler.IsFree(buffer.last_gpu_write_tick)) {
+			// The guest waits for the writer's tick only, not for everything recorded after it;
+			// FinishWriteReadback then copies from the mapping (an empty window marks this).
+			const auto writer_tick = buffer.last_gpu_write_tick;
+			if (writer_tick >= m_scheduler.CurrentTick()) {
+				m_scheduler.Flush();
+			}
+			window_begin = 0;
+			window_end   = 0;
+			stats.SetOutcome(ReadbackStats::DirectRead);
+			return writer_tick;
+		}
+		ReportDirectReadbacks();
+	}
+
 	const uint64_t WindowSize   = ReadbackWindowSize();
 	const auto     buffer_begin = buffer.CpuAddress();
 	const auto     buffer_end   = buffer_begin + buffer.Size();
@@ -1240,6 +1275,9 @@ bool BufferCache::FinishWriteReadback(uint64_t vaddr, uint64_t size, bool is_wri
                                       uint64_t window_begin, uint64_t window_end, uint64_t tick,
                                       bool snapshot) {
 	KYTY_PROFILER_FUNCTION();
+	if (window_begin == window_end) {
+		return FinishDirectReadback(vaddr, size, is_write, tick, snapshot);
+	}
 	for (size_t i = 0; i < m_pending_write_readbacks.size(); i++) {
 		const auto& pending = m_pending_write_readbacks[i];
 		if (pending.begin == window_begin && pending.end == window_end && pending.tick == tick) {
@@ -1269,6 +1307,63 @@ bool BufferCache::FinishWriteReadback(uint64_t vaddr, uint64_t size, bool is_wri
 		m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 	}
 	return true;
+}
+
+// GPU thread, KYTY_DIRECT_READBACK=2: the guest waited for the writer's tick that
+// BeginWriteReadback found running. False when `snapshot` and the GPU wrote the buffer again
+// since: the page's GPU-written bytes are copied from the mapping as they are now, the page stays
+// GPU-owned, and the caller reads the copy (as KYTY_ASYNC_READ_SNAPSHOT does with a download).
+bool BufferCache::FinishDirectReadback(uint64_t vaddr, uint64_t size, bool is_write,
+                                       uint64_t tick, bool snapshot) {
+	if (!IsRegionRegistered(vaddr, size)) {
+		return true;
+	}
+	auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
+	if (TryDirectReadback(buffer, vaddr, size, is_write)) {
+		m_direct_stats.after_writer++;
+		ReportDirectReadbacks();
+		return true;
+	}
+	const auto page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto page_end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	if (snapshot && !buffer.Mapped().empty() && m_scheduler.IsFree(tick) &&
+	    buffer.IsInBounds(page_begin, page_end - page_begin) &&
+	    !OverlapsPendingWriteReadback(page_begin, page_end)) {
+		std::unique_lock lock(m_dirty_ranges_mutex);
+		if (!m_downloading_ranges.Intersects(page_begin, page_end - page_begin)) {
+			const auto* mapped = buffer.Mapped().data();
+			m_gpu_modified_ranges.ForEachInRange(
+			    page_begin, page_end - page_begin, [&](uint64_t start, uint64_t end) {
+				    Libs::LibKernel::Memory::WriteBacking(start, mapped + buffer.Offset(start),
+				                                          end - start);
+			    });
+			lock.unlock();
+			m_snapshot_reads++;
+			m_direct_stats.snapshots++;
+			ReportDirectReadbacks();
+			return false;
+		}
+	}
+	m_direct_stats.fallbacks++;
+	ReportDirectReadbacks();
+	ReadMemoryOnGpu(vaddr, size, is_write);
+	return true;
+}
+
+// KYTY_DIRECT_READBACK, every 5 s: how the guest faults on GPU-written buffers were served.
+void BufferCache::ReportDirectReadbacks() {
+	const auto now = std::chrono::steady_clock::now();
+	if (now - m_direct_stats.report < std::chrono::seconds(5)) {
+		return;
+	}
+	::printf("Direct readbacks (5 s): %" PRIu64 " from the mapping (guest threads: %" PRIu64
+	         " at once, %" PRIu64 " after the writer), %" PRIu64 " snapshots, %" PRIu64
+	         " synchronous, %" PRIu64 " faults on unmapped buffers\n",
+	         m_direct_readbacks, m_direct_stats.immediate, m_direct_stats.after_writer,
+	         m_direct_stats.snapshots, m_direct_stats.fallbacks, m_direct_stats.unmapped);
+	std::fflush(stdout);
+	m_direct_readbacks = 0;
+	m_direct_stats     = {.report = now};
 }
 
 // GPU thread: waits for a pending readback's publication and, unless the GPU wrote its window

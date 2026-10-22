@@ -213,6 +213,20 @@ private:
 	// bytes.
 	bool FinishWriteReadback(uint64_t vaddr, uint64_t size, bool is_write, uint64_t window_begin,
 	                         uint64_t window_end, uint64_t tick, bool snapshot = false);
+	// KYTY_DIRECT_READBACK=2: the guest's wait for the writer (an empty window) has ended.
+	bool FinishDirectReadback(uint64_t vaddr, uint64_t size, bool is_write, uint64_t tick,
+	                          bool snapshot);
+	// KYTY_DIRECT_READBACK on guest-thread faults, reported every 5 s (GPU thread).
+	struct DirectReadbackStats {
+		uint64_t                              immediate    = 0;
+		uint64_t                              after_writer = 0;
+		uint64_t                              snapshots    = 0;
+		uint64_t                              fallbacks    = 0;
+		uint64_t                              unmapped     = 0;
+		std::chrono::steady_clock::time_point report       = std::chrono::steady_clock::now();
+	};
+	DirectReadbackStats m_direct_stats;
+	void                ReportDirectReadbacks();
 	// Reads served from a download the GPU overwrote afterwards (KYTY_ASYNC_READ_SNAPSHOT).
 	uint64_t               m_snapshot_reads = 0;
 	// KYTY_STALE_INFLIGHT_READS: the still-running writer tick BeginWriteReadback found (GPU
