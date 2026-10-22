@@ -11,11 +11,15 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <deque>
 #include <optional>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -121,6 +125,9 @@ struct CommandScheduler::GpuTimer {
 		if (pool) {
 			graphics.device.destroyQueryPool(pool, nullptr);
 		}
+		if (event_pool) {
+			graphics.device.destroyQueryPool(event_pool, nullptr);
+		}
 	}
 	KYTY_CLASS_NO_COPY(GpuTimer);
 
@@ -129,8 +136,141 @@ struct CommandScheduler::GpuTimer {
 		return enabled.load(std::memory_order_relaxed) != 0;
 	}
 
+	// KYTY_GPU_EVENT_TIME=1 (a live switch, off by default): a timestamp before and after every
+	// guest draw and dispatch (MarkGpuEvent). Every 5 s the log lists the shaders that took the
+	// most GPU time, and the time between the events: barriers, copies, clears, uploads. An event
+	// counts from the later of its own start and the previous event's end, so overlapping events
+	// are not counted twice. Command buffers with no free block of queries are not timed.
+	static bool EventsEnabled() {
+		static auto& enabled = Common::LiveSwitches::Get("KYTY_GPU_EVENT_TIME", 0);
+		return enabled.load(std::memory_order_relaxed) != 0;
+	}
+
+	static constexpr uint32_t EventBlocks    = 64;
+	static constexpr uint32_t EventBlockSize = 1024;
+
+	struct EventMark {
+		uint64_t hash  = 0;
+		char     kind  = 0;
+		bool     after = false;
+	};
+	struct EventCost {
+		double   ns    = 0;
+		uint64_t count = 0;
+		char     kind  = 0;
+	};
+
+	void BeginEvents(vk::CommandBuffer command) {
+		open_block = UINT32_MAX;
+		if (!EventsEnabled()) {
+			return;
+		}
+		if (!event_pool) {
+			if (event_pool_failed) {
+				return;
+			}
+			vk::QueryPoolCreateInfo info {};
+			info.queryType  = vk::QueryType::eTimestamp;
+			info.queryCount = EventBlocks * EventBlockSize;
+			if (graphics.device.createQueryPool(&info, nullptr, &event_pool) !=
+			    vk::Result::eSuccess) {
+				event_pool        = nullptr;
+				event_pool_failed = true;
+				return;
+			}
+		}
+		if (free_blocks == 0) {
+			events_untimed++;
+			return;
+		}
+		open_block = static_cast<uint32_t>(std::countr_zero(free_blocks));
+		free_blocks &= ~(uint64_t {1} << open_block);
+		command.resetQueryPool(event_pool, open_block * EventBlockSize, EventBlockSize);
+		block_marks[open_block].clear();
+	}
+
+	void Mark(vk::CommandBuffer command, char kind, uint64_t hash, bool after) {
+		if (open_block == UINT32_MAX) {
+			return;
+		}
+		auto& marks = block_marks[open_block];
+		if (marks.size() >= EventBlockSize) {
+			return;
+		}
+		command.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, event_pool,
+		                        open_block * EventBlockSize + static_cast<uint32_t>(marks.size()));
+		marks.push_back({.hash = hash, .kind = kind, .after = after});
+	}
+
+	void CollectEvents(uint32_t block) {
+		const auto& marks = block_marks[block];
+		if (marks.empty()) {
+			return;
+		}
+		event_stamps.resize(marks.size());
+		if (graphics.device.getQueryPoolResults(
+		        event_pool, block * EventBlockSize, static_cast<uint32_t>(marks.size()),
+		        event_stamps.size() * sizeof(uint64_t), event_stamps.data(), sizeof(uint64_t),
+		        vk::QueryResultFlagBits::e64) != vk::Result::eSuccess) {
+			return;
+		}
+		bool     have_start = false;
+		bool     have_end   = false;
+		uint64_t start      = 0;
+		uint64_t end        = 0;
+		for (size_t i = 0; i < marks.size(); i++) {
+			const auto stamp = event_stamps[i];
+			if (!marks[i].after) {
+				if (have_end && stamp > end) {
+					between_ns += static_cast<double>(stamp - end) * period_ns;
+				}
+				start      = stamp;
+				have_start = true;
+				continue;
+			}
+			if (!have_start) {
+				continue;
+			}
+			const auto begin = have_end ? std::max(start, end) : start;
+			auto&      cost  = event_costs[marks[i].hash];
+			cost.kind        = marks[i].kind;
+			cost.count++;
+			if (stamp > begin) {
+				const auto ns = static_cast<double>(stamp - begin) * period_ns;
+				cost.ns += ns;
+				events_ns += ns;
+			}
+			events++;
+			end        = std::max(end, stamp);
+			have_end   = true;
+			have_start = false;
+		}
+	}
+
+	void ReportEvents(double elapsed) {
+		std::vector<std::pair<uint64_t, EventCost>> top(event_costs.begin(), event_costs.end());
+		std::ranges::sort(top, [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+		::printf("GPU events (%.1f s): %" PRIu64 " draws/dispatches %.1f ms/s, between them "
+		         "%.1f ms/s (barriers, copies, clears), %" PRIu64 " command buffers untimed\n",
+		         elapsed, events, events_ns / 1e6 / elapsed, between_ns / 1e6 / elapsed,
+		         events_untimed);
+		for (size_t i = 0; i < std::min<size_t>(top.size(), 15); i++) {
+			const auto& [hash, cost] = top[i];
+			::printf("  %c 0x%016" PRIx64 " %.1f ms/s, %" PRIu64 " x %.1f us\n", cost.kind, hash,
+			         cost.ns / 1e6 / elapsed, cost.count,
+			         cost.count != 0 ? cost.ns / 1e3 / static_cast<double>(cost.count) : 0.0);
+		}
+		std::fflush(stdout);
+		event_costs.clear();
+		events         = 0;
+		events_ns      = 0;
+		between_ns     = 0;
+		events_untimed = 0;
+	}
+
 	// GPU thread, a new command buffer.
 	void Begin(vk::CommandBuffer command) {
+		BeginEvents(command);
 		open_slot = UINT32_MAX;
 		if (!pool || !Enabled() || pending.size() >= Slots) {
 			return;
@@ -153,10 +293,20 @@ struct CommandScheduler::GpuTimer {
 			pending.push_back({tick, open_slot});
 			open_slot = UINT32_MAX;
 		}
+		if (open_block != UINT32_MAX) {
+			pending_events.push_back({tick, open_block});
+			open_block = UINT32_MAX;
+		}
 	}
 
 	template <typename IsFree>
 	void Collect(IsFree&& is_free) {
+		while (!pending_events.empty() && is_free(pending_events.front().tick)) {
+			const auto block = pending_events.front().slot;
+			pending_events.pop_front();
+			CollectEvents(block);
+			free_blocks |= uint64_t {1} << block;
+		}
 		while (!pending.empty() && is_free(pending.front().tick)) {
 			const auto              slot = pending.front().slot;
 			std::array<uint64_t, 2> stamps {};
@@ -186,6 +336,9 @@ struct CommandScheduler::GpuTimer {
 					TracyPlot("GPU busy ms/s", busy_ms_per_s);
 				}
 			}
+			if (events != 0 || events_untimed != 0) {
+				ReportEvents(elapsed);
+			}
 			busy_ns = 0;
 			buffers = 0;
 			report  = now;
@@ -207,12 +360,40 @@ struct CommandScheduler::GpuTimer {
 	double                                busy_ns  = 0;
 	uint64_t                              buffers  = 0;
 	std::chrono::steady_clock::time_point report   = std::chrono::steady_clock::now();
+
+	// KYTY_GPU_EVENT_TIME: a block of EventBlockSize queries per timed command buffer.
+	vk::QueryPool                                     event_pool        = nullptr;
+	bool                                              event_pool_failed = false;
+	uint64_t                                          free_blocks       = ~uint64_t {0};
+	uint32_t                                          open_block        = UINT32_MAX;
+	std::array<std::vector<EventMark>, EventBlocks>   block_marks;
+	std::deque<Pending>                               pending_events;
+	std::vector<uint64_t>                             event_stamps;
+	std::unordered_map<uint64_t, EventCost>           event_costs;
+	uint64_t                                          events         = 0;
+	double                                            events_ns      = 0;
+	double                                            between_ns     = 0;
+	uint64_t                                          events_untimed = 0;
 };
 
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
     : m_gpu_timer(std::make_unique<GpuTimer>(graphics)), m_master(graphics), m_context(context),
       m_graphics(graphics), m_command_pool(graphics, m_master), m_command(*this),
       m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {}
+
+void CommandScheduler::MarkGpuEvent(char kind, uint64_t hash, bool after) {
+	if (!GpuTimer::EventsEnabled() || m_command.IsInvalid()) {
+		return;
+	}
+	// The timer belongs to the thread that begins and submits the command buffers.
+	if (m_threaded) {
+		Record([this, kind, hash, after](vk::CommandBuffer command) {
+			m_gpu_timer->Mark(command, kind, hash, after);
+		});
+	} else {
+		m_gpu_timer->Mark(m_command.m_buffer, kind, hash, after);
+	}
+}
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();

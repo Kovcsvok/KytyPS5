@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -1801,8 +1802,9 @@ void CommandProcessor::EmitGlobalBarrier() {
 
 void CommandProcessor::EmitLegacyGlobalBarrier() {
 	// Upstream 70668fb dropped these barriers (PM4 flush events/releases); KYTY_LEGACY_GLOBAL_BARRIERS=1 restores them.
+	// KYTY_DISPATCH_BARRIERS=0 relies on them in place of the per-dispatch barriers.
 	static auto& legacy = Common::LiveSwitches::Get("KYTY_LEGACY_GLOBAL_BARRIERS", 0);
-	if (legacy.load(std::memory_order_relaxed) != 0) {
+	if (legacy.load(std::memory_order_relaxed) != 0 || !DispatchBarriersEnabled()) {
 		EmitGlobalBarrier();
 	}
 }

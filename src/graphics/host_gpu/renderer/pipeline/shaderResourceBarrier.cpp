@@ -144,6 +144,11 @@ int SerializeGpuMode() {
 	return mode.load(std::memory_order_relaxed);
 }
 
+bool DispatchBarriersEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_DISPATCH_BARRIERS", 1);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
 void FullMemoryBarrier(const CommandRecorder& vk_buffer) {
 	EXIT_IF(vk_buffer == nullptr);
 	vk::MemoryBarrier barrier {};

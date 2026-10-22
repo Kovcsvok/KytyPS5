@@ -572,7 +572,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			                           ShaderRecompiler::IR::ImageResourceClass::Storage;
 		                }) ||
 		    has_storage_writes;
-		if (has_storage_writes) {
+		const bool dispatch_barriers = DispatchBarriersEnabled();
+		if (has_storage_writes && dispatch_barriers) {
 			// A host fence used to serialize every dispatch. Preserve its read-before-write
 			// ordering while allowing the queue to execute asynchronously.
 			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
@@ -581,10 +582,15 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			FullMemoryBarrier(vk_buffer);
 		}
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		auto& scheduler = m_context.GetCommandScheduler();
+		scheduler.MarkGpuEvent('C', program.shader_hash, false);
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		scheduler.MarkGpuEvent('C', program.shader_hash, true);
 
 		// The removed host fence also ordered read-only dispatches before later writers.
-		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		if (dispatch_barriers) {
+			ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
 	} while (recovery.Retry());
 	ResetBindings();
 }
@@ -667,9 +673,10 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 			        return image.written && image.resource_class ==
 			                                    ShaderRecompiler::IR::ImageResourceClass::Storage;
 		        });
-		if (has_storage_writes) {
+		if (has_storage_writes && DispatchBarriersEnabled()) {
 			ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 		}
+		// Kept with KYTY_DISPATCH_BARRIERS=0: arguments a shader wrote are read as dispatch sizes.
 		vk::MemoryBarrier barrier {};
 		barrier.srcAccessMask =
 		    vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
@@ -682,8 +689,13 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 			FullMemoryBarrier(vk_buffer);
 		}
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		auto& scheduler = m_context.GetCommandScheduler();
+		scheduler.MarkGpuEvent('C', program.shader_hash, false);
 		vk_buffer.dispatchIndirect(indirect_buffer, indirect_offset);
-		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		scheduler.MarkGpuEvent('C', program.shader_hash, true);
+		if (DispatchBarriersEnabled()) {
+			ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		}
 	} while (recovery.Retry());
 	ResetBindings();
 }

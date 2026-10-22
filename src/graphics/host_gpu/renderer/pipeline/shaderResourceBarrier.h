@@ -33,6 +33,11 @@ void ShaderWriteBarrier(const CommandRecorder& vk_buffer, vk::PipelineStageFlags
 // the screen for single frames: white/orange beams, orange floods).
 int  SerializeGpuMode();
 void FullMemoryBarrier(const CommandRecorder& vk_buffer);
+// KYTY_DISPATCH_BARRIERS (live, research, default 1): 0 drops the barriers around every dispatch
+// (ShaderWriteHazardBarrier before a writer, ShaderAccessBarrier after each) and orders compute by
+// the guest's own sync instead: its partial flushes and releases become global barriers, as with
+// KYTY_LEGACY_GLOBAL_BARRIERS=1 (CommandProcessor::EmitLegacyGlobalBarrier).
+bool DispatchBarriersEnabled();
 
 } // namespace Libs::Graphics
 

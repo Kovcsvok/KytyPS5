@@ -1426,11 +1426,15 @@ void RenderExecutor::ExecutePreparedDrawResolved(uint64_t submit_id, CommandBuff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u, ps_hash, vs_hash);
 	}
+	const char event_kind = ps_hash != 0 ? 'P' : 'V';
+	const auto event_hash = ps_hash != 0 ? ps_hash : vs_hash;
+	m_context.GetCommandScheduler().MarkGpuEvent(event_kind, event_hash, false);
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit, indirect_handle, indirect_offset);
 	}
+	m_context.GetCommandScheduler().MarkGpuEvent(event_kind, event_hash, true);
 
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x600u, ps_hash, vs_hash);
