@@ -245,6 +245,18 @@ private:
 	std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> m_page_downloaded;
 	bool                                   ServeStaleRead(uint64_t vaddr);
 	void                                   NoteStaleRead(uint64_t vaddr, uint64_t until);
+	// KYTY_READBACK_STALE_ALL=2: the windows a background readback is refreshing (m_stale_mutex).
+	// Guest reads in them are served from guest memory meanwhile. A tick of UINT64_MAX is a page
+	// whose readback a guest thread has posted and the GPU thread has not started yet.
+	struct BackgroundRefresh {
+		uint64_t begin = 0;
+		uint64_t end   = 0;
+		uint64_t tick  = 0;
+	};
+	std::vector<BackgroundRefresh> m_refreshes;
+	bool                           ServeRefreshingRead(uint64_t vaddr);
+	void                           BeginBackgroundReadback(uint64_t vaddr, uint64_t size);
+	void                           EndBackgroundReadback(uint64_t begin, uint64_t end, uint64_t tick);
 	void                   CompletePendingWriteReadback(size_t index);
 	void                   CompletePendingWriteReadbacks(uint64_t begin, uint64_t end);
 	[[nodiscard]] bool     OverlapsPendingWriteReadback(uint64_t begin, uint64_t end) const;

@@ -334,27 +334,36 @@ bool AsyncReadReadbackEnabled() {
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
-// KYTY_READBACK_STALE_ALL=1 (live, research, default 0): every guest-thread read of GPU-written
-// memory is served from guest memory as it is (the bytes of the last download), with no download
-// and no wait; the page stays GPU-owned, so each later read faults and is served the same way.
-// Measures what the guest threads' readback waits cost (Wolverine combat 2026-10-22: the main
-// guest thread waited 50-70 ms of a 66-83 ms frame). Stale data can show as glitches.
-bool StaleAllReadsEnabled() {
-	static auto& enabled = Common::LiveSwitches::Get("KYTY_READBACK_STALE_ALL", 0);
-	return enabled.load(std::memory_order_relaxed) != 0;
+// KYTY_READBACK_STALE_ALL (live, research, default 0): guest-thread reads of GPU-written memory do
+// not wait for a readback. 1: served from guest memory as it is (the bytes of the last download),
+// with no download at all; the page stays GPU-owned, so every later read faults and is served the
+// same way, and the bytes never refresh while the GPU keeps writing the page. 2: as 1, but the
+// fault also posts the window's readback to the GPU thread without waiting for it; when its
+// download lands the window is published and unprotected as after a waited readback, so the
+// guest sees the GPU's bytes one download later instead of never. Wolverine combat 2026-10-22:
+// the main guest thread waited 50-70 ms of a 66-83 ms frame; 1 (with KYTY_INDIRECT_DRAW_GUARD=0)
+// took 11-12 fps to 18-23, with orange blots on the ground (stale data).
+int64_t StaleAllMode() {
+	static auto& mode = Common::LiveSwitches::Get("KYTY_READBACK_STALE_ALL", 0);
+	return mode.load(std::memory_order_relaxed);
 }
 
-void NoteStaleAllRead() {
+void NoteStaleAllRead(bool posted) {
 	static std::atomic<uint64_t> served {0};
+	static std::atomic<uint64_t> readbacks {0};
 	static std::atomic<int64_t>  report_ms {0};
 	const auto count  = served.fetch_add(1, std::memory_order_relaxed) + 1;
+	if (posted) {
+		readbacks.fetch_add(1, std::memory_order_relaxed);
+	}
 	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 	                        std::chrono::steady_clock::now().time_since_epoch())
 	                        .count();
 	if (auto last = report_ms.load(std::memory_order_relaxed);
 	    now_ms - last >= 5000 && report_ms.compare_exchange_strong(last, now_ms)) {
-		std::printf("Stale-all reads (5 s): %" PRIu64 " guest reads served without a readback\n",
-		            count);
+		std::printf("Stale-all reads (5 s): %" PRIu64 " guest reads served without waiting, %" PRIu64
+		            " background readbacks posted\n",
+		            count, readbacks.exchange(0, std::memory_order_relaxed));
 		std::fflush(stdout);
 		served.store(0, std::memory_order_relaxed);
 	}
@@ -842,9 +851,16 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		Libs::LibKernel::Memory::RequestServeFromBacking();
 		return;
 	}
-	if (!is_write && !GuestGpu::IsGpuThread() && !Libs::LibKernel::Memory::ForceSyncReadback() &&
-	    StaleAllReadsEnabled()) {
-		NoteStaleAllRead();
+	if (const auto stale_all = !is_write && !GuestGpu::IsGpuThread() &&
+	                                   !Libs::LibKernel::Memory::ForceSyncReadback()
+	                               ? StaleAllMode()
+	                               : 0;
+	    stale_all == 1 || stale_all == 2) {
+		bool posted = false;
+		if (stale_all == 2 && !ServeRefreshingRead(vaddr)) {
+			posted = gpu.TrySendCommand([this, vaddr, size] { BeginBackgroundReadback(vaddr, size); });
+		}
+		NoteStaleAllRead(posted);
 		Libs::LibKernel::Memory::RequestServeFromBacking();
 		return;
 	}
@@ -1343,6 +1359,79 @@ void BufferCache::NoteStaleRead(uint64_t vaddr, uint64_t until) {
 	}
 	m_stale_pages[vaddr / TRACKER_PAGE_SIZE] = until;
 	m_stale_reads.fetch_add(1, std::memory_order_relaxed);
+}
+
+// KYTY_READBACK_STALE_ALL=2, any guest thread: true while a background readback covers the
+// page. Otherwise the page is entered as posted and the caller posts its readback.
+bool BufferCache::ServeRefreshingRead(uint64_t vaddr) {
+	const auto       page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	std::scoped_lock lock(m_stale_mutex);
+	for (const auto& refresh: m_refreshes) {
+		if (refresh.begin <= vaddr && vaddr < refresh.end &&
+		    (refresh.tick == UINT64_MAX || !m_scheduler.IsFree(refresh.tick))) {
+			return true;
+		}
+	}
+	if (m_refreshes.size() >= 4096) {
+		// Entries whose download has landed but whose completion has not run yet.
+		std::erase_if(m_refreshes, [this](const BackgroundRefresh& refresh) {
+			return refresh.tick != UINT64_MAX && m_scheduler.IsFree(refresh.tick);
+		});
+	}
+	m_refreshes.push_back({page_begin, page_begin + TRACKER_PAGE_SIZE, UINT64_MAX});
+	return false;
+}
+
+// GPU thread, KYTY_READBACK_STALE_ALL=2: records the window's download as a guest thread's
+// asynchronous readback does, without anyone waiting; EndBackgroundReadback publishes it.
+void BufferCache::BeginBackgroundReadback(uint64_t vaddr, uint64_t size) {
+	const auto page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto page_end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	// Downloads of the page that have already landed are published first, without waiting for
+	// one that has not.
+	for (size_t i = 0; i < m_pending_write_readbacks.size();) {
+		const auto& pending = m_pending_write_readbacks[i];
+		if (pending.begin < page_end && page_begin < pending.end &&
+		    m_scheduler.IsFree(pending.tick)) {
+			CompletePendingWriteReadback(i);
+		} else {
+			i++;
+		}
+	}
+	uint64_t   window_begin = 0;
+	uint64_t   window_end   = 0;
+	const auto tick         = BeginWriteReadback(vaddr, size, false, window_begin, window_end);
+	const bool landing      = tick != 0 && window_begin != window_end;
+	{
+		std::scoped_lock lock(m_stale_mutex);
+		std::erase_if(m_refreshes, [&](const BackgroundRefresh& refresh) {
+			return refresh.tick == UINT64_MAX && refresh.begin == page_begin;
+		});
+		if (landing) {
+			m_refreshes.push_back({window_begin, window_end, tick});
+		}
+	}
+	if (landing) {
+		m_scheduler.DeferOperation([this, window_begin, window_end, tick] {
+			EndBackgroundReadback(window_begin, window_end, tick);
+		});
+	}
+}
+
+// GPU thread, once the background readback's download has landed: as FinishWriteReadback after
+// a waited readback, the window is published and, unless the GPU wrote it again, unprotected.
+void BufferCache::EndBackgroundReadback(uint64_t begin, uint64_t end, uint64_t tick) {
+	for (size_t i = 0; i < m_pending_write_readbacks.size(); i++) {
+		const auto& pending = m_pending_write_readbacks[i];
+		if (pending.begin == begin && pending.end == end && pending.tick == tick) {
+			CompletePendingWriteReadback(i);
+			break;
+		}
+	}
+	std::scoped_lock lock(m_stale_mutex);
+	std::erase_if(m_refreshes, [&](const BackgroundRefresh& refresh) {
+		return refresh.begin == begin && refresh.end == end && refresh.tick == tick;
+	});
 }
 
 // GPU thread, after the guest waited for the readback's tick and its publication.
