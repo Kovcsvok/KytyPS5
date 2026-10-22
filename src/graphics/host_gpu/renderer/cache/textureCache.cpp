@@ -899,7 +899,20 @@ void TextureCache::UntrackImageTail(ImageId id) {
 }
 
 void TextureCache::TrackImageDownload(ImageId id, Image& image) {
-	if (m_readback_linear_images && !image.info.IsTiled() && !image.info.data.Empty()) {
+	// KYTY_READBACK_TILED_IMAGES=1 (live, research, default 0; upstream c07ad62's
+	// --readback-tiled-images): GPU-written tiled images of at most 64x64 texels are written back
+	// to guest memory after each submission too. Games read GPU results such as reductions on the
+	// CPU (PPSA04263 keeps its ocean wave grid origin in a 1x1 R32G32 target). T8 test: Wolverine's
+	// shadows vanish and come back from frame to frame.
+	static auto&       tiled_readback = Common::LiveSwitches::Get("KYTY_READBACK_TILED_IMAGES", 0);
+	constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
+	const auto&        info                     = image.info;
+	const bool         small_tiled =
+	    info.IsTiled() && tiled_readback.load(std::memory_order_relaxed) != 0 &&
+	    static_cast<uint64_t>(info.extent.width) * info.extent.height * info.extent.depth *
+	            info.resources.layers <=
+	        SmallTiledReadbackTexels;
+	if ((info.IsTiled() ? small_tiled : m_readback_linear_images) && !info.data.Empty()) {
 		if (!image.IsGpuModified()) {
 			EXIT("TextureCache: cannot enroll a non-GPU-owned image for download\n");
 		}
@@ -3076,13 +3089,37 @@ void TextureCache::ReportGcStats(uint64_t clock) {
 
 void TextureCache::ProcessDownloadImages() {
 	std::scoped_lock lock {m_lock};
+	// KYTY_READBACK_TILED_IMAGES: every 5 s, how many tiled images were written back and the
+	// first shapes seen.
+	static uint64_t                              tiled_downloads = 0;
+	static std::vector<std::array<uint32_t, 3>>  tiled_shapes;
+	static auto                                  tiled_report = std::chrono::steady_clock::now();
 	for (const auto id: m_download_images) {
 		const auto owner = m_slot_images.try_get(id);
-		if (owner != nullptr && owner->registered && owner->IsGpuModified()) {
-			(void)DownloadImageMemory(id);
+		if (owner != nullptr && owner->registered && owner->IsGpuModified() &&
+		    DownloadImageMemory(id) && owner->info.IsTiled()) {
+			tiled_downloads++;
+			const std::array<uint32_t, 3> shape {owner->info.extent.width,
+			                                     owner->info.extent.height,
+			                                     owner->info.resources.layers};
+			if (tiled_shapes.size() < 6 && std::ranges::find(tiled_shapes, shape) == tiled_shapes.end()) {
+				tiled_shapes.push_back(shape);
+			}
 		}
 	}
 	m_download_images.clear();
+	if (tiled_downloads != 0 && std::chrono::steady_clock::now() - tiled_report >= std::chrono::seconds(5)) {
+		tiled_report = std::chrono::steady_clock::now();
+		std::string shapes;
+		for (const auto& shape: tiled_shapes) {
+			shapes += fmt::format(" {}x{}x{}", shape[0], shape[1], shape[2]);
+		}
+		std::printf("Tiled readback (5 s): %" PRIu64 " write-backs, shapes%s\n", tiled_downloads,
+		            shapes.c_str());
+		std::fflush(stdout);
+		tiled_downloads = 0;
+		tiled_shapes.clear();
+	}
 }
 
 } // namespace Libs::Graphics

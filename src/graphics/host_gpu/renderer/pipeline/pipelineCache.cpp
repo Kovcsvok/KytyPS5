@@ -753,10 +753,15 @@ std::size_t PipelineCache::GraphicsPipelineKeyHash::operator()(const GraphicsPip
 // memory-writing programs still compile on the GPU thread. Translation stays on the GPU thread
 // (it reads guest memory and builds the resource plan). The recompiler's entry points are
 // serialized by one mutex while the switch is on, since they were written single-threaded.
-static const bool g_async_shaders = [] {
+// KYTY_ASYNC_SHADERS=2 (environment, research): the worker also translates graphics programs
+// and makes the shader modules of disk-cache hits. Wolverine 2026-10-22 (KYTY_SHADER_STATS): a
+// new pixel shader cost the GPU thread 40-65 ms of translation and ~45 ms of module creation;
+// =1 took only the compile and module, and the user saw little difference.
+static const int g_async_shaders_mode = [] {
 	const char* value = std::getenv("KYTY_ASYNC_SHADERS");
-	return value != nullptr && value[0] == '1';
+	return value != nullptr && (value[0] == '1' || value[0] == '2') ? value[0] - '0' : 0;
 }();
+static const bool g_async_shaders = g_async_shaders_mode >= 1;
 static std::mutex g_recompiler_mutex;
 // KYTY_RECOMPILER_LOCK=0 (environment, research): no global lock around the recompiler, so the
 // async workers (KYTY_ASYNC_SHADER_THREADS) and the GPU thread's translations run in parallel.
@@ -779,6 +784,7 @@ struct ShaderCompileStats {
 	std::atomic<uint64_t> translations {0}, translate_us {0};
 	std::atomic<uint64_t> compiles {0}, compile_us {0};
 	std::atomic<uint64_t> async_compiles {0}, async_compile_us {0};
+	std::atomic<uint64_t> async_translations {0}, async_translate_us {0};
 	std::atomic<uint64_t> validate_us {0}, module_us {0};
 	std::atomic<uint64_t> disk_hits {0};
 	std::atomic<int64_t>  report_ms {0};
@@ -816,11 +822,14 @@ struct ShaderCompileStats {
 		const auto compile_ms     = ms(compile_us);
 		const auto async_compiles = this->async_compiles.exchange(0);
 		const auto async_ms       = ms(async_compile_us);
+		const auto async_translations = this->async_translations.exchange(0);
+		const auto async_translate_ms = ms(async_translate_us);
 		::printf("Shader compile (5 s): %" PRIu64 " translations %.1f ms | GPU-thread compiles %" PRIu64
-		         " %.1f ms | async compiles %" PRIu64 " %.1f ms | validation %.1f ms | modules %.1f "
-		         "ms | disk hits %" PRIu64 "\n",
-		         translations, translate_ms, compiles, compile_ms, async_compiles, async_ms,
-		         ms(validate_us), ms(module_us), disk_hits.exchange(0));
+		         " %.1f ms | async translations %" PRIu64 " %.1f ms | async compiles %" PRIu64
+		         " %.1f ms | validation %.1f ms | modules %.1f ms | disk hits %" PRIu64 "\n",
+		         translations, translate_ms, compiles, compile_ms, async_translations,
+		         async_translate_ms, async_compiles, async_ms, ms(validate_us), ms(module_us),
+		         disk_hits.exchange(0));
 		std::fflush(stdout);
 	}
 };
@@ -857,9 +866,19 @@ struct AsyncPermutationJob {
 	ProgramDiskCache::Store*                     disk             = nullptr;
 	ProgramDiskCache::Key                        disk_key;
 	vk::Device                                   device = nullptr;
+	// KYTY_ASYNC_SHADERS=2: translate `code` first (and for a program first seen, stop after the
+	// resource plan), or only make the module of `spirv` (a disk-cache hit, `info` given).
+	bool                                         translate    = false;
+	bool                                         plan_only    = false;
+	bool                                         shader_clock = true;
+	std::vector<uint32_t>                        code;
+	std::vector<uint32_t>                        spirv;
 	// Results, valid once done.
 	ShaderRecompiler::IR::CompiledShaderInfo     info;
 	vk::ShaderModule                             module = nullptr;
+	std::optional<ShaderRecompiler::IR::ResourcePlan> plan;        // plan_only
+	bool                                         unsupported = false; // translation gave up
+	std::vector<uint32_t>                        call_target_user_data;
 	std::atomic<bool>                            done {false};
 	bool                                         claimed = false;
 };
@@ -924,8 +943,32 @@ void AsyncShaderCompiler::Compile(AsyncPermutationJob& job) {
 	} else if (job.pixel != nullptr) {
 		job.options.input_info.pixel = job.pixel.get();
 	}
-	std::vector<uint32_t> spirv;
-	{
+	if (job.translate) {
+		job.options.read_code = ReadShaderCode;
+		auto       lock       = RecompilerLock();
+		const auto start      = std::chrono::steady_clock::now();
+		job.translated        = ShaderRecompiler::TranslateProgram(job.code, job.options);
+		job.options.read_code = {};
+		job.unsupported       = job.translated.unsupported ||
+		                  (!job.shader_clock && UsesShaderClock(job.translated.program));
+		if (job.plan_only && !job.unsupported) {
+			job.plan = ShaderRecompiler::IR::ExtractResourcePlan(job.translated.program);
+		}
+		lock = {};
+		g_shader_stats.async_translations.fetch_add(1, std::memory_order_relaxed);
+		g_shader_stats.async_translate_us.fetch_add(ShaderCompileStats::Since(start),
+		                                            std::memory_order_relaxed);
+		job.call_target_user_data = job.translated.call_target_user_data;
+		// A program first seen returns to the GPU thread for MaterializeResources; one whose
+		// translation found call targets there too (its key grows by them).
+		if (job.plan_only || job.unsupported || !job.call_target_user_data.empty()) {
+			job.done.store(true, std::memory_order_release);
+			g_shader_stats.Report();
+			return;
+		}
+	}
+	std::vector<uint32_t> spirv = std::move(job.spirv);
+	if (spirv.empty()) {
 		auto       lock   = RecompilerLock();
 		const auto start  = std::chrono::steady_clock::now();
 		auto       result = ShaderRecompiler::CompileProgram(std::move(job.translated), job.options,
@@ -1194,6 +1237,38 @@ struct PipelineCache::ProgramCache {
 		         async_submitted, async_finished, async_skipped);
 		std::fflush(stdout);
 		async_submitted = async_finished = async_skipped = 0;
+	}
+
+	// A worker job with copies of what the stage's translation and compile read.
+	template <typename InputInfo>
+	std::shared_ptr<AsyncPermutationJob> MakeAsyncJob(const char*                             stage_name,
+	                                                  const ShaderRecompiler::CompileOptions& options,
+	                                                  const InputInfo&                        input_info,
+	                                                  uint32_t push_data_cursor) {
+		auto job        = std::make_shared<AsyncPermutationJob>();
+		job->stage_name = stage_name;
+		job->options    = options;
+		job->user_data.assign(options.user_data.begin(), options.user_data.end());
+		job->back_code.assign(options.back_code.begin(), options.back_code.end());
+		job->options.read_code = {};
+		if constexpr (std::is_same_v<InputInfo, ShaderPixelInputInfo>) {
+			job->pixel = std::make_unique<ShaderPixelInputInfo>(input_info);
+		} else if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+			job->vertex = std::make_unique<ShaderVertexInputInfo>(input_info);
+		}
+		job->push_data_cursor = push_data_cursor;
+		job->shader_clock     = shader_clock;
+		job->device           = device;
+		return job;
+	}
+
+	void SubmitAsync(std::shared_ptr<AsyncPermutationJob> job) {
+		if (async_compiler == nullptr) {
+			async_compiler = std::make_unique<AsyncShaderCompiler>();
+		}
+		async_compiler->Submit(std::move(job));
+		async_submitted++;
+		ReportAsync();
 	}
 
 	// The key of a program's resource plan: DiskKey without the specialization and push start.
@@ -1479,6 +1554,16 @@ struct PipelineCache::ProgramCache {
 				auto finished = *job;
 				pending.erase(job);
 				finished->claimed = true;
+				// KYTY_ASYNC_SHADERS=2: a worker translation that gave up, or that found call
+				// targets (the next request keys the program by them and starts over).
+				if (finished->unsupported) {
+					unsupported.insert(lookup_key);
+					return ShaderProgram {};
+				}
+				if (!finished->call_target_user_data.empty()) {
+					call_targets.try_emplace(params.hash, finished->call_target_user_data);
+					return ShaderProgram {};
+				}
 				entry->second.permutations.push_back({
 				    .specialization = std::move(finished->specialization),
 				    .program        = std::move(finished->info),
@@ -1608,6 +1693,18 @@ struct PipelineCache::ProgramCache {
 					g_shader_stats.disk_hits.fetch_add(1, std::memory_order_relaxed);
 					ReportDiskCache();
 					DumpShaderSpirv(stage_name, options.shader_hash, spirv);
+					// KYTY_ASYNC_SHADERS=2: the module is made on the worker (Wolverine: 812 hits
+					// in 5 s after a load took the GPU thread 752 ms).
+					if (g_async_shaders_mode >= 2 && stage != ShaderType::Compute &&
+					    !WritesMemory(entry->second.resource_plan)) {
+						auto job = MakeAsyncJob(stage_name, options, input_info, push_data_cursor);
+						job->spirv          = std::move(spirv);
+						job->info           = std::move(info);
+						job->specialization = entry->second.specialization;
+						entry->second.pending.push_back(job);
+						SubmitAsync(std::move(job));
+						return ShaderProgram {};
+					}
 					const auto module = TimedCompileSPV(spirv, device);
 					EXIT_IF(module == nullptr);
 					entry->second.permutations.push_back({
@@ -1623,14 +1720,63 @@ struct PipelineCache::ProgramCache {
 				}
 			}
 		}
-		auto       translate_lock  = RecompilerLock();
-		const auto translate_start = std::chrono::steady_clock::now();
-		auto       translated      = ShaderRecompiler::TranslateProgram(compile_code, options);
-		translate_lock             = {};
-		g_shader_stats.translations.fetch_add(1, std::memory_order_relaxed);
-		g_shader_stats.translate_us.fetch_add(ShaderCompileStats::Since(translate_start),
-		                                      std::memory_order_relaxed);
-		g_shader_stats.Report();
+		// KYTY_ASYNC_SHADERS=2: a graphics program is translated on the worker and its draws are
+		// skipped meanwhile. A new permutation of a known program that writes no memory takes one
+		// trip (translation and compile); a program first seen takes two: its translation and
+		// resource plan come back here for MaterializeResources, then the compile (on the worker
+		// unless the plan writes memory; such a program's first draws were skipped too).
+		ShaderRecompiler::TranslateResult                 translated;
+		std::optional<ShaderRecompiler::IR::ResourcePlan> translated_plan;
+		bool                                              translated_async = false;
+		if (g_async_shaders_mode >= 2 && stage != ShaderType::Compute &&
+		    !call_targets.contains(params.hash)) {
+			if (entry != programs.end()) {
+				if (!WritesMemory(entry->second.resource_plan) &&
+				    (!disk_key.has_value() || disk_key_checked)) {
+					auto job = MakeAsyncJob(stage_name, options, input_info, push_data_cursor);
+					job->translate = true;
+					job->code.assign(compile_code.begin(), compile_code.end());
+					job->specialization = entry->second.specialization;
+					job->disk           = disk_key.has_value() ? &disk : nullptr;
+					job->disk_key       = disk_key.value_or(ProgramDiskCache::Key {});
+					entry->second.pending.push_back(job);
+					SubmitAsync(std::move(job));
+					return ShaderProgram {};
+				}
+			} else if (auto found = translating.find(lookup_key); found == translating.end()) {
+				auto job = MakeAsyncJob(stage_name, options, input_info, push_data_cursor);
+				job->translate = true;
+				job->plan_only = true;
+				job->code.assign(compile_code.begin(), compile_code.end());
+				translating.emplace(lookup_key, job);
+				SubmitAsync(std::move(job));
+				return ShaderProgram {};
+			} else if (!found->second->done.load(std::memory_order_acquire)) {
+				async_skipped++;
+				ReportAsync();
+				return ShaderProgram {};
+			} else {
+				const auto job = std::move(found->second);
+				translating.erase(found);
+				translated       = std::move(job->translated);
+				translated_plan  = std::move(job->plan);
+				translated_async = true;
+				if (job->unsupported) {
+					translated.unsupported = true;
+				}
+				async_finished++;
+			}
+		}
+		if (!translated_async) {
+			auto       translate_lock  = RecompilerLock();
+			const auto translate_start = std::chrono::steady_clock::now();
+			translated                 = ShaderRecompiler::TranslateProgram(compile_code, options);
+			translate_lock             = {};
+			g_shader_stats.translations.fetch_add(1, std::memory_order_relaxed);
+			g_shader_stats.translate_us.fetch_add(ShaderCompileStats::Since(translate_start),
+			                                      std::memory_order_relaxed);
+			g_shader_stats.Report();
+		}
 		if (!translated.unsupported && !translated.call_target_user_data.empty() &&
 		    call_targets.try_emplace(params.hash, translated.call_target_user_data).second) {
 			for (const auto index: translated.call_target_user_data) {
@@ -1664,8 +1810,10 @@ struct PipelineCache::ProgramCache {
 		}
 		if (entry == programs.end()) {
 			auto plan_lock = RecompilerLock();
-			entry = programs.try_emplace(lookup_key,
-			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program)).first;
+			entry = programs.try_emplace(lookup_key, translated_plan.has_value()
+			                                             ? std::move(*translated_plan)
+			                                             : ShaderRecompiler::IR::ExtractResourcePlan(
+			                                                   translated.program)).first;
 			plan_lock = {};
 			if (disk.Enabled() && translated.call_target_user_data.empty()) {
 				std::vector<uint8_t> bytes;
@@ -1805,6 +1953,8 @@ struct PipelineCache::ProgramCache {
 	std::chrono::steady_clock::time_point memo_report = std::chrono::steady_clock::now();
 	// KYTY_ASYNC_SHADERS (GPU thread; the compiler owns its worker).
 	std::unique_ptr<AsyncShaderCompiler>  async_compiler;
+	// KYTY_ASYNC_SHADERS=2: programs first seen whose translation a worker runs.
+	std::unordered_map<ProgramKey, std::shared_ptr<AsyncPermutationJob>, ProgramKeyHash> translating;
 	uint32_t                              async_submitted = 0;
 	uint32_t                              async_finished  = 0;
 	uint32_t                              async_skipped   = 0;
