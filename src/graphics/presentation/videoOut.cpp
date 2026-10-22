@@ -25,6 +25,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <list>
 #include <thread>
@@ -1453,6 +1455,9 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 	     buffer_index_start, buffer_num, set_index, attribute->pixel_format, attribute->tiling_mode,
 	     attribute->aspect_ratio, attribute->width, attribute->height, attribute->pitch_in_pixel,
 	     attribute->option, category);
+	// Shows whether KYTY_VIDEO_OUT_1080P changed the game's output size.
+	::printf("VideoOut: %d display buffers %" PRIu32 "x%" PRIu32 " registered (set %d)\n",
+	         buffer_num, attribute->width, attribute->height, set_index);
 
 	if (option != nullptr) {
 		return VIDEO_OUT_ERROR_INVALID_OPTION;
@@ -1797,10 +1802,22 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 
 	int32_t attribute3 = 0;
 	Loader::SystemContentParamSfoGetInt("ATTRIBUTE3", &attribute3);
+	// KYTY_VIDEO_OUT_1080P=1 (environment, research): report a 1080p display. Wolverine outputs
+	// 3840x2160 flip buffers (its 1664x936 frame upscaled) on a 4K display; a 1080p output could
+	// mean smaller buffers, less VRAM and less copy and readback work.
+	static const bool force_1080p = [] {
+		const char* value = std::getenv("KYTY_VIDEO_OUT_1080P");
+		const bool  on    = value != nullptr && value[0] == '1';
+		if (on) {
+			::printf("VideoOut: reporting a 1080p display (KYTY_VIDEO_OUT_1080P=1)\n");
+		}
+		return on;
+	}();
 	ctx->mutex.Lock();
 	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
 	status->resolution =
-	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
+	    (force_1080p || ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160) ? 1u
+	                                                                                        : 2u);
 	status->dynamicRange = 1;
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119

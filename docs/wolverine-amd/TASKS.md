@@ -47,3 +47,9 @@ Terv: 1) `BindlessTable`: `eStorageImage` tömbök (2D, 2DArray) ugyanazzal a sl
 
 ## T8 – Árnyék-villogás [NYITOTT]
 Az árnyékok gyorsan váltakozva eltűnnek/visszajönnek (POPS-tól és a laphiba-szélesítéstől független, a régebbi buildekben is volt). `KYTY_KEEP_GPU_IMAGES=1` nem segít, fekete foltot okoz. Nyom: `textureCache.cpp` ~1580 komment (1664x936 GPU-írt képek minden második frame-ben újrafeltöltve a buffer cache-ből). Következő: `KYTY_IMAGE_STATS=1`/feltöltés-statisztika egy árnyékos jelenetben, F9 frame-dump.
+
+## T10 – Engine-beállítások `commandline.txt`-ből (kutatás) [NYITOTT]
+A játék `commandline.txt`-je `{ Szekció.Mező=érték }` sorokat fogad (pl. `{ EngineDebug.FrameTimeGraphEnable=false }`), felülírható a `userdata\overrides\commandline.txt`-vel (a játékot ne módosítsd!). Mezőjelöltek és szekciójelöltek: lásd `JOURNAL.md` 2026-10-22 „FSR/frame gen…”. Első lépés: kideríteni, hogyan párosul a szekció a mezővel (eboot reflexiós táblák: a mezőnév-string címére mutató pointerek környezete), és látszik-e a játék hibakimenete (a `-nodbgmsg` nélkül). Cél: felbontás/LOD/mip bias/árnyék-cache, mérés `KYTY_SHADER_STATS` + FPS.
+
+## T11 – Occlusion query-k (kutatás) [NYITOTT]
+A napló szerint a játék occlusion query-ket használ, amelyeket az emulátor „mindig látható”-nak vesz → minden takart objektum is kirajzolódik. Felmérni: hogyan használja (GPU-predikáció vagy CPU-olvasás), mennyi draw-t takarítana meg, és mekkora munka a valódi (Vulkan occlusion query + eredmény a vendégmemóriába) megvalósítás.
