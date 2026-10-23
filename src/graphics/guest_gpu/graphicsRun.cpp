@@ -742,10 +742,6 @@ void GuestGpu::Enqueue(Submission submission) {
 	m_work_available.Signal();
 }
 
-void GuestGpu::Wake() {
-	m_work_available.Signal();
-}
-
 void GuestGpu::WaitForIdle() {
 	Common::LockGuard lock(m_queue_mutex);
 	while (m_processing || !m_commands.empty() || m_submission_count != 0) {
@@ -1562,8 +1558,7 @@ void ReportFlipWaits() {
 		return;
 	}
 	::printf("Flip waits (5 s): %" PRIu64 " waits, %" PRIu64 " blocked the GPU thread for %.1f ms, %" PRIu64
-	         " suspensions of the queue
-",
+	         " suspensions of the queue\n",
 	         s.calls, s.blocked, std::chrono::duration<double, std::milli>(s.blocked_time).count(), s.suspended);
 	std::fflush(stdout);
 	s = {.report = now};

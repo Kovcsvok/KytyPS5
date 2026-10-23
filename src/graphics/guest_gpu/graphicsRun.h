@@ -33,7 +33,8 @@ public:
 	// Like SendCommand, but false instead of exiting once the GPU no longer accepts commands.
 	bool               TrySendCommand(Common::UniqueFunction<void>&& command);
 	void               SendCommandSync(Common::UniqueFunction<void>&& command);
-	// Retries blocked submissions now instead of after the 100 ms stall timeout.
+	// Retries blocked submissions now instead of after the 100 ms stall timeout: queues blocked in
+	// WAIT_REG_MEM (a label was published off the GPU thread) or in a flip wait.
 	void               Wake();
 
 	// End-of-pipe labels (RELEASE_MEM without an interrupt) become visible to the CPU once the
@@ -93,8 +94,6 @@ private:
 	};
 
 	void              Enqueue(Submission submission);
-	// Re-checks queues blocked in WAIT_REG_MEM (a label was published off the GPU thread).
-	void              Wake();
 	void              ProcessCommands();
 	bool              Process(Submission& submission);
 	// KYTY_SLICE_FLUSH_US (see graphicsRun.cpp). GPU thread.
