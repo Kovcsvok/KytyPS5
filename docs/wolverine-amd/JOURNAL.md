@@ -297,3 +297,6 @@ Mérés: a `Materialize` sor „new pages … ms” értéke (előtte harcban ~1
 ## 2026-10-23 — Opus — readback-queue + fősor-flush (`KYTY_READBACK_QUEUE_FLUSH_US`)
 Új (élő, alap 0, shader-fordítást nem érint): `KYTY_READBACK_QUEUE_FLUSH_US=N`: ha egy `KYTY_READBACK_QUEUE_ASYNC` visszaolvasás elindult, és a fő sor utolsó submitja óta N µs eltelt (1 = mindig), a GPU-szál a fő sor nyitott parancspufferét is elküldi – ugyanott, ahol a fő soros visszaolvasás is flushol, csak a vendég nem vár rá, hanem a readback-queue másolatára (Tracy: 142 µs vs 808 µs). Cél: a fő soros mód GPU-etetése (12–13 ezer cmdbuf / 5 s, 57%) a gyors readback-queue-val együtt. Napló: `Queue readbacks (5 s): N posted (…, F main-queue flushes), …`.
 Csomag: `Readback A - main queue.bat` (alap), `Readback B - queue, flush each.bat` (`QUEUE_ASYNC=1`, `RANGE_TICK=1`, `FLUSH_US=1`), `Readback C - queue, flush 500us.bat` (`FLUSH_US=500`); a `Queue Readback 0.bat` és a `SRT Page Cache 1.bat` lomtárba (`SRT Page Cache 0` marad).
+
+## 2026-10-23 — Opus — `8dd98fa` csomag
+CI zöld (run 39999302113). `C:\Games\Wolverine-AMD-Async\emulator` = `8dd98fa` (a binárisban benne a `KYTY_READBACK_QUEUE_FLUSH_US`), tartalék `emulator-665b12b`; az `emulator-f5c4212` lomtárba. Teszt: harc, `Readback A` → `B` → `C` → `A`, egyenként ~1 perc.
