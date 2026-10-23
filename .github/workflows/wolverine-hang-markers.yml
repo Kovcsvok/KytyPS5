@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [ wolverine-v2-amd-hang-markers ]
+    # Handoff notes and journals do not change the build.
+    paths-ignore:
+      - 'docs/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -147,6 +150,8 @@ jobs:
           name: Wolverine-v2-AMD-Hang-Markers-Windows-x64
           path: _Build/windows/portable/**
           if-no-files-found: error
+          # Each build is downloaded right away; older ones only take storage.
+          retention-days: 3
 
   tuning-settings:
     name: Test tuning settings (no GPU required)
