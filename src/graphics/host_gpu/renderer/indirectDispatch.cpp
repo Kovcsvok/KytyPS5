@@ -439,7 +439,8 @@ vk::DeviceSize MeshIndirectDraws::PreprocessSizeFor(vk::Pipeline                
 		return found->second;
 	}
 	auto                                           device = m_graphics.device;
-	vk::GeneratedCommandsPipelineInfoEXT           pipeline_info {pipeline};
+	vk::GeneratedCommandsPipelineInfoEXT           pipeline_info {};
+	pipeline_info.pipeline = pipeline;
 	vk::GeneratedCommandsMemoryRequirementsInfoEXT info {};
 	info.pNext                  = &pipeline_info;
 	info.indirectCommandsLayout = layout;

@@ -65,8 +65,9 @@ public:
 	                                 vk::DeviceAddress preprocess,
 	                                 vk::DeviceSize    preprocess_size) const {
 		Run([=](vk::CommandBuffer command) {
-			vk::GeneratedCommandsPipelineInfoEXT pipeline_info {pipeline};
-			vk::GeneratedCommandsInfoEXT         info {};
+			vk::GeneratedCommandsPipelineInfoEXT pipeline_info {};
+			pipeline_info.pipeline = pipeline;
+			vk::GeneratedCommandsInfoEXT info {};
 			info.pNext                  = &pipeline_info;
 			info.shaderStages           = stages;
 			info.indirectCommandsLayout = layout;
