@@ -332,6 +332,17 @@ bool QueueGuestCopyEnabled() {
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
+// KYTY_READBACK_QUEUE_FLUSH_US=N (live, default 0 = off): a KYTY_READBACK_QUEUE_ASYNC readback also
+// submits the main queue's open command buffer when N microseconds have passed since its last
+// submit (1 = every time), as the main-queue readback does (it submits to wait for its copy). The
+// readback itself still waits only for its own copy. Wolverine combat 2026-10-23: with the
+// readback queue the main queue went from 12-13k to 3-4k command buffers per 5 s and the GPU from
+// 57% to 37% busy; the readback copy took 142 us instead of 808 us (Tracy).
+int64_t QueueReadbackFlushUs() {
+	static auto& interval = Common::LiveSwitches::Get("KYTY_READBACK_QUEUE_FLUSH_US", 0);
+	return interval.load(std::memory_order_relaxed);
+}
+
 bool DirectReadbackEnabled() {
 	return DirectReadbackMode() != 0;
 }
@@ -1374,6 +1385,16 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 		if (queue_mode >= 2 || m_scheduler.IsFree(writer_tick)) {
 			if (const auto tick = BeginQueueReadback(buffer, window_begin, window_end, writer_tick);
 			    tick != 0) {
+				// KYTY_READBACK_QUEUE_FLUSH_US: keep the main queue fed as a main-queue readback does.
+				if (const auto interval = QueueReadbackFlushUs(); interval > 0) {
+					const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+					                        std::chrono::steady_clock::now().time_since_epoch())
+					                        .count();
+					if (now_us - m_scheduler.LastSubmitUs() >= interval) {
+						m_scheduler.Flush();
+						m_queue_readback_stats.flushes++;
+					}
+				}
 				ReportQueueReadbacks();
 				stats.SetOutcome(ReadbackStats::Downloaded);
 				return tick;
@@ -2113,12 +2134,12 @@ void BufferCache::ReportQueueReadbacks() {
 	if (now - s.report < std::chrono::seconds(5)) {
 		return;
 	}
-	::printf("Queue readbacks (5 s): %" PRIu64 " posted (%" PRIu64 " with the writer running), %" PRIu64
-	         " landed (%" PRIu64 " written back by the guest, %" PRIu64
+	::printf("Queue readbacks (5 s): %" PRIu64 " posted (%" PRIu64 " with the writer running, %" PRIu64
+	         " main-queue flushes), %" PRIu64 " landed (%" PRIu64 " written back by the guest, %" PRIu64
 	         " written again meanwhile), main queue instead: %" PRIu64 " no free slot, %" PRIu64
 	         " over 4 MiB, %" PRIu64 " overlapping a download\n",
-	         s.posted, s.inflight, s.landed, s.guest_copies, s.redirtied, s.no_slot, s.too_large,
-	         s.busy);
+	         s.posted, s.inflight, s.flushes, s.landed, s.guest_copies, s.redirtied, s.no_slot,
+	         s.too_large, s.busy);
 	std::fflush(stdout);
 	s = {.report = now};
 }

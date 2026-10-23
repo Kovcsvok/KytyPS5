@@ -328,6 +328,7 @@ private:
 		uint64_t                              inflight  = 0;
 		uint64_t                              landed    = 0;
 		uint64_t                              guest_copies = 0;
+		uint64_t                              flushes      = 0;
 		uint64_t                              redirtied = 0;
 		uint64_t                              no_slot   = 0;
 		uint64_t                              too_large = 0;
