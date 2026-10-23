@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -260,7 +261,8 @@ private:
 	bool                           ServeRefreshingRead(uint64_t vaddr);
 	void                           BeginBackgroundReadback(uint64_t vaddr, uint64_t size);
 	void                           EndBackgroundReadback(uint64_t begin, uint64_t end, uint64_t tick);
-	void                   CompletePendingWriteReadback(size_t index);
+	// False when a KYTY_READBACK_QUEUE_ASYNC copy may hold bytes the GPU wrote again meanwhile.
+	bool                   CompletePendingWriteReadback(size_t index);
 	void                   UnmarkPublishedRange(uint64_t begin, uint64_t end);
 	// KYTY_READBACK_SPARSE_KB (see bufferCache.cpp).
 	bool WidenSparseReadback(const Buffer& buffer, uint64_t& window_begin, uint64_t& window_end);
@@ -292,6 +294,48 @@ private:
 	};
 	RangeTickStats m_range_tick_stats;
 	void           ReportRangeTickReadbacks();
+	// KYTY_READBACK_QUEUE_ASYNC (see bufferCache.cpp): a guest thread's readback copied on the
+	// readback queue, which the GPU thread submits without waiting for it. Its pending tick has
+	// QueueReadbackTickBit set; the rest is the value it signals on m_queue_readbacks.semaphore.
+	// GPU thread, except WaitQueueReadback.
+	static constexpr uint64_t QueueReadbackTickBit = 1ull << 63u;
+	struct QueueReadbackSlot {
+		vk::CommandBuffer           command = nullptr;
+		std::unique_ptr<Buffer>     staging;
+		std::vector<vk::BufferCopy> copies;
+		vk::Buffer                  source         = nullptr;
+		uint64_t                    source_address = 0;
+		uint64_t                    total_size     = 0;
+		uint64_t                    value          = 0; // 0: free
+	};
+	struct QueueReadbacks {
+		vk::CommandPool                  pool       = nullptr;
+		vk::Semaphore                    semaphore  = nullptr;
+		uint64_t                         next_value = 1;
+		std::array<QueueReadbackSlot, 8> slots;
+	};
+	QueueReadbacks m_queue_readbacks;
+	struct QueueReadbackStats {
+		uint64_t                              posted    = 0;
+		uint64_t                              inflight  = 0;
+		uint64_t                              landed    = 0;
+		uint64_t                              redirtied = 0;
+		uint64_t                              no_slot   = 0;
+		uint64_t                              too_large = 0;
+		uint64_t                              busy      = 0;
+		std::chrono::steady_clock::time_point report    = std::chrono::steady_clock::now();
+	};
+	QueueReadbackStats m_queue_readback_stats;
+	// The pending tick, or 0 when the main queue must download the window.
+	[[nodiscard]] uint64_t BeginQueueReadback(Buffer& buffer, uint64_t window_begin,
+	                                          uint64_t window_end, uint64_t writer_tick);
+	// Publishes the copy to guest memory. False when the GPU wrote its bytes again meanwhile.
+	bool               LandQueueReadback(uint64_t tick);
+	void               WaitQueueReadback(uint64_t tick) const;
+	QueueReadbackSlot* FindQueueReadbackSlot(uint64_t tick);
+	// Before the buffer is destroyed: its copies still in flight land.
+	void               CompleteQueueReadbacksOf(vk::Buffer source);
+	void               ReportQueueReadbacks();
 	void                   CompletePendingWriteReadbacks(uint64_t begin, uint64_t end);
 	[[nodiscard]] bool     OverlapsPendingWriteReadback(uint64_t begin, uint64_t end) const;
 
