@@ -296,6 +296,19 @@ int64_t DirectReadbackMode() {
 	return mode.load(std::memory_order_relaxed);
 }
 
+// KYTY_READBACK_RANGE_TICK (live, default 0): a readback waits for the last GPU work that wrote
+// the window's bytes (m_range_writes), not for the buffer's last writer. Wolverine combat
+// 2026-10-22: the 2.8 GB heap 0x1210000000 always has a writer running, so each of its ~100
+// readbacks per frame waited for all the work recorded before it. 1: a guest thread's readback
+// whose bytes are final is downloaded on the readback queue at once (behind nothing) instead of
+// on the main queue; the direct (KYTY_DIRECT_READBACK) and copy-queue paths use the range tick.
+// 2: also when the range's writer still runs (the readback queue waits for that tick only).
+// Report: "Range-tick readbacks (5 s)".
+int64_t RangeTickMode() {
+	static auto& mode = Common::LiveSwitches::Get("KYTY_READBACK_RANGE_TICK", 0);
+	return mode.load(std::memory_order_relaxed);
+}
+
 bool DirectReadbackEnabled() {
 	return DirectReadbackMode() != 0;
 }
@@ -944,7 +957,15 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 	const auto     buffer_end   = buffer_begin + buffer.Size();
 	auto           window_begin = std::max(Common::AlignDown(vaddr, WindowSize), buffer_begin);
 	auto window_end = std::min(std::max(window_begin + WindowSize, vaddr + size), buffer_end);
-	(void)WidenSparseReadback(buffer, window_begin, window_end);
+	if (const auto narrow_begin = window_begin, narrow_end = window_end;
+	    WidenSparseReadback(buffer, window_begin, window_end) && RangeTickMode() != 0 &&
+	    m_scheduler.IsFree(WriterTick(buffer, narrow_begin, narrow_end)) &&
+	    !m_scheduler.IsFree(WriterTick(buffer, window_begin, window_end))) {
+		// KYTY_READBACK_RANGE_TICK: the whole buffer would wait for a running writer, the
+		// window alone for none.
+		window_begin = narrow_begin;
+		window_end   = narrow_end;
+	}
 
 	if (TryDirectReadback(buffer, vaddr, size, is_write, window_begin, window_end)) {
 		stats.SetOutcome(ReadbackStats::DirectRead);
@@ -988,7 +1009,7 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 bool BufferCache::TryDirectReadback(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_write,
                                     uint64_t window_begin, uint64_t window_end) {
 	if (!DirectReadbackEnabled() || buffer.Mapped().empty() ||
-	    !m_scheduler.IsFree(buffer.last_gpu_write_tick)) {
+	    !m_scheduler.IsFree(WriterTick(buffer, window_begin, window_end))) {
 		return false;
 	}
 	const auto begin = Common::AlignDown(window_begin, TRACKER_PAGE_SIZE);
@@ -1088,7 +1109,8 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	    OverlapsPendingWriteReadback(window_begin, window_end)) {
 		return false;
 	}
-	const bool writer_in_flight = !m_scheduler.IsFree(buffer.last_gpu_write_tick);
+	const uint64_t writer_tick      = WriterTick(buffer, window_begin, window_end);
+	const bool     writer_in_flight = !m_scheduler.IsFree(writer_tick);
 	if (writer_in_flight && !CopyQueueInflightEnabled()) {
 		return false;
 	}
@@ -1116,7 +1138,7 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	}
 	if (writer_in_flight) {
 		KYTY_PROFILER_BLOCK("BufferCache::CopyQueueReadbackFlush");
-		if (buffer.last_gpu_write_tick >= m_scheduler.CurrentTick()) {
+		if (writer_tick >= m_scheduler.CurrentTick()) {
 			// The writer is in the open command buffer: submit it so the copy can wait for its
 			// tick.
 			m_scheduler.Flush();
@@ -1169,7 +1191,7 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	                              nullptr);
 	RequireVulkanSuccess(state.command.end(), "end readback command buffer");
 
-	const uint64_t                  writer_tick = buffer.last_gpu_write_tick;
+	// writer_tick: the last GPU work that wrote the copied bytes (WriterTick).
 	const vk::Semaphore             master      = m_scheduler.GetMasterSemaphore().Handle();
 	const vk::PipelineStageFlags    wait_stage  = vk::PipelineStageFlagBits::eTransfer;
 	vk::TimelineSemaphoreSubmitInfo timeline {};
@@ -1268,7 +1290,15 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 		window_begin = std::max(page_begin, buffer_begin);
 		window_end   = std::min(page_end, buffer_end);
 	}
-	(void)WidenSparseReadback(buffer, window_begin, window_end);
+	if (const auto narrow_begin = window_begin, narrow_end = window_end;
+	    WidenSparseReadback(buffer, window_begin, window_end) && RangeTickMode() != 0 &&
+	    m_scheduler.IsFree(WriterTick(buffer, narrow_begin, narrow_end)) &&
+	    !m_scheduler.IsFree(WriterTick(buffer, window_begin, window_end))) {
+		// KYTY_READBACK_RANGE_TICK: the whole buffer would wait for a running writer, the
+		// window alone for none.
+		window_begin = narrow_begin;
+		window_end   = narrow_end;
+	}
 
 	// KYTY_DIRECT_READBACK: the bytes are in host-visible device memory, no download needed.
 	if (DirectReadbackEnabled()) {
@@ -1279,10 +1309,10 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 			ReportDirectReadbacks();
 			stats.SetOutcome(ReadbackStats::DirectRead);
 			return 0;
-		} else if (DirectReadbackMode() >= 2 && !m_scheduler.IsFree(buffer.last_gpu_write_tick)) {
+		} else if (DirectReadbackMode() >= 2 && !m_scheduler.IsFree(WriterTick(buffer, window_begin, window_end))) {
 			// The guest waits for the writer's tick only, not for everything recorded after it;
 			// FinishWriteReadback then copies from the mapping (an empty window marks this).
-			const auto writer_tick = buffer.last_gpu_write_tick;
+			const auto writer_tick = WriterTick(buffer, window_begin, window_end);
 			if (writer_tick >= m_scheduler.CurrentTick()) {
 				m_scheduler.Flush();
 			}
@@ -1292,6 +1322,40 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 			return writer_tick;
 		}
 		ReportDirectReadbacks();
+	}
+
+	// KYTY_READBACK_RANGE_TICK: the window's bytes were written by work that has finished (1), or
+	// by work the readback queue can wait for alone (2): download them there instead of behind
+	// everything recorded on the main queue.
+	if (const auto range_mode = RangeTickMode(); range_mode != 0) {
+		const auto writer_tick = WriterTick(buffer, window_begin, window_end);
+		const bool range_done  = m_scheduler.IsFree(writer_tick);
+		if ((range_done || range_mode >= 2) &&
+		    TryCopyQueueReadback(buffer, window_begin, window_end)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(window_begin, window_end - window_begin);
+			if (is_write) {
+				m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
+			}
+			if (range_done) {
+				m_range_tick_stats.copy_done++;
+				if (!m_scheduler.IsFree(buffer.last_gpu_write_tick)) {
+					m_range_tick_stats.spared++;
+				}
+			} else {
+				m_range_tick_stats.copy_inflight++;
+			}
+			ReportRangeTickReadbacks();
+			stats.SetOutcome(ReadbackStats::Downloaded);
+			return 0;
+		}
+		m_range_tick_stats.main_queue++;
+		if (!range_done) {
+			m_range_tick_stats.range_running++;
+		}
+		ReportRangeTickReadbacks();
+	}
+	if (stats.Enabled()) {
+		stats.FindWriter([this](uint64_t tick) { return m_scheduler.IsFree(tick); });
 	}
 
 	if (!DownloadBufferMemory(buffer, window_begin, window_end - window_begin)) {
@@ -1613,6 +1677,85 @@ bool BufferCache::WidenSparseReadback(const Buffer& buffer, uint64_t& window_beg
 	return true;
 }
 
+void BufferCache::NoteGpuWriteTick(uint64_t vaddr, uint64_t size) {
+	if (size == 0) {
+		return;
+	}
+	const uint64_t begin = vaddr;
+	const uint64_t end   = vaddr + size;
+	const uint64_t tick  = m_scheduler.CurrentTick();
+	auto           it    = m_range_writes.upper_bound(begin);
+	if (it != m_range_writes.begin()) {
+		if (const auto prev = std::prev(it); prev->second.end > begin) {
+			it = prev;
+		}
+	}
+	// The newer write replaces the overlapped parts; the parts outside [begin, end) keep their
+	// older ticks.
+	bool       has_left = false, has_right = false;
+	uint64_t   left_begin = 0, right_end = 0;
+	RangeWrite left {}, right {};
+	while (it != m_range_writes.end() && it->first < end) {
+		if (it->first < begin) {
+			has_left   = true;
+			left_begin = it->first;
+			left       = {begin, it->second.tick};
+		}
+		if (it->second.end > end) {
+			has_right = true;
+			right_end = it->second.end;
+			right     = {right_end, it->second.tick};
+		}
+		it = m_range_writes.erase(it);
+	}
+	if (has_left) {
+		m_range_writes.emplace(left_begin, left);
+	}
+	if (has_right) {
+		m_range_writes.emplace(end, right);
+	}
+	m_range_writes.emplace(begin, RangeWrite {end, tick});
+	if (m_range_writes.size() > m_range_writes_prune_at) {
+		// A finished write needs no wait: forget it.
+		std::erase_if(m_range_writes,
+		              [this](const auto& entry) { return m_scheduler.IsFree(entry.second.tick); });
+		m_range_writes_prune_at = std::max<size_t>(16384, m_range_writes.size() * 2);
+	}
+}
+
+uint64_t BufferCache::WriterTick(const Buffer& buffer, uint64_t begin, uint64_t end) const {
+	if (RangeTickMode() == 0 || end <= begin) {
+		return buffer.last_gpu_write_tick;
+	}
+	uint64_t tick = 0;
+	auto     it   = m_range_writes.upper_bound(begin);
+	if (it != m_range_writes.begin()) {
+		if (const auto prev = std::prev(it); prev->second.end > begin) {
+			it = prev;
+		}
+	}
+	for (; it != m_range_writes.end() && it->first < end; ++it) {
+		tick = std::max(tick, it->second.tick);
+	}
+	return std::min(tick, buffer.last_gpu_write_tick);
+}
+
+// KYTY_READBACK_RANGE_TICK, every 5 s (GPU thread).
+void BufferCache::ReportRangeTickReadbacks() {
+	const auto now = std::chrono::steady_clock::now();
+	if (now - m_range_tick_stats.report < std::chrono::seconds(5)) {
+		return;
+	}
+	auto& s = m_range_tick_stats;
+	::printf("Range-tick readbacks (5 s): %" PRIu64 " on the readback queue with the writer done (%" PRIu64
+	         " while the buffer's last writer still ran), %" PRIu64 " with the writer running, %" PRIu64
+	         " left to the main queue (%" PRIu64 " with the range's writer running), %zu ranges\n",
+	         s.copy_done, s.spared, s.copy_inflight, s.main_queue, s.range_running,
+	         m_range_writes.size());
+	std::fflush(stdout);
+	s = {.report = now};
+}
+
 // KYTY_READBACK_SPARSE_KB, every 5 s (GPU thread).
 void BufferCache::ReportSparseReadbacks() {
 	const auto now = std::chrono::steady_clock::now();
@@ -1721,6 +1864,7 @@ void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumul
 	}
 	new_buffer.CopyFrom(m_scheduler.Current(), overlap, 0,
 	                    overlap.CpuAddress() - new_buffer.CpuAddress(), overlap.Size());
+	NoteGpuWriteTick(overlap.CpuAddress(), overlap.Size());
 	new_buffer.last_gpu_write_tick = m_scheduler.CurrentTick();
 	DeleteBuffer(overlap_id);
 }
@@ -1939,6 +2083,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferWritten(uint64_t vaddr, ui
 
 void BufferCache::MarkGpuWritten(uint64_t vaddr, uint64_t size) {
 	KYTY_PROFILER_BLOCK("Obtain::MarkWritten");
+	NoteGpuWriteTick(vaddr, size);
 	{
 		std::unique_lock lock(m_dirty_ranges_mutex);
 		m_gpu_modified_ranges.Add(vaddr, size);

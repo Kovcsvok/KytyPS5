@@ -1628,6 +1628,7 @@ void TextureCache::InitializeImage(ImageId id) {
 					DownloadImage(*reshape_src, *buffer, buffer_offset, image.info.data.size,
 					              std::move(transfer));
 					buffer->last_gpu_write_tick = m_scheduler.CurrentTick();
+					m_buffer_cache.NoteGpuWriteTick(image.info.data.address, image.info.data.size);
 					image.MarkBufferModified();
 					static std::atomic<uint64_t> copies {0};
 					static std::atomic<int64_t>  report_ms {0};
@@ -2506,6 +2507,7 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 		}
 	}
 	m_texture_cache.DownloadImage(image, buffer, buf_offset, copy_size, std::move(transfer));
+	NoteGpuWriteTick(image.info.data.address, copy_size);
 	buffer.last_gpu_write_tick = m_scheduler.CurrentTick();
 	return true;
 }

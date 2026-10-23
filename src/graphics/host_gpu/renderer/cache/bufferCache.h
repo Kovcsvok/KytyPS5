@@ -99,6 +99,9 @@ public:
 	[[nodiscard]] Buffer* GetBdaPageTableBuffer() noexcept { return &m_bda_pagetable_buffer; }
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
+	// GPU thread: the work recorded now (current tick) writes guest bytes [vaddr, vaddr + size)
+	// of a buffer (KYTY_READBACK_RANGE_TICK, see bufferCache.cpp).
+	void NoteGpuWriteTick(uint64_t vaddr, uint64_t size);
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
 	                bool src_gds);
@@ -269,6 +272,26 @@ private:
 	};
 	SparseReadbackStats m_sparse_stats;
 	void                ReportSparseReadbacks();
+	// KYTY_READBACK_RANGE_TICK (see bufferCache.cpp): the tick of the last GPU work that wrote
+	// each guest range, begin -> {end, tick}; ranges do not overlap. GPU thread only.
+	struct RangeWrite {
+		uint64_t end  = 0;
+		uint64_t tick = 0;
+	};
+	std::map<uint64_t, RangeWrite> m_range_writes;
+	size_t                         m_range_writes_prune_at = 16384;
+	// The tick to wait for before bytes [begin, end) of `buffer` are final in device memory.
+	[[nodiscard]] uint64_t WriterTick(const Buffer& buffer, uint64_t begin, uint64_t end) const;
+	struct RangeTickStats {
+		uint64_t                              copy_done     = 0;
+		uint64_t                              copy_inflight = 0;
+		uint64_t                              main_queue    = 0;
+		uint64_t                              spared        = 0;
+		uint64_t                              range_running = 0;
+		std::chrono::steady_clock::time_point report        = std::chrono::steady_clock::now();
+	};
+	RangeTickStats m_range_tick_stats;
+	void           ReportRangeTickReadbacks();
 	void                   CompletePendingWriteReadbacks(uint64_t begin, uint64_t end);
 	[[nodiscard]] bool     OverlapsPendingWriteReadback(uint64_t begin, uint64_t end) const;
 
