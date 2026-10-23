@@ -263,3 +263,4 @@ Saját idők a GPU-szálon (`docs/wolverine-amd/tracy_self_thread.py`, `tracy-cs
 A 30 FPS-hez (33 ms) a GPU-szálon ~27 ms-ot kell lefaragni: az anyagolás (memo) és a GPU-szál visszaolvasásai a két nagy tétel.
 Build nélküli élő kísérlet harcban: `GPU Exp 0 - normal` / `1 - async write readback` (`KYTY_ASYNC_WRITE_READBACK=1`: −4,2 ms várható a GPU-szálon) / `2 - plus resource memo` (+`KYTY_RESOURCE_MEMO=1`, T2b-ben az intróban 87% miss volt, harcban nem mérve).
 Félkész, nem pusholt helyi változás: `KYTY_READBACK_QUEUE_GUEST_COPY` (a readback-queue landolása a vendégszálon) – csak a header kész.
+`GPU Exp` teszt (`run_2026-10-23_180339.log`, harc): alap 10,5–14 FPS; **`KYTY_ASYNC_WRITE_READBACK=1`: 6,6–13** (a felhasználó szerint −5 FPS, rosszabb 1% low); **+`KYTY_RESOURCE_MEMO=1`: 4–10 FPS, 18–22% találat** (≈ 32 ezer hit / 125 ezer miss / 5 s). Mindkettő elvetve, élőben vissza 0-ra, a `GPU Exp` indítók lomtárba.
