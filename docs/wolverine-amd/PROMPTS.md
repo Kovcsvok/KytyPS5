@@ -18,7 +18,20 @@ Szólj a felhasználónak, hogy hívja az Opust, ha: két hipotézis megbukott, 
 új crash jött, és nem érted a marker/RGD kimenetet, vagy merge előtt vagy.
 ```
 
-## Opus – új chat indítása (2026-10-22, kész, bemásolható)
+## Opus – új chat indítása (2026-10-23, kész, bemásolható)
+```
+KytyPS5 Wolverine AMD folytatás (Opus). Magyarul, tömören, tokentakarékosan.
+Repo: C:\Users\Ádám Kovács\Documents\Codex\2026-10-16\el-z-gpt-le-r-sa-2\work\KytyPS5, ág wolverine-v2-amd-hang-markers.
+Olvasd: docs\wolverine-amd\HANDOFF.md „Állapot (2026-10-23)” + JOURNAL.md utolsó ~60 sora. Ne fedezd fel újra, ami ott van.
+Teendők: 1) A 7ce53a1 CI artifactját (ha kész) tedd a C:\Games\Wolverine-AMD-Async\emulator helyére, a felhasználó teszteli
+harcban: Play Wolverine AMD DGC.bat + DGC Draws 0/1.bat; elemezd a naplót. 2) Utána T12c: visszaolvasási késleltetés
+(tartományonkénti írási tick + közvetlen BAR / copy-queue olvasás GPU-várás nélkül). Cél: stabil 30 FPS a Trask-harcban.
+Szabályok: CI-re soha ne pollingolj, kérd meg a felhasználót, hogy szóljon; futó CI alatt ne pusholj kódot; több kódváltozást
+egy pushba; minden változás env/élő kapcsolóval, JOURNAL-bejegyzéssel; KYTY_PROGRAM_CACHE_GIT_REVISION csak shader-fordítást
+nem érintő buildnél; törlés csak lomtárba; játékmappához ne nyúlj.
+```
+
+## Opus – új chat indítása (2026-10-22, korábbi)
 ```
 KytyPS5 Wolverine AMD-munka folytatása (Opusként: döntés, ellenőrzés, nehéz hibakeresés). Magyarul, tömören, tokentakarékosan.
 Gép: Win11, i5-14600KF, RX 9070 XT (Adrenalin 26.9.2). Nincs helyi fordító: push → GitHub Actions → artifact letöltése API-val.
