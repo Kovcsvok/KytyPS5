@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
+#include "common/liveSwitches.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/BindlessBindings.h"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <bit>
 #include <cstdio>
@@ -1545,8 +1547,37 @@ int LastIndirectImageFailureLine() {
 	return g_indirect_failure_line;
 }
 
+bool MaterializeStatsEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_MATERIALIZE_STATS", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
+MaterializeStats& ThreadMaterializeStats() {
+	thread_local MaterializeStats stats;
+	return stats;
+}
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	// KYTY_MATERIALIZE_STATS: `lap` adds the time since the previous lap to one section.
+	using Clock      = std::chrono::steady_clock;
+	const bool timed = MaterializeStatsEnabled();
+	auto&      stats = ThreadMaterializeStats();
+	auto       mark  = timed ? Clock::now() : Clock::time_point {};
+	const auto lap   = [&](uint64_t& section_ns) {
+		if (timed) {
+			const auto now = Clock::now();
+			section_ns += static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(now - mark).count());
+			mark = now;
+		}
+	};
+	if (timed) {
+		stats.calls++;
+		stats.buffers += program.info.buffers.size();
+		stats.images += program.info.images.size();
+		stats.samplers += program.info.samplers.size();
+	}
 	g_indirect_failure_line = 0;
 	snapshot.bindless_heaps.clear();
 	snapshot.bindless_sampler_heaps.clear();
@@ -1594,6 +1625,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		value.dword_count = program.descriptor_sources[source].dword_count;
 		return true;
 	};
+	lap(stats.walk_ns);
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.clear();
 	specialization.buffers.reserve(program.info.buffers.size());
@@ -1682,6 +1714,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			reads.resize(captured);
 		}
 	}
+	lap(stats.buffers_ns);
 	snapshot.images.resize(program.info.images.size());
 	specialization.images.resize(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
@@ -1720,6 +1753,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			}
 		}
 	}
+	lap(stats.images_ns);
 	snapshot.samplers.resize(program.info.samplers.size());
 	specialization.samplers.assign(program.info.samplers.size(), {});
 	for (uint32_t i = 0; i < program.info.samplers.size(); ++i) {
@@ -1769,11 +1803,13 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			}
 		}
 	}
+	lap(stats.samplers_ns);
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 	if (!BuildResourceSpecialization(program, snapshot, specialization,
 	                                 runtime.float_image_atomics)) {
 		return FailIndirect(__LINE__);
 	}
+	lap(stats.specialize_ns);
 	return true;
 }
 

@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderFunctions.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/SrtNative.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -179,6 +180,52 @@ bool UsesShaderClock(const ShaderRecompiler::IR::Program& program) {
 	return false;
 }
 
+// KYTY_MATERIALIZE_STATS (see ResourceMaterialization.cpp): the walker's guest-memory reads on
+// this thread; ReportMaterializeStats prints and clears them with MaterializeResources' sections.
+struct SrtReadStats {
+	uint64_t reads         = 0;
+	uint64_t slow_reads    = 0;
+	uint64_t slow_ns       = 0;
+	uint64_t pages         = 0;
+	uint64_t refused_pages = 0;
+	uint64_t page_ns       = 0;
+};
+thread_local SrtReadStats t_srt_read_stats;
+
+uint64_t NanosecondsSince(std::chrono::steady_clock::time_point start) {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                 std::chrono::steady_clock::now() - start)
+	                                 .count());
+}
+
+// GPU thread, every 5 s while KYTY_MATERIALIZE_STATS=1.
+void ReportMaterializeStats() {
+	static auto report = std::chrono::steady_clock::now();
+	const auto  now    = std::chrono::steady_clock::now();
+	if (now - report < std::chrono::seconds(5)) {
+		return;
+	}
+	const double seconds = std::chrono::duration<double>(now - report).count();
+	report               = now;
+	auto&      m         = ShaderRecompiler::IR::ThreadMaterializeStats();
+	auto&      r         = t_srt_read_stats;
+	const auto per_s     = [&](uint64_t n) { return static_cast<double>(n) / seconds; };
+	const auto ms_per_s  = [&](uint64_t ns) { return static_cast<double>(ns) / 1e6 / seconds; };
+	const auto each      = [&](uint64_t n) {
+		return m.calls != 0 ? static_cast<double>(n) / static_cast<double>(m.calls) : 0.0;
+	};
+	::printf("Materialize (per second): %.0f walks (%.1f buffers, %.1f images, %.1f samplers each), "
+	         "ms: walk %.1f, buffers %.1f, images %.1f, samplers %.1f, specialization %.1f; "
+	         "%.0f SRT reads, %.0f new pages (%.0f refused) %.1f ms, %.0f slow reads %.1f ms\n",
+	         per_s(m.calls), each(m.buffers), each(m.images), each(m.samplers), ms_per_s(m.walk_ns),
+	         ms_per_s(m.buffers_ns), ms_per_s(m.images_ns), ms_per_s(m.samplers_ns),
+	         ms_per_s(m.specialize_ns), per_s(r.reads), per_s(r.pages), per_s(r.refused_pages),
+	         ms_per_s(r.page_ns), per_s(r.slow_reads), ms_per_s(r.slow_ns));
+	std::fflush(stdout);
+	m = {};
+	r = {};
+}
+
 // The resource walker reads guest memory one dword per scalar load, and every read pays the
 // GPU-ownership checks and the address-space lock. KYTY_SHADER_READ_CHUNKS (a live switch):
 // 1 reads each aligned 256-byte chunk once per program lookup and serves its dwords from that
@@ -279,6 +326,9 @@ private:
 			}
 		}
 		if (page == nullptr) {
+			const bool timed = ShaderRecompiler::IR::MaterializeStatsEnabled();
+			const auto start =
+			    timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 			auto& slot = m_page_count < m_pages_cache.size()
 			                 ? m_pages_cache[m_page_count++]
 			                 : m_pages_cache[m_next_page++ % m_pages_cache.size()];
@@ -286,6 +336,12 @@ private:
 			              .backing =
 			                  Libs::LibKernel::Memory::FindGpuCleanBacking(base, TRACKER_PAGE_SIZE)};
 			page       = &slot;
+			if (timed) {
+				auto& stats = t_srt_read_stats;
+				stats.pages++;
+				stats.refused_pages += slot.backing == nullptr ? 1u : 0u;
+				stats.page_ns += NanosecondsSince(start);
+			}
 		}
 		if (page->backing == nullptr) {
 			return false;
@@ -325,18 +381,32 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 	if (values.empty()) {
 		return false;
 	}
+	const bool timed = ShaderRecompiler::IR::MaterializeStatsEnabled();
+	if (timed) {
+		t_srt_read_stats.reads++;
+	}
 	if (chunks != nullptr && chunks->Read(address, values)) {
 		return true;
 	}
-	if (Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(),
-	                                                    values.size_bytes())) {
+	const auto slow = [&] {
+		if (Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(),
+		                                                    values.size_bytes())) {
+			return true;
+		}
+		if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
+			return false;
+		}
+		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 		return true;
+	};
+	if (!timed) {
+		return slow();
 	}
-	if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
-		return false;
-	}
-	std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
-	return true;
+	const auto start = std::chrono::steady_clock::now();
+	const bool ok    = slow();
+	t_srt_read_stats.slow_reads++;
+	t_srt_read_stats.slow_ns += NanosecondsSince(start);
+	return ok;
 }
 
 bool ReadShaderGuestMemoryRaw(void* userdata, uint64_t address, std::span<uint32_t> values) {
@@ -1519,6 +1589,9 @@ struct PipelineCache::ProgramCache {
 					     " instructions, %" PRIu64 " through the interpreter\n",
 					     stats.plans, stats.failed, stats.bytes / 1024u, stats.instructions,
 					     stats.interpreted);
+				}
+				if (ShaderRecompiler::IR::MaterializeStatsEnabled()) {
+					ReportMaterializeStats();
 				}
 			}
 			if (!materialized) {

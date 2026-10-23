@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -319,6 +320,16 @@ int64_t RangeTickMode() {
 int64_t QueueReadbackMode() {
 	static auto& mode = Common::LiveSwitches::Get("KYTY_READBACK_QUEUE_ASYNC", 0);
 	return mode.load(std::memory_order_relaxed);
+}
+
+// KYTY_READBACK_QUEUE_GUEST_COPY (live, default 1): the faulting guest thread writes its
+// KYTY_READBACK_QUEUE_ASYNC copy back to guest memory itself (CopyQueueReadbackOnGuest), as a
+// main-queue download's deferred operation runs on the waiting guest thread. With 0 the GPU thread
+// does it in LandQueueReadback: Wolverine combat 2026-10-23 (Tracy), 207 x 119 us = 24.6 ms of the
+// GPU thread per frame, which then held every guest command back.
+bool QueueGuestCopyEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_READBACK_QUEUE_GUEST_COPY", 1);
+	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
 bool DirectReadbackEnabled() {
@@ -807,7 +818,8 @@ BufferCache::~BufferCache() {
 		}
 		m_graphics.device.destroyCommandPool(queue.pool, nullptr);
 		m_graphics.device.destroySemaphore(queue.semaphore, nullptr);
-		queue = {};
+		queue.pool      = nullptr;
+		queue.semaphore = nullptr;
 	}
 	if (auto& state = m_copy_queue_readback; state.pool != nullptr) {
 		state.staging.reset();
@@ -924,6 +936,9 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				if ((tick & QueueReadbackTickBit) != 0) {
 					// KYTY_READBACK_QUEUE_ASYNC: only the readback queue's copy is waited for.
 					WaitQueueReadback(tick);
+					if (QueueGuestCopyEnabled()) {
+						CopyQueueReadbackOnGuest(tick);
+					}
 				} else {
 					// Submitted by BeginWriteReadback, so this waits without submitting.
 					EXIT_IF(tick >= m_scheduler.CurrentTick());
@@ -1882,6 +1897,13 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 	}
 
 	KYTY_PROFILER_BLOCK("BufferCache::BeginQueueReadback");
+	// A guest thread whose readback this slot held before may still try to claim it: wait until
+	// it lets go, then keep it from claiming the half-written slot.
+	for (int expected = QueueCopyPending;
+	     !slot->state.compare_exchange_weak(expected, QueuePosting, std::memory_order_acq_rel);
+	     expected = QueueCopyPending) {
+		std::this_thread::yield();
+	}
 	auto device = m_graphics.device;
 	if (queue.semaphore == nullptr) {
 		vk::CommandPoolCreateInfo pool_info {};
@@ -1951,7 +1973,10 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 	slot->source_address = buffer_address;
 	slot->total_size     = total_size;
 	slot->value          = value;
-	const uint64_t tick  = QueueReadbackTickBit | value;
+	const auto     index = static_cast<uint64_t>(slot - queue.slots.data());
+	const uint64_t tick  = QueueReadbackTickBit | (index << QueueReadbackSlotShift) | value;
+	slot->posted.store(value, std::memory_order_release);
+	slot->state.store(QueueCopyPending, std::memory_order_release);
 	m_pending_write_readbacks.push_back({window_begin, window_end, tick});
 	stats.posted++;
 	if (writer_in_flight) {
@@ -1962,7 +1987,7 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 
 // Any thread: until the readback queue's copy of `tick` has executed.
 void BufferCache::WaitQueueReadback(uint64_t tick) const {
-	const uint64_t        value = tick & ~QueueReadbackTickBit;
+	const uint64_t        value = tick & QueueReadbackValueMask;
 	vk::SemaphoreWaitInfo wait_info {};
 	wait_info.semaphoreCount = 1;
 	wait_info.pSemaphores    = &m_queue_readbacks.semaphore;
@@ -1972,13 +1997,45 @@ void BufferCache::WaitQueueReadback(uint64_t tick) const {
 }
 
 BufferCache::QueueReadbackSlot* BufferCache::FindQueueReadbackSlot(uint64_t tick) {
-	const uint64_t value = tick & ~QueueReadbackTickBit;
-	for (auto& slot: m_queue_readbacks.slots) {
-		if (slot.value == value) {
-			return &slot;
-		}
+	const auto index = (tick & ~QueueReadbackTickBit) >> QueueReadbackSlotShift;
+	if (index >= m_queue_readbacks.slots.size()) {
+		return nullptr;
 	}
-	return nullptr;
+	auto& slot = m_queue_readbacks.slots[index];
+	return slot.value == (tick & QueueReadbackValueMask) ? &slot : nullptr;
+}
+
+// Guest thread, KYTY_READBACK_QUEUE_GUEST_COPY: the copy of `tick` has executed (WaitQueueReadback).
+// Claims the slot and writes its bytes back, unless the GPU thread or another guest thread waiting
+// for the same readback already does; the GPU thread then only does the bookkeeping. A slot the
+// GPU thread has landed and posted again since is left alone.
+void BufferCache::CopyQueueReadbackOnGuest(uint64_t tick) {
+	KYTY_PROFILER_FUNCTION();
+	const auto index = (tick & ~QueueReadbackTickBit) >> QueueReadbackSlotShift;
+	const auto value = tick & QueueReadbackValueMask;
+	if (index >= m_queue_readbacks.slots.size()) {
+		return;
+	}
+	auto& slot = m_queue_readbacks.slots[index];
+	if (slot.posted.load(std::memory_order_acquire) != value) {
+		return;
+	}
+	int expected = QueueCopyPending;
+	if (!slot.state.compare_exchange_strong(expected, QueueCopying, std::memory_order_acq_rel)) {
+		return;
+	}
+	if (slot.posted.load(std::memory_order_acquire) != value) {
+		// Landed and posted again between the two checks.
+		slot.state.store(QueueCopyPending, std::memory_order_release);
+		return;
+	}
+	slot.staging->Invalidate(0, slot.total_size);
+	const auto* mapped = slot.staging->Mapped().data();
+	for (const auto& copy: slot.copies) {
+		Libs::LibKernel::Memory::WriteBacking(slot.source_address + copy.srcOffset,
+		                                      mapped + copy.dstOffset, copy.size);
+	}
+	slot.state.store(QueueCopied, std::memory_order_release);
 }
 
 // GPU thread, from CompletePendingWriteReadback (the pending entry is gone).
@@ -1986,12 +2043,30 @@ bool BufferCache::LandQueueReadback(uint64_t tick) {
 	KYTY_PROFILER_FUNCTION();
 	auto* slot = FindQueueReadbackSlot(tick);
 	EXIT_IF(slot == nullptr);
-	WaitQueueReadback(tick);
-	slot->staging->Invalidate(0, slot->total_size);
-	const auto* mapped = slot->staging->Mapped().data();
-	for (const auto& copy: slot->copies) {
-		Libs::LibKernel::Memory::WriteBacking(slot->source_address + copy.srcOffset,
-		                                      mapped + copy.dstOffset, copy.size);
+	// Take the write-back over unless a guest thread has done it or is doing it.
+	bool guest_copied = false;
+	for (;;) {
+		int state = slot->state.load(std::memory_order_acquire);
+		if (state == QueueCopied) {
+			guest_copied = true;
+			break;
+		}
+		if (state == QueueCopyPending &&
+		    slot->state.compare_exchange_strong(state, QueueCopying, std::memory_order_acq_rel)) {
+			break;
+		}
+		std::this_thread::yield();
+	}
+	if (guest_copied) {
+		m_queue_readback_stats.guest_copies++;
+	} else {
+		WaitQueueReadback(tick);
+		slot->staging->Invalidate(0, slot->total_size);
+		const auto* mapped = slot->staging->Mapped().data();
+		for (const auto& copy: slot->copies) {
+			Libs::LibKernel::Memory::WriteBacking(slot->source_address + copy.srcOffset,
+			                                      mapped + copy.dstOffset, copy.size);
+		}
 	}
 	{
 		std::unique_lock lock(m_dirty_ranges_mutex);
@@ -2010,6 +2085,8 @@ bool BufferCache::LandQueueReadback(uint64_t tick) {
 	slot->copies.clear();
 	slot->source = nullptr;
 	slot->value  = 0;
+	slot->posted.store(0, std::memory_order_release);
+	slot->state.store(QueueCopyPending, std::memory_order_release);
 	m_queue_readback_stats.landed++;
 	if (!clean) {
 		m_queue_readback_stats.redirtied++;
@@ -2037,9 +2114,11 @@ void BufferCache::ReportQueueReadbacks() {
 		return;
 	}
 	::printf("Queue readbacks (5 s): %" PRIu64 " posted (%" PRIu64 " with the writer running), %" PRIu64
-	         " landed (%" PRIu64 " written again meanwhile), main queue instead: %" PRIu64
-	         " no free slot, %" PRIu64 " over 4 MiB, %" PRIu64 " overlapping a download\n",
-	         s.posted, s.inflight, s.landed, s.redirtied, s.no_slot, s.too_large, s.busy);
+	         " landed (%" PRIu64 " written back by the guest, %" PRIu64
+	         " written again meanwhile), main queue instead: %" PRIu64 " no free slot, %" PRIu64
+	         " over 4 MiB, %" PRIu64 " overlapping a download\n",
+	         s.posted, s.inflight, s.landed, s.guest_copies, s.redirtied, s.no_slot, s.too_large,
+	         s.busy);
 	std::fflush(stdout);
 	s = {.report = now};
 }

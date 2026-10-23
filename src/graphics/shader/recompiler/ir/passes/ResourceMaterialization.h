@@ -56,6 +56,22 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 // MaterializeResources call on this thread, or 0.
 int LastIndirectImageFailureLine();
 
+// KYTY_MATERIALIZE_STATS=1 (live, default 0): MaterializeResources times its sections on the
+// calling thread; the caller reports and clears them (ProgramCache, every 5 s).
+struct MaterializeStats {
+	uint64_t calls         = 0;
+	uint64_t buffers       = 0;
+	uint64_t images        = 0;
+	uint64_t samplers      = 0;
+	uint64_t walk_ns       = 0; // set-up, flattened SRT and uniform fill
+	uint64_t buffers_ns    = 0;
+	uint64_t images_ns     = 0;
+	uint64_t samplers_ns   = 0;
+	uint64_t specialize_ns = 0;
+};
+bool              MaterializeStatsEnabled();
+MaterializeStats& ThreadMaterializeStats();
+
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);
 

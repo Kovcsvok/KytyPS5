@@ -296,9 +296,14 @@ private:
 	void           ReportRangeTickReadbacks();
 	// KYTY_READBACK_QUEUE_ASYNC (see bufferCache.cpp): a guest thread's readback copied on the
 	// readback queue, which the GPU thread submits without waiting for it. Its pending tick has
-	// QueueReadbackTickBit set; the rest is the value it signals on m_queue_readbacks.semaphore.
-	// GPU thread, except WaitQueueReadback.
-	static constexpr uint64_t QueueReadbackTickBit = 1ull << 63u;
+	// QueueReadbackTickBit set, the slot index in bits 56-62 and, below them, the value it signals
+	// on m_queue_readbacks.semaphore. GPU thread, except WaitQueueReadback and
+	// CopyQueueReadbackOnGuest.
+	static constexpr uint64_t QueueReadbackTickBit    = 1ull << 63u;
+	static constexpr uint64_t QueueReadbackSlotShift  = 56;
+	static constexpr uint64_t QueueReadbackValueMask  = (1ull << QueueReadbackSlotShift) - 1;
+	// KYTY_READBACK_QUEUE_GUEST_COPY: who writes a slot's bytes back to guest memory.
+	enum QueueReadbackState : int { QueueCopyPending = 0, QueueCopying = 1, QueueCopied = 2, QueuePosting = 3 };
 	struct QueueReadbackSlot {
 		vk::CommandBuffer           command = nullptr;
 		std::unique_ptr<Buffer>     staging;
@@ -307,6 +312,9 @@ private:
 		uint64_t                    source_address = 0;
 		uint64_t                    total_size     = 0;
 		uint64_t                    value          = 0; // 0: free
+		// The value a guest thread may claim (0: none), published after the fields above.
+		std::atomic<uint64_t>       posted {0};
+		std::atomic<int>            state {QueueCopyPending};
 	};
 	struct QueueReadbacks {
 		vk::CommandPool                  pool       = nullptr;
@@ -319,6 +327,7 @@ private:
 		uint64_t                              posted    = 0;
 		uint64_t                              inflight  = 0;
 		uint64_t                              landed    = 0;
+		uint64_t                              guest_copies = 0;
 		uint64_t                              redirtied = 0;
 		uint64_t                              no_slot   = 0;
 		uint64_t                              too_large = 0;
@@ -332,6 +341,8 @@ private:
 	// Publishes the copy to guest memory. False when the GPU wrote its bytes again meanwhile.
 	bool               LandQueueReadback(uint64_t tick);
 	void               WaitQueueReadback(uint64_t tick) const;
+	// Guest thread, after WaitQueueReadback: writes the copy back unless the GPU thread does.
+	void               CopyQueueReadbackOnGuest(uint64_t tick);
 	QueueReadbackSlot* FindQueueReadbackSlot(uint64_t tick);
 	// Before the buffer is destroyed: its copies still in flight land.
 	void               CompleteQueueReadbacksOf(vk::Buffer source);
