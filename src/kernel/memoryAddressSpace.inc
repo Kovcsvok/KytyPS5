@@ -270,6 +270,7 @@ public:
 		{
 			std::lock_guard lock(m_mutex);
 			EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
+			NoteMappingsChanged();
 		}
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
@@ -281,6 +282,7 @@ public:
 		}
 		RemoveMappingsUnlocked(vaddr, size);
 		EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
+		NoteMappingsChanged();
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
 #endif
@@ -368,6 +370,7 @@ public:
 					old = entry->second;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 					m_maps.erase(entry);
+					NoteMappingsChanged();
 #endif
 				}
 			}
@@ -388,6 +391,7 @@ public:
 			if (!unmapped) {
 				std::lock_guard lock(m_mutex);
 				m_maps.emplace(old.vaddr, old);
+				NoteMappingsChanged();
 				return false;
 			}
 			if (placeholder_preserved != nullptr) {
@@ -432,6 +436,7 @@ public:
 		}
 		std::lock_guard lock(m_mutex);
 		m_maps.emplace(old.vaddr, old);
+		NoteMappingsChanged();
 		return false;
 #else
 		// Replace only the requested range so concurrent accesses and GPU watch
@@ -517,6 +522,7 @@ private:
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	void RemoveMappingsUnlocked(uint64_t vaddr, uint64_t size) {
+		NoteMappingsChanged();
 		const auto end = vaddr + size;
 		auto       it = m_maps.upper_bound(vaddr);
 		if (it != m_maps.begin()) {
@@ -672,10 +678,20 @@ private:
 	int m_fd = -1;
 #endif
 
+	// Under m_mutex, after m_maps changed: a FindBacking answer kept from before is stale.
+	void NoteMappingsChanged() noexcept { m_generation.fetch_add(1, std::memory_order_release); }
+
 	uint8_t*                     m_backing_base = nullptr;
 	uint64_t                     m_size         = 0;
 	std::mutex                   m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
+	std::atomic<uint64_t>        m_generation {0};
+
+public:
+	// Changes whenever a mapping is added or removed (KYTY_SRT_PAGE_CACHE, memory.cpp).
+	[[nodiscard]] uint64_t Generation() const noexcept {
+		return m_generation.load(std::memory_order_acquire);
+	}
 };
 
 class GuestAddressSpace {
@@ -772,6 +788,8 @@ public:
 	[[nodiscard]] const uint8_t* FindBacking(uint64_t vaddr, uint64_t size) {
 		return m_backing->FindBacking(vaddr, size);
 	}
+
+	[[nodiscard]] uint64_t BackingGeneration() const noexcept { return m_backing->Generation(); }
 
 	bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (!Owns(vaddr, size)) {

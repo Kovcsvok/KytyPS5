@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <map>
@@ -77,6 +78,9 @@ public:
 	void               InvalidateMemoryFromGPU(uint64_t address, uint64_t size);
 	// A writable buffer binding over [address, address + size): the shader may write any of it.
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t address, uint64_t size);
+	// GPU thread, KYTY_SRT_PAGE_CACHE: as IsRegionGpuModified, without the lock for a region whose
+	// pages hold no image (only the GPU thread changes the image page index).
+	[[nodiscard]] bool IsRegionGpuModifiedOnGpuThread(uint64_t address, uint64_t size);
 	// Any cached image shares bytes with [address, address + size).
 	[[nodiscard]] bool HasImagesInRegion(uint64_t address, uint64_t size);
 	[[nodiscard]] bool IsRegionRegistered(uint64_t address, uint64_t size);
@@ -150,6 +154,7 @@ private:
 
 	[[nodiscard]] ImageId     InsertImage(const ImageInfo& info);
 	[[nodiscard]] ImageId     GetNullImage(const ImageDesc& desc);
+	void                      NotePageIndexWrite();
 	void                      RegisterImage(ImageId id);
 	void                      UnregisterImage(ImageId id);
 	void                      DeleteImage(ImageId id);
@@ -212,6 +217,9 @@ private:
 	BufferCache&                                      m_buffer_cache;
 	Common::SlotVector<Image>                         m_slot_images;
 	ImagePageTable                                    m_image_page_table;
+	// Set when an image was registered or unregistered off the GPU thread: from then on
+	// IsRegionGpuModifiedOnGpuThread always takes the lock.
+	std::atomic<bool>                                 m_page_index_off_gpu_thread {false};
 	std::map<std::pair<vk::Format, Prospero::ImageType>, ImageId> m_null_images;
 	Common::LeastRecentlyUsedCache<ImageId, uint64_t> m_lru_cache;
 	std::unordered_set<ImageId>                       m_download_images;

@@ -192,6 +192,15 @@ struct SrtReadStats {
 };
 thread_local SrtReadStats t_srt_read_stats;
 
+// KYTY_SRT_PAGE_CACHE=1 (live, default 0): a walker page's backing comes from
+// FindGpuCleanBackingCached (memory.cpp), which keeps the backing lookup per page until a mapping
+// changes and takes the texture cache lock only for pages holding an image. A/B with the
+// "Materialize" report's new-page time.
+bool SrtPageCacheEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_SRT_PAGE_CACHE", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
 uint64_t NanosecondsSince(std::chrono::steady_clock::time_point start) {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 	                                 std::chrono::steady_clock::now() - start)
@@ -332,9 +341,12 @@ private:
 			auto& slot = m_page_count < m_pages_cache.size()
 			                 ? m_pages_cache[m_page_count++]
 			                 : m_pages_cache[m_next_page++ % m_pages_cache.size()];
-			slot       = {.base = base,
-			              .backing =
-			                  Libs::LibKernel::Memory::FindGpuCleanBacking(base, TRACKER_PAGE_SIZE)};
+			slot       = {.base    = base,
+			              .backing = SrtPageCacheEnabled()
+			                             ? Libs::LibKernel::Memory::FindGpuCleanBackingCached(
+			                                   base, TRACKER_PAGE_SIZE)
+			                             : Libs::LibKernel::Memory::FindGpuCleanBacking(
+			                                   base, TRACKER_PAGE_SIZE)};
 			page       = &slot;
 			if (timed) {
 				auto& stats = t_srt_read_stats;

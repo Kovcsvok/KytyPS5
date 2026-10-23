@@ -990,6 +990,42 @@ const uint8_t* FindGpuCleanBacking(uint64_t vaddr, uint64_t size) {
 	return g_guest_address_space->FindBacking(vaddr, size);
 }
 
+// KYTY_SRT_PAGE_CACHE (pipelineCache.cpp): FindGpuCleanBacking for the GPU thread's SRT reads
+// without the two locks the guest threads hold most in combat. The backing lookup is kept per page
+// until a mapping is added or removed, and the texture check takes the texture cache lock only for
+// a page that holds an image. Wolverine combat 2026-10-23 (KYTY_MATERIALIZE_STATS): 143k new pages
+// per second at 1.2 us each, against 0.14 us in a calm scene.
+const uint8_t* FindGpuCleanBackingCached(uint64_t vaddr, uint64_t size) {
+	if (g_guest_address_space == nullptr) {
+		return nullptr;
+	}
+	if (!Graphics::GuestGpu::IsGpuThread()) {
+		return FindGpuCleanBacking(vaddr, size);
+	}
+	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
+		if (GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
+		    GetGpuResources().GetTextureCache().IsRegionGpuModifiedOnGpuThread(vaddr, size)) {
+			return nullptr;
+		}
+	}
+	struct Entry {
+		uint64_t       vaddr      = UINT64_MAX;
+		uint64_t       size       = 0;
+		uint64_t       generation = 0;
+		const uint8_t* backing    = nullptr;
+	};
+	// GPU thread only.
+	static std::array<Entry, 1024> entries {};
+	const auto generation = g_guest_address_space->BackingGeneration();
+	auto&      entry      = entries[(vaddr >> 12u) & 1023u];
+	if (entry.vaddr == vaddr && entry.size == size && entry.generation == generation) {
+		return entry.backing;
+	}
+	const auto* backing = g_guest_address_space->FindBacking(vaddr, size);
+	entry               = {vaddr, size, generation, backing};
+	return backing;
+}
+
 bool TryReadCleanFaultingBytes(uint64_t fault_vaddr, uint64_t vaddr, void* data, uint64_t size) {
 	return g_gpu_resources != nullptr &&
 	       g_gpu_resources->CanServeCleanRead(fault_vaddr, vaddr, size) &&

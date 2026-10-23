@@ -7,6 +7,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/addressBindingReport.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -35,6 +36,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vulkan/vulkan_format_traits.hpp>
 
 namespace Libs::Graphics {
@@ -517,6 +519,18 @@ ImageId TextureCache::InsertImage(const ImageInfo& info) {
 	return id;
 }
 
+// KYTY_SRT_PAGE_CACHE: IsRegionGpuModifiedOnGpuThread reads the image page index without m_lock,
+// which is sound only while the GPU thread is its only writer.
+void TextureCache::NotePageIndexWrite() {
+	if (GuestGpu::IsGpuThread() || m_page_index_off_gpu_thread.load(std::memory_order_relaxed)) {
+		return;
+	}
+	m_page_index_off_gpu_thread.store(true, std::memory_order_release);
+	::printf("TextureCache: an image was registered off the GPU thread; the SRT page cache takes "
+	         "the texture lock from now on\n");
+	std::fflush(stdout);
+}
+
 void TextureCache::RegisterImage(ImageId id) {
 	auto& image = m_slot_images[id];
 	if (image.registered || image.info.data.Empty()) {
@@ -526,6 +540,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	if (!ImagePageTable::TryGetPageRange(image.info.data.address, image.info.data.size, pages)) {
 		EXIT("TextureCache: image registration is outside the guest address space\n");
 	}
+	NotePageIndexWrite();
 	ForEachPage(image.info.data.address, image.info.data.size, [this, id](uint64_t page) {
 		m_image_page_table[page].push_back(id);
 	});
@@ -570,6 +585,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 	if (!ImagePageTable::TryGetPageRange(image.info.data.address, image.info.data.size, pages)) {
 		EXIT("TextureCache: registered image is outside the guest address space\n");
 	}
+	NotePageIndexWrite();
 	ForEachPage(image.info.data.address, image.info.data.size, [this, id](uint64_t page) {
 		auto* owners = m_image_page_table.Find(page);
 		if (owners == nullptr || !owners->Erase(id)) {
@@ -2691,6 +2707,25 @@ bool TextureCache::IsRegionGpuModified(uint64_t address, uint64_t size) {
 		}
 	}
 	return false;
+}
+
+bool TextureCache::IsRegionGpuModifiedOnGpuThread(uint64_t address, uint64_t size) {
+	ImagePageTable::PageRange pages {};
+	if (!GuestRange {address, size}.Valid() ||
+	    !ImagePageTable::TryGetPageRange(address, size, pages)) {
+		return false;
+	}
+	if (!GuestGpu::IsGpuThread() || m_page_index_off_gpu_thread.load(std::memory_order_acquire)) {
+		return IsRegionGpuModified(address, size);
+	}
+	// Guest threads only read the page index (under m_lock); this thread is its only writer.
+	bool any_image = false;
+	ForEachPage(address, size, [&](uint64_t page) {
+		const auto* owners = std::as_const(m_image_page_table).Find(page);
+		any_image          = owners != nullptr && !owners->empty();
+		return any_image;
+	});
+	return any_image && IsRegionGpuModified(address, size);
 }
 
 void TextureCache::InvalidateCpuAliases(uint64_t address, uint64_t size) {
