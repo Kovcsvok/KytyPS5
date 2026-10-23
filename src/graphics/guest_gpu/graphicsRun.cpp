@@ -35,6 +35,7 @@
 #include <mutex>
 #include <semaphore>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -197,6 +198,12 @@ void GuestGpu::Shutdown() {
 bool GuestGpu::IsStopping() {
 	Common::LockGuard lock(m_queue_mutex);
 	return m_stopping;
+}
+
+void GuestGpu::Wake() {
+	Common::LockGuard lock(m_queue_mutex);
+	m_wake_pending = true;
+	m_work_available.Signal();
 }
 
 void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
@@ -801,7 +808,10 @@ void GuestGpu::ThreadRun(void* data) {
 					gpu->m_processing = false;
 					{
 						KYTY_PROFILER_BLOCK("GuestGpu::WaitBlockedQueues");
-						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+						// A wake that came before this wait must not be lost.
+						if (!std::exchange(gpu->m_wake_pending, false)) {
+							gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+						}
 					}
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
@@ -1531,11 +1541,65 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
 }
 
+// KYTY_FLIP_WAIT_SUSPEND (live, default 0; upstream a358b84): 1 = waitUntilSafeForRendering
+// suspends only this command processor until the display buffer is free, as the SDK does, so
+// the GPU thread keeps serving other queues and the guest threads' readbacks meanwhile; 0 = the
+// GPU thread blocks until the flip is done. Log: "Flip waits (5 s)".
+namespace {
+struct FlipWaitStats {
+	std::chrono::steady_clock::time_point report = std::chrono::steady_clock::now();
+	std::chrono::steady_clock::duration   blocked_time {};
+	uint64_t                              calls     = 0;
+	uint64_t                              blocked   = 0;
+	uint64_t                              suspended = 0;
+};
+FlipWaitStats g_flip_wait_stats;
+
+void ReportFlipWaits() {
+	auto&      s   = g_flip_wait_stats;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.report < std::chrono::seconds(5)) {
+		return;
+	}
+	::printf("Flip waits (5 s): %" PRIu64 " waits, %" PRIu64 " blocked the GPU thread for %.1f ms, %" PRIu64
+	         " suspensions of the queue
+",
+	         s.calls, s.blocked, std::chrono::duration<double, std::milli>(s.blocked_time).count(), s.suspended);
+	std::fflush(stdout);
+	s = {.report = now};
+}
+} // namespace
+
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
+	static auto& suspend = Common::LiveSwitches::Get("KYTY_FLIP_WAIT_SUSPEND", 0);
+	auto&        video_out = m_renderer.GetVideoOut();
+	g_flip_wait_stats.calls++;
+	if (suspend.load(std::memory_order_relaxed) != 0) {
+		if (!video_out.IsSafeForRendering(static_cast<int>(video_out_handle),
+		                                  static_cast<int>(display_buffer_index))) {
+			KYTY_PROFILER_BLOCK("Pm4Suspend::WaitFlipDone");
+			// The flip may wait for work recorded so far.
+			BufferFlush();
+			SuspendPm4();
+			g_flip_wait_stats.suspended++;
+		}
+		ReportFlipWaits();
+		return;
+	}
+
 	BufferFlush();
 
-	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
-	                                      static_cast<int>(display_buffer_index));
+	{
+		KYTY_PROFILER_BLOCK("CommandProcessor::WaitFlipDone");
+		const auto start = std::chrono::steady_clock::now();
+		video_out.WaitFlipDone(static_cast<int>(video_out_handle), static_cast<int>(display_buffer_index));
+		const auto waited = std::chrono::steady_clock::now() - start;
+		if (waited > std::chrono::microseconds(100)) {
+			g_flip_wait_stats.blocked++;
+			g_flip_wait_stats.blocked_time += waited;
+		}
+	}
+	ReportFlipWaits();
 }
 
 template <typename T>

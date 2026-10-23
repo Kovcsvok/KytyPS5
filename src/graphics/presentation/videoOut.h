@@ -39,6 +39,7 @@ public:
 	void SubmitFlipPreparation(uint64_t request_id);
 	void WaitForSubmitSlot(int handle);
 	void WaitFlipDone(int handle, int index);
+	[[nodiscard]] bool IsSafeForRendering(int handle, int index);
 
 	[[nodiscard]] Impl& State() noexcept;
 
