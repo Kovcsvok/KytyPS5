@@ -342,3 +342,13 @@ Cél: kideríteni, mire vár a GPU-szál a foglalt idejének kb. felében (lásd
 
 ## 2026-10-24 — Opus — `81931a5` csomag
 CI zöld (run 40097977856). `C:\Games\Wolverine-AMD-Async\emulator` = `81931a5` (GPU-szál várakozásmérés, `KYTY_BACKING_LOCKS`), tartalék `emulator-48427a9`; az `emulator-8dd98fa` lomtárba. Következő: automatikus harci mérés `KYTY_BACKING_LOCKS` 0 / 1 / 2.
+
+## 2026-10-24 — Opus — automatikus harci mérés: `KYTY_BACKING_LOCKS` 0/1/2 + a GPU-szál várakozásai (`experiment_2026-10-24_153639`, `81931a5`)
+4 perc, 24 × 10 s blokk (0 1 2 2 1 0 …). **Párosítva a 0-hoz: 1 = −4,2 ± 6,4%, 2 = −10,6 ± 8,5% (n = 8)** → egyik sem hoz nyereséget; élő alap 0. (2-ben a vendégmemória-zárvárások száma 183 → 38 / képkocka esett, de a GPU-szál zárvárása nem.)
+**A GPU-szál ideje egy ~115 ms-os képkockában (0-s mód) – most már maradék nélkül megmagyarázva** (off-CPU 41,4 ms ≈ ismert várakozás 44,3 ms):
+- fut a CPU-n **50,7 ms** (ebből `MaterializeResources` 24, `vkQueueSubmit` **10,7** (~149 cmdbuf/képkocka, ~72 µs/db), saját laphibák 7,3, `PageManager::Protect` 3,6);
+- **zárra vár 29,2 ms** (108 várakozás/képkocka; szinte mind a `memory_lock` csoport: `GuestBackingStore`/`GuestAddressSpace`/`VirtualRanges`), a `FindBuffers` közben 25–29 ms/képkocka;
+- **a GPU-ra vár 13,5 ms** (szinkron saját visszaolvasások: `CopyQueueReadback` 11,2 ms);
+- üresjárat 22 ms (19%), felvevő szál 1,2, prioritásos műveletek 0,4.
+- **E-magon a `Process`-ek 6,6%-a fut** → a hibrid CPU nem érdemi tényező; az emulátor összesen ~2,8 magot használ.
+**Értelmezés:** mivel a 2-es mód a backing/address-space zárak várakozásait levitte, a GPU-szál 28–29 ms-os zárvárása pedig maradt, a gyanú a `VirtualRanges` `shared_mutex`-e: a `FindBuffers` → `TryClampRangeSize` szálankénti gyorsítótára minden tartománymódosításnál (`m_generation`) érvénytelenül, a GPU-szál ilyenkor a zárra vár, amit a vendégszál a `std::vector<Range>` beszúrás/törlés/`MergeUnlocked` (az egész tábla újraépítése) idejére kizárólagosan tart. Ugyanezt találta a KytyPS5-Frank (f2f4ffba: „each map took ~0.35 ms… the table was copied and re-sorted on every change” → rendezett map). **Következő:** a `memory_lock` számláló szétbontása zárankénti oszlopokra + a `VirtualRanges` módosítások száma/zártartási ideje, és egy élő kapcsolós javítás (a GPU-szál tartomány-ellenőrzése zár nélkül, a nem érintett tartományok gyorsítótára megmarad), automatikus A/B-vel. Utána: a submitok száma (10,7 ms) és a szinkron GPU-szál-visszaolvasások (13,5 ms).
