@@ -185,6 +185,10 @@ bool UsesShaderClock(const ShaderRecompiler::IR::Program& program) {
 // this thread; ReportMaterializeStats prints and clears them with MaterializeResources' sections.
 struct SrtReadStats {
 	uint64_t reads         = 0;
+	uint64_t fast_reads    = 0; // KYTY_SRT_FAST_READ, not in reads
+	uint64_t calls         = 0; // the walker's reads, for the sample below
+	uint64_t sampled       = 0; // one read in 64, timed with the clock's own cost
+	uint64_t sampled_ns    = 0;
 	uint64_t slow_reads    = 0;
 	uint64_t slow_ns       = 0;
 	uint64_t pages         = 0;
@@ -199,6 +203,15 @@ thread_local SrtReadStats t_srt_read_stats;
 // "Materialize" report's new-page time.
 bool SrtPageCacheEnabled() {
 	static auto& enabled = Common::LiveSwitches::Get("KYTY_SRT_PAGE_CACHE", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
+// KYTY_SRT_FAST_READ=1 (live, default 0): a walker read inside the page the previous page read
+// found readable is copied from that page's backing before the profiler zone, the statistics
+// checks and the page search (ShaderReadChunks::ReadRecent). The verdict is the one ReadPage made
+// in this lookup, so the values are the same. A/B with the "Materialize" report's flat SRT time.
+bool SrtFastReadEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_SRT_FAST_READ", 0);
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
@@ -220,17 +233,22 @@ void ReportMaterializeStats() {
 	auto&      m         = ShaderRecompiler::IR::ThreadMaterializeStats();
 	auto&      r         = t_srt_read_stats;
 	const auto per_s     = [&](uint64_t n) { return static_cast<double>(n) / seconds; };
+	const auto sampled_ns =
+	    r.sampled != 0 ? static_cast<double>(r.sampled_ns) / static_cast<double>(r.sampled) : 0.0;
 	const auto ms_per_s  = [&](uint64_t ns) { return static_cast<double>(ns) / 1e6 / seconds; };
 	const auto each      = [&](uint64_t n) {
 		return m.calls != 0 ? static_cast<double>(n) / static_cast<double>(m.calls) : 0.0;
 	};
 	::printf("Materialize (per second): %.0f walks (%.1f buffers, %.1f images, %.1f samplers each), "
-	         "ms: walk %.1f, buffers %.1f, images %.1f, samplers %.1f, specialization %.1f; "
-	         "%.0f SRT reads, %.0f new pages (%.0f refused) %.1f ms, %.0f slow reads %.1f ms\n",
-	         per_s(m.calls), each(m.buffers), each(m.images), each(m.samplers), ms_per_s(m.walk_ns),
-	         ms_per_s(m.buffers_ns), ms_per_s(m.images_ns), ms_per_s(m.samplers_ns),
-	         ms_per_s(m.specialize_ns), per_s(r.reads), per_s(r.pages), per_s(r.refused_pages),
-	         ms_per_s(r.page_ns), per_s(r.slow_reads), ms_per_s(r.slow_ns));
+	         "ms: walk %.1f (set-up %.1f, flat SRT %.1f, fill %.1f), buffers %.1f, images %.1f, "
+	         "samplers %.1f, specialization %.1f; %.0f SRT reads (%.0f fast, sampled %.0f ns each), "
+	         "%.0f new pages (%.0f refused) %.1f ms, %.0f slow reads %.1f ms\n",
+	         per_s(m.calls), each(m.buffers), each(m.images), each(m.samplers),
+	         ms_per_s(m.setup_ns + m.flat_ns + m.fill_ns), ms_per_s(m.setup_ns),
+	         ms_per_s(m.flat_ns), ms_per_s(m.fill_ns), ms_per_s(m.buffers_ns),
+	         ms_per_s(m.images_ns), ms_per_s(m.samplers_ns), ms_per_s(m.specialize_ns),
+	         per_s(r.reads + r.fast_reads), per_s(r.fast_reads), sampled_ns, per_s(r.pages),
+	         per_s(r.refused_pages), ms_per_s(r.page_ns), per_s(r.slow_reads), ms_per_s(r.slow_ns));
 	std::fflush(stdout);
 	m = {};
 	r = {};
@@ -258,7 +276,9 @@ public:
 		std::vector<uint32_t>   words;
 	};
 
-	explicit ShaderReadChunks(int64_t mode): m_chunks(mode == 1), m_pages(mode == 2) {}
+	explicit ShaderReadChunks(int64_t mode)
+	    : m_chunks(mode == 1), m_pages(mode == 2), m_fast(mode == 2 && SrtFastReadEnabled()),
+	      m_timed(ShaderRecompiler::IR::MaterializeStatsEnabled()) {}
 
 	// Returns false when the chunk cannot serve the read; the caller reads as before.
 	bool Read(uint64_t address, std::span<uint32_t> values) {
@@ -286,6 +306,23 @@ public:
 		            values.size_bytes());
 		return true;
 	}
+
+	// KYTY_SRT_FAST_READ: a read inside the page ReadPage last found readable. Not while the reads
+	// are logged (KYTY_RESOURCE_MEMO).
+	bool ReadRecent(uint64_t address, std::span<uint32_t> values) const {
+		if (!m_fast || m_recent_backing == nullptr || m_log != nullptr || values.empty()) {
+			return false;
+		}
+		const auto offset = address - m_recent_base;
+		if (offset >= TRACKER_PAGE_SIZE || TRACKER_PAGE_SIZE - offset < values.size_bytes()) {
+			return false;
+		}
+		std::memcpy(values.data(), m_recent_backing + offset, values.size_bytes());
+		return true;
+	}
+
+	// KYTY_MATERIALIZE_STATS, as it was when this lookup began.
+	[[nodiscard]] bool Timed() const { return m_timed; }
 
 	void SetLog(ReadLog* log) { m_log = log; }
 
@@ -359,6 +396,8 @@ private:
 		if (page->backing == nullptr) {
 			return false;
 		}
+		m_recent_base    = base;
+		m_recent_backing = page->backing;
 		std::memcpy(values.data(), page->backing + (address - base), values.size_bytes());
 		return true;
 	}
@@ -374,12 +413,16 @@ private:
 
 	bool                 m_chunks = false;
 	bool                 m_pages  = false;
+	bool                 m_fast   = false;
+	bool                 m_timed  = false;
 	ReadLog*             m_log    = nullptr;
 	std::array<Slot, 8>  m_slots;
 	size_t               m_next = 0;
 	std::array<Page, 16> m_pages_cache;
 	size_t               m_page_count = 0;
 	size_t               m_next_page  = 0;
+	uint64_t             m_recent_base    = 0;
+	const uint8_t*       m_recent_backing = nullptr;
 };
 
 // Both SRT readers: only memory the guest has committed. Bytes the GPU has not written are
@@ -422,14 +465,43 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 	return ok;
 }
 
-bool ReadShaderGuestMemoryRaw(void* userdata, uint64_t address, std::span<uint32_t> values) {
+bool ReadShaderGuestMemoryProfiled(ShaderReadChunks* chunks, uint64_t address,
+                                   std::span<uint32_t> values) {
 	KYTY_PROFILER_BLOCK("ShaderGuestMemoryRead");
-	auto*      chunks = static_cast<ShaderReadChunks*>(userdata);
-	const bool ok     = ReadShaderGuestMemoryImpl(chunks, address, values);
+	const bool ok = ReadShaderGuestMemoryImpl(chunks, address, values);
 	if (chunks != nullptr) {
 		chunks->Log(address, values, ok);
 	}
 	return ok;
+}
+
+// Both readers the walker gets. KYTY_MATERIALIZE_STATS times one read in 64: the clock costs
+// about as much as a read.
+bool ReadShaderGuestMemoryEntry(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	auto* chunks = static_cast<ShaderReadChunks*>(userdata);
+	if (chunks == nullptr || !chunks->Timed()) {
+		return (chunks != nullptr && chunks->ReadRecent(address, values)) ||
+		       ReadShaderGuestMemoryProfiled(chunks, address, values);
+	}
+	auto&      stats  = t_srt_read_stats;
+	const bool sample = (++stats.calls & 63u) == 0;
+	const auto start  = sample ? std::chrono::steady_clock::now()
+	                           : std::chrono::steady_clock::time_point {};
+	bool       ok     = true;
+	if (chunks->ReadRecent(address, values)) {
+		stats.fast_reads++;
+	} else {
+		ok = ReadShaderGuestMemoryProfiled(chunks, address, values);
+	}
+	if (sample) {
+		stats.sampled++;
+		stats.sampled_ns += NanosecondsSince(start);
+	}
+	return ok;
+}
+
+bool ReadShaderGuestMemoryRaw(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	return ReadShaderGuestMemoryEntry(userdata, address, values);
 }
 
 // Research: a subroutine's code for inlining, in 1 KiB steps while the guest has it committed.
@@ -448,13 +520,7 @@ std::vector<uint32_t> ReadShaderCode(uint64_t address) {
 }
 
 bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t> values) {
-	KYTY_PROFILER_BLOCK("ShaderGuestMemoryRead");
-	auto*      chunks = static_cast<ShaderReadChunks*>(userdata);
-	const bool ok     = ReadShaderGuestMemoryImpl(chunks, address, values);
-	if (chunks != nullptr) {
-		chunks->Log(address, values, ok);
-	}
-	return ok;
+	return ReadShaderGuestMemoryEntry(userdata, address, values);
 }
 
 // Live shader bisection, for finding which shader draws a glitch while the game runs:

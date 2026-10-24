@@ -63,7 +63,10 @@ struct MaterializeStats {
 	uint64_t buffers       = 0;
 	uint64_t images        = 0;
 	uint64_t samplers      = 0;
-	uint64_t walk_ns       = 0; // set-up, flattened SRT and uniform fill
+	// The walk: the two walkers' set-up, the flattened SRT's refresh and the uniform fill.
+	uint64_t setup_ns      = 0;
+	uint64_t flat_ns       = 0;
+	uint64_t fill_ns       = 0;
 	uint64_t buffers_ns    = 0;
 	uint64_t images_ns     = 0;
 	uint64_t samplers_ns   = 0;

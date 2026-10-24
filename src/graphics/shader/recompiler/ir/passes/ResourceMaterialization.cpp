@@ -1598,9 +1598,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	}
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed, program.clean_flat_slots, &clean);
+	lap(stats.setup_ns);
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
 		return FailIndirect(__LINE__);
 	}
+	lap(stats.flat_ns);
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	snapshot.uniform_fill = {};
 	const auto& fill = program.uniform_fill;
@@ -1625,7 +1627,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		value.dword_count = program.descriptor_sources[source].dword_count;
 		return true;
 	};
-	lap(stats.walk_ns);
+	lap(stats.fill_ns);
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.clear();
 	specialization.buffers.reserve(program.info.buffers.size());
