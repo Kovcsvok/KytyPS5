@@ -410,3 +410,10 @@ Automatikus mérés (`experiment_2026-10-24_171400`, 27 × 10 s blokk, ABC CBA, 
 - **SRT GPU-tulajdonú bájtok (2,7 ms):** `ReadShaderGuestMemoryImpl` szándékosan a vendégleképezésen át olvassa a GPU-írt bájtokat, hogy a laphiba frissítse őket (a shader is azt az értéket látná). Ez csak a GPU-ra várással kerülhető el, egyelőre marad.
 - **Vendégszálak írási laphibái a GPU-szálon (4,4 ms):** `KYTY_ASYNC_WRITE_READBACK=0` mellett a GPU-szál szinkron szolgálja ki őket (`ReadMemoryOnGpu`). Az 1-es módot 2026-10-23-án érzésre („−5 FPS”) vetettük el, akkor más szűk keresztmetszetek mellett.
 - **Javaslat (build nélkül):** automatikus harci mérés a `Play Wolverine AMD DGC.bat`-tal indítva (a `KYTY_DGC_DRAWS=0` mellett ugyanaz, mint az Async), három beállítással: alap / `KYTY_DGC_DRAWS=1` / `KYTY_ASYNC_WRITE_READBACK=1`.
+
+## 2026-10-24 — Opus — harci A/B: `KYTY_DGC_DRAWS` és `KYTY_ASYNC_WRITE_READBACK` (`5b20fed`, DGC-indító)
+Automatikus mérés (`experiment_2026-10-24_185012`, 27 × 10 s blokk, ABC CBA, harc, `Play Wolverine AMD DGC.bat`). X0 = alap, X1 = `DGC_DRAWS=1`, X2 = `ASYNC_WRITE_READBACK=1`.
+- **FPS:** X0 12,4; X1 11,9, párosított −3,7% (±6,8, n=9); X2 12,5, +2,0% (±6,4). Egyik sem szignifikáns; p50 69,9 / 82,5 / 83,0 ms, p99 153 / 199 / 168 ms – a medián mindkét változatnál rosszabb.
+- **X1 (DGC):** a GPU-szál saját laphibája csak 7,2 → 5,5 ms (nem a várt −4,3), a `gpu_busy_ms` 48 → 54. Nem éri meg most a „repülő emberek” hibát keresni → `DGC_DRAWS=0` marad.
+- **X2:** a GPU-szálról lekerül a teher (`gpu_readmem_ms` 12,6 → 7,4, `gpu_copyqueue_ms` 11,3 → 6,5, `gpu_fence_ms` 12,5 → 8,8), de a vendégszálak többet várnak (`guest_fault_ms` 215 → 276, `readback_wait_ms` 160 → 225, `readback_waits` 116 → 169) és a GPU-szál üresjárata nő (18 → 21 ms). A szűk keresztmetszet a vendégszálakra tolódik → `ASYNC_WRITE_READBACK=0` marad.
+- **Következtetés:** a GPU-szál már nem az egyetlen korlát. A vendég render-szálak képkockánként ~820 laphibát kapnak (összesen ~215 ms szálidő, ebből ~160 ms readback-várás, ~116 várás). Következő jelölt: mik ezek a vendégszál-laphibák (olvasás/írás, milyen lapok, miért védettek), és csökkenthető-e a számuk.
