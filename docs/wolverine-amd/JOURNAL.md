@@ -300,3 +300,12 @@ Csomag: `Readback A - main queue.bat` (alap), `Readback B - queue, flush each.ba
 
 ## 2026-10-23 — Opus — `8dd98fa` csomag
 CI zöld (run 39999302113). `C:\Games\Wolverine-AMD-Async\emulator` = `8dd98fa` (a binárisban benne a `KYTY_READBACK_QUEUE_FLUSH_US`), tartalék `emulator-665b12b`; az `emulator-f5c4212` lomtárba. Teszt: harc, `Readback A` → `B` → `C` → `A`, egyenként ~1 perc.
+
+## 2026-10-24 — Opus — `KYTY_READBACK_QUEUE_FLUSH_US` harci A/B/C (`run_2026-10-24_114738.log`, `8dd98fa`)
+Élőben A → B → C → A, Trask-harc, 5 s-os ablakok:
+- **A (alap) eleje:** 13,8 / 10,4 / 14,2 / 12,5 / 13,9 FPS (átlag ~13), GPU 40–47%, 12–14,4 ezer cmdbuf / 5 s.
+- **B (`QUEUE_ASYNC=1`, `RANGE_TICK=1`, `FLUSH_US=1`):** 14,0 / 12,0 / 14,4 / 11,5 / 9,4 / 10,5 / 15,2 (átlag ~12,4). 7–11 ezer readback-queue visszaolvasás / 5 s (~150–185 / képkocka), mind fősor-flush-sal; cmdbuf 10–14 ezer (a flush tényleg etet, a régi `QUEUE_ASYNC=1` 3–4 ezrével szemben), de a GPU-terhelés csak 21–31%.
+- **C (`FLUSH_US=500`):** 20,1 / 17,8 (kevés visszaolvasás: 665 / 3106 – valószínűleg nem harc) majd harcban 11,2 / 12,1 / 13,2 / 7,5 / 10,9 (~11); 23–29% flush/visszaolvasás, 4,5–5,9 ezer cmdbuf, GPU 22–30%.
+- **A (vissza):** 12,2 / 10,3 / 10,2 / 8,3 / 6,5 – a jelenet a végére nehezebb lett.
+A felhasználó szerint „talán valamennyivel jobb az újabb, de nehéz megmondani”. **Ítélet: a különbség a jelenetváltozás zaján belül van (ugyanaz az A mód 13 és 8 FPS között mozgott); egyik változat sem hozott mérhető nyereséget.** Élő alap marad: `QUEUE_ASYNC=0`, `RANGE_TICK=0`, `FLUSH_US=0`.
+Nyitott kérdés: a readback-queue visszaolvasásonként 808 → 142 µs-ot ígért, és B-ben a fő sor etetése is megvolt, mégsem nőtt az FPS. Gyanú: B-ben a GPU-szál visszaolvasásonként két submitot csinál (readback-queue + fő sor, ~150–185 / képkocka), így a GPU-szál (alapban már `Process` ~58 ms / képkocka, 80%) lett a plafon. Ezt csak Tracy döntheti el: egy felvétel, ~20 s A, majd élőben B; nézni: fő vendégszál `WaitWriteReadback` µs/db és ms/képkocka, GPU-szál `Process` / `WaitForWork` és a submitok ideje.
