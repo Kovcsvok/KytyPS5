@@ -378,3 +378,11 @@ Mérés: automatikus harci A/B `KYTY_RANGE_EDIT` 0 / 1 (`KYTY_CLAMP_RING=1` mell
 
 ## 2026-10-24 — Opus — `5b20fed` csomag
 CI zöld (run 40101970871). `C:\Games\Wolverine-AMD-Async\emulator` = `5b20fed` (`KYTY_RANGE_EDIT`, tartomány-mérőpontok), tartalék `emulator-c8611c9`; az `emulator-81931a5` lomtárba. Élő alapállás: `KYTY_CLAMP_RING=1`. Következő: automatikus harci mérés `KYTY_RANGE_EDIT` 0 / 1.
+
+## 2026-10-24 — Opus — harci A/B: `KYTY_RANGE_EDIT` 0 / 1 (`5b20fed`, `KYTY_CLAMP_RING=1` mellett)
+Automatikus mérés (`experiment_2026-10-24_164323`, 18 × 10 s blokk ABBA, harc).
+- **FPS:** E0 9,8 → E1 12,9; párosított **+34,9% (±9,3, n=9)** – szignifikáns, mind a 9 E1-blokk jobb a szomszédainál. p50 84,6 → 68,1 ms, p99 333 → 144 ms, 1% low 3,0 → 7,0 fps, max 802 → 483 ms.
+- **Ok igazolva:** a tábla ~18 800 tartományt tart; egy vágó módosítás 1,13 ms → 0,004 ms, a zártartás módosításonként 0,70 → 0,01 ms (`ranges_hold_ms` 19,3 → 0,13 /képkocka). `gpu_ranges_lock_ms` 13,4 → 0,03, `findbuffers_ms` 14,0 → 0,9, `gpu_lock_ms` 21,6 → 10,3. A GPU-szál üresjárata is 18,6 → 7,7 ms (a vendégszálak sem várnak a táblára).
+- Az eseménynapló (`ranges_event_ms` 0,05) elhanyagolható, ott nincs teendő.
+- **Döntés:** `KYTY_RANGE_EDIT=1` az élő alapállás (`kyty_live.txt`). Új GPU-szál-kép (E1, ~77 ms képkocka): fut 49 ms (Materialize 29, submit 9,9, saját fault 7,2, protect 3,8), zár 10,3 (ebből memória/backing 10,1), fence 10,9 (CopyQueue-readback 10,4), üres 7,7.
+- Következő jelöltek: a backing/address-space zár (`gpu_memory_lock_ms` 10,1), a Materialize (29 ms), a submitok száma (~165 cmdbuf), a GPU-szál szinkron readbackjei.
