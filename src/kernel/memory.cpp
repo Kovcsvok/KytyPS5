@@ -1,6 +1,7 @@
 #include "kernel/memory.h"
 
 #include "common/assert.h"
+#include "common/liveSwitches.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/telemetry.h"
@@ -286,7 +287,8 @@ public:
 
 	bool Add(uint64_t start, uint64_t size, uint64_t offset, int protection, int memory_type,
 	         VirtualRangeType type, const char* name, bool disallow_merge = false) {
-		std::unique_lock lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
 
 		if (start == 0 || size == 0) {
@@ -318,7 +320,8 @@ public:
 	}
 
 	bool Remove(uint64_t start, uint64_t size) {
-		std::unique_lock lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
 
 		auto position = LowerBound(start);
@@ -334,14 +337,16 @@ public:
 	}
 
 	bool HasOverlap(uint64_t start, uint64_t size) {
-		std::shared_lock lock(m_mutex);
+		std::shared_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 
 		return FindOverlap(start, size) != nullptr;
 	}
 
 	bool QueryOverlap(uint64_t start, uint64_t size, Range* out) {
 		EXIT_IF(out == nullptr);
-		std::shared_lock lock(m_mutex);
+		std::shared_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 
 		const auto* overlap = FindOverlap(start, size);
 		if (overlap == nullptr) {
@@ -352,7 +357,8 @@ public:
 	}
 
 	bool ReleaseReserved(uint64_t start, uint64_t size) {
-		std::unique_lock lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
 
 		for (size_t index = 0; index < m_ranges.size(); index++) {
@@ -369,7 +375,8 @@ public:
 	bool ReplaceSpan(uint64_t start, uint64_t size, VirtualRangeType expected_type,
 	                 uint64_t offset, int protection, int memory_type, VirtualRangeType type,
 	                 const char* name, bool disallow_merge = false) {
-		std::unique_lock lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
 
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
@@ -417,7 +424,8 @@ public:
 	}
 
 	void Rename(uint64_t start, uint64_t size, const char* name) {
-		std::unique_lock lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
 
 		auto position = LowerBound(start);
@@ -430,14 +438,16 @@ public:
 	}
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
-		std::unique_lock lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
 
 	void SetMemoryType(uint64_t start, uint64_t size, int memory_type) {
-		std::unique_lock lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
 
 		EditUnlocked(start, size, [memory_type](Range* r) { r->memory_type = memory_type; });
@@ -446,7 +456,8 @@ public:
 	bool Query(uint64_t addr, int flags, Range* out) {
 		EXIT_IF(out == nullptr);
 
-		std::shared_lock lock(m_mutex);
+		std::shared_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 
 		auto next = std::upper_bound(
 		    m_ranges.begin(), m_ranges.end(), addr,
@@ -469,7 +480,8 @@ public:
 	bool QuerySpan(uint64_t start, uint64_t size, std::vector<Range>* out) {
 		EXIT_IF(out == nullptr);
 
-		std::shared_lock lock(m_mutex);
+		std::shared_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		out->clear();
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
@@ -508,7 +520,8 @@ public:
 	}
 
 	uint64_t ClampRangeSize(uint64_t virtual_addr, uint64_t size) {
-		std::shared_lock lock(m_mutex);
+		std::shared_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 
 		if (virtual_addr == 0 || size == 0 || size > UINT64_MAX - virtual_addr) {
 			return 0;
@@ -544,7 +557,8 @@ public:
 	}
 
 	uint64_t CountPageTableEntries(bool gpu) {
-		std::shared_lock lock(m_mutex);
+		std::shared_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 
 		uint64_t used = 0;
 		for (const auto& r: m_ranges) {

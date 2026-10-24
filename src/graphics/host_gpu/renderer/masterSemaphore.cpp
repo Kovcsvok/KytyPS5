@@ -4,6 +4,7 @@
 
 #include "common/assert.h"
 #include "common/liveSwitches.h"
+#include "common/telemetry.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <atomic>
@@ -113,6 +114,7 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
+	Common::Telemetry::ScopedGpuTime wait(Common::Telemetry::Counter::GpuFenceWait);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	if (result != vk::Result::eSuccess) {
 		if (result == vk::Result::eErrorDeviceLost) {

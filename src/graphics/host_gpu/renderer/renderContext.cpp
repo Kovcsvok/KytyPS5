@@ -211,6 +211,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	KYTY_PROFILER_FUNCTION();
 	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::GuestFault);
 	Common::Telemetry::Add(Common::Telemetry::Counter::GuestFaults, 1);
+	Common::Telemetry::ScopedGpuTime gpu_fault(Common::Telemetry::Counter::GpuFault);
 	// The host reports the faulting byte, not the instruction's access width. Both caches
 	// resolve its page; guessing a width can cross the end of a valid guest mapping.
 	constexpr uint64_t fault_size = 1;

@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/profiler.h"
+#include "common/telemetry.h"
 #include "common/spinBackoff.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
@@ -190,6 +191,7 @@ struct PageManager::Impl {
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
 		KYTY_PROFILER_BLOCK("PageManager::Protect");
+		Common::Telemetry::ScopedGpuTime telemetry(Common::Telemetry::Counter::GpuProtect);
 		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));

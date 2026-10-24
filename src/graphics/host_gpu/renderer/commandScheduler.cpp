@@ -597,6 +597,7 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 
 void CommandScheduler::DrainPriorityOperations() {
 	EXIT_IF(g_deferred_callback_scheduler == this);
+	Common::Telemetry::ScopedGpuTime telemetry(Common::Telemetry::Counter::GpuOperationWait);
 	std::unique_lock lock(m_operation_mutex);
 	m_operation_available.wait(
 	    lock, [this] { return m_priority_operations.empty() && !m_priority_active; });
@@ -604,6 +605,7 @@ void CommandScheduler::DrainPriorityOperations() {
 
 void CommandScheduler::WaitPriorityOperations(uint64_t tick) {
 	EXIT_IF(g_deferred_callback_scheduler == this);
+	Common::Telemetry::ScopedGpuTime telemetry(Common::Telemetry::Counter::GpuOperationWait);
 	std::unique_lock lock(m_operation_mutex);
 	m_operation_available.wait(lock, [this, tick] {
 		const bool active_before_or_at = m_priority_active && m_priority_active_tick <= tick;
@@ -695,6 +697,7 @@ void CommandScheduler::QueueSubmit(vk::CommandBuffer buffer, SubmitInfo& submit,
 		submit_info.signalSemaphoreCount = submit.num_signal_semaphores;
 		submit_info.pSignalSemaphores    = submit.signal_semaphores.data();
 
+		Common::Telemetry::ScopedGpuTime submit_time(Common::Telemetry::Counter::GpuSubmit);
 		result = graphics.queue.submit(1, &submit_info, nullptr);
 	}
 	if (result == vk::Result::eErrorDeviceLost) {
@@ -861,6 +864,7 @@ vk::CommandBuffer CommandScheduler::DrainRecording() {
 		return m_command.m_buffer;
 	}
 	KYTY_PROFILER_FUNCTION();
+	Common::Telemetry::ScopedGpuTime telemetry(Common::Telemetry::Counter::GpuRecordWait);
 	if (m_threaded) {
 		m_record_stats.drains++;
 	}

@@ -1275,8 +1275,10 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	submit.pWaitDstStageMask  = &wait_stage;
 	submit.commandBufferCount = 1;
 	submit.pCommandBuffers    = &state.command;
+	Common::Telemetry::ScopedGpuTime submit_time(Common::Telemetry::Counter::GpuSubmit);
 	RequireVulkanSuccess(m_graphics.readback_queue.submit(1, &submit, state.fence),
 	                     "submit readback");
+	Common::Telemetry::ScopedGpuTime fence_wait(Common::Telemetry::Counter::GpuFenceWait);
 	RequireVulkanSuccess(device.waitForFences(1, &state.fence, VK_TRUE, UINT64_MAX),
 	                     "wait for readback");
 	RequireVulkanSuccess(device.resetFences(1, &state.fence), "reset readback fence");
@@ -2007,6 +2009,7 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 	submit.pCommandBuffers      = &slot->command;
 	submit.signalSemaphoreCount = 1;
 	submit.pSignalSemaphores    = &queue.semaphore;
+	Common::Telemetry::ScopedGpuTime submit_time(Common::Telemetry::Counter::GpuSubmit);
 	RequireVulkanSuccess(m_graphics.readback_queue.submit(1, &submit, nullptr),
 	                     "submit queue readback");
 
@@ -2034,6 +2037,7 @@ void BufferCache::WaitQueueReadback(uint64_t tick) const {
 	wait_info.semaphoreCount = 1;
 	wait_info.pSemaphores    = &m_queue_readbacks.semaphore;
 	wait_info.pValues        = &value;
+	Common::Telemetry::ScopedGpuTime fence_wait(Common::Telemetry::Counter::GpuFenceWait);
 	RequireVulkanSuccess(m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX),
 	                     "wait for queue readback");
 }

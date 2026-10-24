@@ -36,9 +36,12 @@ public:
 			// A thread that already owns it would wait forever.
 			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
 			KYTY_PROFILER_BLOCK("LockWait(spin)", profiler::colors::RedA100);
-			Common::Telemetry::ScopedTime wait(Common::Telemetry::Counter::SpinLockWait);
-			Common::Telemetry::Add(Common::Telemetry::Counter::SpinLockWaits, 1);
+			const auto start = Common::Telemetry::Enabled() ? Common::Telemetry::NowNs() : 0;
 			Common::SpinAcquire(m_lock);
+			if (start != 0) {
+				Common::Telemetry::AddWait(Common::Telemetry::Counter::SpinLockWait,
+				                           Common::Telemetry::NowNs() - start);
+			}
 		}
 		m_owner.store(thread, std::memory_order_relaxed);
 	}

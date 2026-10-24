@@ -106,8 +106,8 @@ def main():
 
     if rows:
         keys = [k for k in rows[0].keys() if k.endswith("_ms") and k not in ("unix_ms", "interval_ms", "frame_max_ms", "process_cpu_ms")]
-        counts = [k for k in ("guest_faults", "readback_waits", "buffer_locks", "memory_locks", "spin_locks", "cmdbufs")
-                  if k in rows[0]]
+        counts = [k for k in ("guest_faults", "readback_waits", "buffer_locks", "memory_locks", "spin_locks", "mutexes",
+                              "gpu_locks", "cmdbufs") if k in rows[0]]
         out.append("\nPer frame (ms or count), GPU thread busy/idle share, emulator CPU cores, GPU thread GHz running:")
         header = f"{'':22s}" + "".join(f"{names[t]:>10s}" for t in sorted(names))
         out.append(header)
@@ -122,8 +122,20 @@ def main():
             col["cpu cores"] = sum(float(r["process_cpu_ms"]) for r in tr) / iv
             col["gpu thread GHz"] = sum(float(r["gpu_thread_mcycles"]) for r in tr) / max(
                 sum(float(r["gpu_process_ms"]) for r in tr), 1)
+            derived = []
+            if "gpu_thread_run_ms" in rows[0]:
+                s_ = lambda k: sum(float(r[k]) for r in tr) / nf
+                # Time the GPU thread is neither running nor idle-waiting: blocked inside its work.
+                col["gpu off-cpu ms"] = iv / nf - s_("gpu_thread_run_ms") - s_("gpu_idle_ms") - s_("gpu_blocked_ms")
+                col["gpu known waits ms"] = (s_("gpu_lock_ms") + s_("gpu_fence_ms") + s_("gpu_operation_ms") +
+                                             s_("gpu_record_ms") +
+                                             max(0.0, s_("gpu_cond_ms") - s_("gpu_idle_ms") - s_("gpu_blocked_ms")))
+                col["gpu unexplained ms"] = col["gpu off-cpu ms"] - col["gpu known waits ms"]
+                cores = sum(int(r["gpu_on_pcore"]) + int(r["gpu_on_ecore"]) for r in tr) or 1
+                col["gpu on e-core %"] = sum(int(r["gpu_on_ecore"]) for r in tr) / cores * 100
+                derived = ["gpu off-cpu ms", "gpu known waits ms", "gpu unexplained ms", "gpu on e-core %"]
             table[tag] = col
-        for k in ["gpu busy %", "gpu idle %", "cpu cores", "gpu thread GHz"] + keys + counts:
+        for k in ["gpu busy %", "gpu idle %", "cpu cores", "gpu thread GHz"] + derived + keys + counts:
             out.append(f"{k:22s}" + "".join(f"{table[t][k]:10.2f}" for t in sorted(names)))
     text = "\n".join(out)
     print(text)

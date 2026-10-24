@@ -807,6 +807,7 @@ void GuestGpu::ThreadRun(void* data) {
 					gpu->m_processing = false;
 					{
 						KYTY_PROFILER_BLOCK("GuestGpu::WaitBlockedQueues");
+						Common::Telemetry::ScopedTime blocked(Common::Telemetry::Counter::GpuBlocked);
 						// A wake that came before this wait must not be lost.
 						if (!std::exchange(gpu->m_wake_pending, false)) {
 							gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
@@ -1016,6 +1017,7 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
                                            std::span<const uint32_t> commands) {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Process");
 	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::GpuProcess);
+	Common::Telemetry::SampleGpuCore();
 	EXIT_IF(g_current_execution != nullptr);
 	EXIT_IF(commands.size() > UINT32_MAX);
 	if (execution.m_buffer_stack.empty() && !commands.empty()) {

@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/liveSwitches.h"
+#include "common/telemetry.h"
 
 #include <atomic>
 #include <cerrno>
@@ -286,11 +287,19 @@ Mutex::~Mutex() {
 }
 
 void Mutex::Lock() {
+	// KYTY_TELEMETRY_MS: a mutex another thread holds is a counted wait.
+	if (TryLock()) {
+		return;
+	}
+	const auto start = Telemetry::Enabled() ? Telemetry::NowNs() : 0;
 #ifdef KYTY_WIN_CS
 	EnterCriticalSection(&m_mutex->m_cs);
 #else
 	m_mutex->m_mutex.lock();
 #endif
+	if (start != 0) {
+		Telemetry::AddWait(Telemetry::Counter::MutexWait, Telemetry::NowNs() - start);
+	}
 }
 
 void Mutex::Unlock() {
@@ -316,6 +325,7 @@ CondVar::~CondVar() {
 }
 
 void CondVar::Wait(Mutex* mutex) {
+	Telemetry::ScopedGpuTime wait(Telemetry::Counter::GpuCondWait);
 #ifndef KYTY_WIN_CS
 	std::unique_lock<std::recursive_mutex> cpp_lock(mutex->m_mutex->m_mutex, std::adopt_lock_t());
 #endif
@@ -363,6 +373,7 @@ void CondVar::SetWaitPollCallback(wait_poll_func_t callback) {
 }
 
 bool CondVar::WaitFor(Mutex* mutex, uint32_t micros) {
+	Telemetry::ScopedGpuTime wait(Telemetry::Counter::GpuCondWait);
 	bool ok = false;
 #ifndef KYTY_WIN_CS
 	std::unique_lock<std::recursive_mutex> cpp_lock(mutex->m_mutex->m_mutex, std::adopt_lock_t());

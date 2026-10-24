@@ -12,6 +12,49 @@ static constexpr uint64_t HOST_USER_MIN            = 0x1000000000ull;
 #endif
 static constexpr uint64_t HOST_USER_MAX = 0xfbffffffffull;
 
+// KYTY_BACKING_LOCKS (live, default 0): 1 = the paths that only read the guest memory maps take
+// their lock shared (upstream 07f6420 and its shared backing reads); 2 = also, backing transfers
+// and sparse reads plan their copies under the locks and copy after releasing them (KytyPS5-Frank
+// cecbeebb: the view of the whole backing stays mapped and committed, so a copy is safe while a
+// mapping changes). 0 = every path exclusive, copies under the lock, as before.
+static int64_t BackingLockMode() {
+	static auto& mode = Common::LiveSwitches::Get("KYTY_BACKING_LOCKS", 0);
+	return mode.load(std::memory_order_relaxed);
+}
+
+// A lock over the guest memory maps, shared or exclusive.
+class MapsLock {
+public:
+	MapsLock(std::shared_mutex& mutex, bool shared)
+	    : m_shared(mutex, std::defer_lock), m_unique(mutex, std::defer_lock) {
+		if (shared) {
+			Common::Telemetry::LockCounted(m_shared, Common::Telemetry::Counter::MemoryLockWait);
+		} else {
+			Common::Telemetry::LockCounted(m_unique, Common::Telemetry::Counter::MemoryLockWait);
+		}
+	}
+	void Unlock() {
+		if (m_shared.owns_lock()) {
+			m_shared.unlock();
+		}
+		if (m_unique.owns_lock()) {
+			m_unique.unlock();
+		}
+	}
+
+private:
+	std::shared_lock<std::shared_mutex> m_shared;
+	std::unique_lock<std::shared_mutex> m_unique;
+};
+
+// A planned copy between guest memory and the backing view, done after the locks are released.
+struct BackingPiece {
+	uint8_t* backing;
+	uint64_t data_offset;
+	size_t   bytes;
+};
+constexpr size_t MaxBackingPieces = 16;
+
 static bool GuestFreeRangeContains(uint64_t base, uint64_t range_size, uint64_t candidate,
                                    uint64_t size) {
 	if (UINT64_MAX - base < range_size || candidate < base) {
@@ -170,7 +213,7 @@ public:
 			return false;
 		}
 		const auto* source = static_cast<const uint8_t*>(data);
-		return TryTransferBacking(vaddr, size,
+		return TryTransferBacking<true>(vaddr, size,
 		                          [source](uint8_t* backing, uint64_t data_offset, size_t bytes) {
 			                          std::memcpy(backing, source + data_offset, bytes);
 		                          });
@@ -181,7 +224,7 @@ public:
 			return false;
 		}
 		auto* destination = static_cast<uint8_t*>(data);
-		return TryTransferBacking(
+		return TryTransferBacking<false>(
 		    vaddr, size, [destination](uint8_t* backing, uint64_t data_offset, size_t bytes) {
 			    std::memcpy(destination + data_offset, backing, bytes);
 		    });
@@ -192,9 +235,8 @@ public:
 		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
 			return nullptr;
 		}
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		auto            mapping = m_maps.upper_bound(vaddr);
+		MapsLock lock(m_mutex, BackingLockMode() >= 1);
+		auto     mapping = m_maps.upper_bound(vaddr);
 		if (mapping == m_maps.begin()) {
 			return nullptr;
 		}
@@ -211,16 +253,17 @@ public:
 			return false;
 		}
 
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		const auto      end   = vaddr + size;
-		auto            first = m_maps.lower_bound(vaddr);
+		const auto mode  = BackingLockMode();
+		MapsLock   lock(m_mutex, mode >= 1);
+		const auto end   = vaddr + size;
+		auto       first = m_maps.lower_bound(vaddr);
 		if (first != m_maps.begin()) {
 			auto previous = std::prev(first);
 			if (previous->second.vaddr + previous->second.size > vaddr) {
 				first = previous;
 			}
 		}
+		size_t pieces_needed = 0;
 		for (auto mapping = first; mapping != m_maps.end() && mapping->second.vaddr < end;
 		     ++mapping) {
 			const auto& entry = mapping->second;
@@ -229,10 +272,36 @@ public:
 			if (!RangeOk(entry.backing_offset + start - entry.vaddr, bytes)) {
 				return false;
 			}
+			pieces_needed++;
 		}
 
 		auto* destination = static_cast<uint8_t*>(data);
-		auto  cursor      = vaddr;
+		if (mode >= 2 && pieces_needed <= MaxBackingPieces) {
+			std::array<BackingPiece, MaxBackingPieces> pieces {};
+			size_t                                     count = 0;
+			for (auto mapping = first; mapping != m_maps.end() && mapping->second.vaddr < end;
+			     ++mapping) {
+				const auto& entry = mapping->second;
+				const auto  start = std::max(vaddr, entry.vaddr);
+				const auto  bytes = std::min(end, entry.vaddr + entry.size) - start;
+				pieces[count++]   = {m_backing_base + entry.backing_offset + start - entry.vaddr,
+				                     start - vaddr, static_cast<size_t>(bytes)};
+			}
+			lock.Unlock();
+			uint64_t cursor = 0;
+			for (size_t i = 0; i < count; i++) {
+				if (cursor < pieces[i].data_offset) {
+					std::memset(destination + cursor, 0, pieces[i].data_offset - cursor);
+				}
+				std::memcpy(destination + pieces[i].data_offset, pieces[i].backing, pieces[i].bytes);
+				cursor = pieces[i].data_offset + pieces[i].bytes;
+			}
+			if (cursor < size) {
+				std::memset(destination + cursor, 0, size - cursor);
+			}
+			return true;
+		}
+		auto cursor = vaddr;
 		for (auto mapping = first; mapping != m_maps.end() && mapping->second.vaddr < end;
 		     ++mapping) {
 			const auto& entry  = mapping->second;
@@ -469,10 +538,9 @@ public:
 			return false;
 		}
 
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		const auto      end     = vaddr + size;
-		auto            current = vaddr;
+		MapsLock   lock(m_mutex, BackingLockMode() >= 1);
+		const auto end     = vaddr + size;
+		auto       current = vaddr;
 
 		while (current < end) {
 			MapEntry entry {};
@@ -490,16 +558,17 @@ public:
 	}
 
 private:
-	template <typename Transfer>
+	template <bool is_write, typename Transfer>
 	bool TryTransferBacking(uint64_t vaddr, uint64_t size, Transfer transfer) {
 		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
 
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		const auto      end     = vaddr + size;
-		auto            current = vaddr;
+		const auto mode = BackingLockMode();
+		MapsLock   lock(m_mutex, mode >= 2 || (mode >= 1 && !is_write));
+		const auto end           = vaddr + size;
+		auto       current       = vaddr;
+		size_t     pieces_needed = 0;
 		while (current < end) {
 			MapEntry entry {};
 			if (!FindContainingUnlocked(current, 1, &entry)) {
@@ -510,6 +579,26 @@ private:
 				return false;
 			}
 			current += bytes;
+			pieces_needed++;
+		}
+
+		if (mode >= 2 && pieces_needed <= MaxBackingPieces) {
+			std::array<BackingPiece, MaxBackingPieces> pieces {};
+			size_t                                     count = 0;
+			current                                          = vaddr;
+			while (current < end) {
+				MapEntry entry {};
+				EXIT_IF(!FindContainingUnlocked(current, 1, &entry));
+				const auto bytes = std::min(end, entry.vaddr + entry.size) - current;
+				pieces[count++]  = {m_backing_base + entry.backing_offset + current - entry.vaddr,
+				                    current - vaddr, static_cast<size_t>(bytes)};
+				current += bytes;
+			}
+			lock.Unlock();
+			for (size_t i = 0; i < count; i++) {
+				transfer(pieces[i].backing, pieces[i].data_offset, pieces[i].bytes);
+			}
+			return true;
 		}
 
 		current = vaddr;
@@ -694,7 +783,7 @@ private:
 
 	uint8_t*                     m_backing_base = nullptr;
 	uint64_t                     m_size         = 0;
-	std::mutex                   m_mutex;
+	std::shared_mutex            m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
 	std::atomic<uint64_t>        m_generation {0};
 
@@ -772,8 +861,7 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		MapsLock lock(m_mutex, BackingLockMode() >= 1);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return vaddr >= range.first && vaddr + size <= range.first + range.second;
 		});
@@ -783,8 +871,7 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		MapsLock lock(m_mutex, BackingLockMode() >= 1);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return VirtualRangesOverlap(vaddr, size, range.first, range.second);
 		});
@@ -808,9 +895,9 @@ public:
 		if (!Owns(vaddr, size)) {
 			return false;
 		}
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		auto            mapping = m_mapped.upper_bound(vaddr);
+		const auto mode = BackingLockMode();
+		MapsLock   lock(m_mutex, mode >= 1);
+		auto       mapping = m_mapped.upper_bound(vaddr);
 		if (mapping != m_mapped.begin()) {
 			--mapping;
 		}
@@ -819,6 +906,9 @@ public:
 			if (region.type == MappingType::Private && region.vaddr + region.size > vaddr) {
 				return false;
 			}
+		}
+		if (mode >= 2) {
+			lock.Unlock();
 		}
 		return m_backing->TryReadSparseBacking(vaddr, data, size);
 	}
@@ -834,13 +924,13 @@ public:
 		return ProtectMappedUnlocked(vaddr, size, mode);
 	}
 
+	// Tracker protections only read m_mapped; the page tracker orders them per page.
 	bool ProtectTransient(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
 
-		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		MapsLock lock(m_mutex, BackingLockMode() >= 1);
 		return ProtectMappedUnlocked(vaddr, size, mode);
 	}
 
@@ -1455,7 +1545,7 @@ private:
 #endif
 	}
 
-	std::mutex                                 m_mutex;
+	std::shared_mutex                          m_mutex;
 	std::map<uint64_t, uint64_t>               m_free;
 	std::map<uint64_t, MappedRegion>            m_mapped;
 	std::vector<std::pair<uint64_t, uint64_t>> m_owned;

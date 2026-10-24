@@ -15,6 +15,7 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <windows.h> // IWYU pragma: keep
+#include <intrin.h>
 #endif
 
 namespace Common::Telemetry {
@@ -22,19 +23,32 @@ namespace Common::Telemetry {
 namespace {
 
 constexpr const char* CounterNames[] = {
-    "gpu_process_ms",  "gpu_idle_ms",     "gpu_readmem_ms",  "gpu_copyqueue_ms",
-    "findbuffers_ms",  "createbuffer_ms", "buildkey_ms",     "materialize_ms",
-    "guest_fault_ms",  "guest_faults",    "readback_wait_ms", "readback_waits",
-    "buffer_lock_ms",  "buffer_locks",    "memory_lock_ms",  "memory_locks",
-    "spin_lock_ms",    "spin_locks",      "gpu_busy_ms",     "cmdbufs",
+    "gpu_process_ms",  "gpu_idle_ms",       "gpu_readmem_ms",   "gpu_copyqueue_ms",
+    "findbuffers_ms",  "createbuffer_ms",   "buildkey_ms",      "materialize_ms",
+    "guest_fault_ms",  "guest_faults",      "readback_wait_ms", "readback_waits",
+    "buffer_lock_ms",  "buffer_locks",      "memory_lock_ms",   "memory_locks",
+    "spin_lock_ms",    "spin_locks",        "mutex_ms",         "mutexes",
+    "gpu_busy_ms",     "cmdbufs",           "gpu_lock_ms",      "gpu_locks",
+    "gpu_fence_ms",    "gpu_cond_ms",       "gpu_operation_ms", "gpu_record_ms",
+    "gpu_submit_ms",   "gpu_protect_ms",    "gpu_fault_ms",     "gpu_blocked_ms",
+    "gpu_on_pcore",    "gpu_on_ecore",
 };
 static_assert(std::size(CounterNames) == static_cast<size_t>(Counter::Count));
 
 bool IsCount(size_t index) {
-	const auto counter = static_cast<Counter>(index);
-	return counter == Counter::GuestFaults || counter == Counter::ReadbackWaits ||
-	       counter == Counter::BufferLockWaits || counter == Counter::MemoryLockWaits ||
-	       counter == Counter::SpinLockWaits || counter == Counter::CommandBuffers;
+	switch (static_cast<Counter>(index)) {
+		case Counter::GuestFaults:
+		case Counter::ReadbackWaits:
+		case Counter::BufferLockWaits:
+		case Counter::MemoryLockWaits:
+		case Counter::SpinLockWaits:
+		case Counter::MutexWaits:
+		case Counter::CommandBuffers:
+		case Counter::GpuLockWaits:
+		case Counter::GpuOnPCore:
+		case Counter::GpuOnECore: return true;
+		default: return false;
+	}
 }
 
 struct alignas(64) Slot {
@@ -55,6 +69,8 @@ struct State {
 	std::vector<FrameRow>                                 frame_rows;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	std::atomic<HANDLE> gpu_thread {nullptr};
+	// Per logical processor (group * 64 + number): 1 = efficiency core, 2 = performance core.
+	std::array<uint8_t, 256> core_kind {};
 #endif
 };
 
@@ -63,6 +79,8 @@ State& GetState() {
 	static auto* state = new State;
 	return *state;
 }
+
+thread_local bool t_gpu_thread = false;
 
 std::atomic<int64_t>& Interval() {
 	static auto& interval = LiveSwitches::Get("KYTY_TELEMETRY_MS", 0);
@@ -80,11 +98,18 @@ int64_t UnixMs() {
 	    .count();
 }
 
-// Process CPU time (all threads) and the GPU thread's cycles, for the share of the CPU the
-// emulator takes and whether the GPU thread runs or waits.
-void SampleCpu(int64_t* process_ns, int64_t* gpu_cycles) {
-	*process_ns = 0;
-	*gpu_cycles = 0;
+struct CpuSample {
+	int64_t process_ns = 0; // CPU time of all threads
+	int64_t gpu_cycles = 0; // the GPU thread's cycles (TSC units)
+	int64_t tsc        = 0;
+	int64_t now_ns     = 0;
+};
+
+// Process CPU time (all threads), the GPU thread's cycles and the time-stamp counter, for the
+// share of the CPU the emulator takes and how much of its busy time the GPU thread runs.
+CpuSample SampleCpu() {
+	CpuSample sample;
+	sample.now_ns = NowNs();
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	FILETIME creation {};
 	FILETIME exited {};
@@ -95,15 +120,58 @@ void SampleCpu(int64_t* process_ns, int64_t* gpu_cycles) {
 			return (static_cast<int64_t>(time.dwHighDateTime) << 32) |
 			       static_cast<int64_t>(time.dwLowDateTime);
 		};
-		*process_ns = (to_100ns(kernel) + to_100ns(user)) * 100;
+		sample.process_ns = (to_100ns(kernel) + to_100ns(user)) * 100;
 	}
 	ULONG64 cycles = 0;
 	if (auto* thread = GetState().gpu_thread.load(std::memory_order_acquire);
 	    thread != nullptr && QueryThreadCycleTime(thread, &cycles) != 0) {
-		*gpu_cycles = static_cast<int64_t>(cycles);
+		sample.gpu_cycles = static_cast<int64_t>(cycles);
 	}
+	sample.tsc = static_cast<int64_t>(__rdtsc());
 #endif
+	return sample;
 }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// Which logical processors are efficiency cores (the lowest EfficiencyClass on a hybrid CPU).
+void DetectCoreKinds(std::array<uint8_t, 256>& kinds) {
+	DWORD length = 0;
+	GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length);
+	std::vector<uint8_t> buffer(length);
+	if (length == 0 ||
+	    GetLogicalProcessorInformationEx(
+	        RelationProcessorCore,
+	        reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()), &length) == 0) {
+		return;
+	}
+	int lowest = 255;
+	int highest = 0;
+	for (DWORD offset = 0; offset < length;) {
+		const auto* info =
+		    reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+		const int efficiency = info->Processor.EfficiencyClass;
+		lowest               = efficiency < lowest ? efficiency : lowest;
+		highest              = efficiency > highest ? efficiency : highest;
+		offset += info->Size;
+	}
+	for (DWORD offset = 0; offset < length;) {
+		const auto* info =
+		    reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+		const uint8_t kind =
+		    (highest != lowest && info->Processor.EfficiencyClass == lowest) ? 1 : 2;
+		for (WORD g = 0; g < info->Processor.GroupCount; g++) {
+			const auto& group = info->Processor.GroupMask[g];
+			for (uint32_t bit = 0; bit < 64; bit++) {
+				const auto index = static_cast<uint32_t>(group.Group) * 64 + bit;
+				if ((group.Mask & (KAFFINITY {1} << bit)) != 0 && index < kinds.size()) {
+					kinds[index] = kind;
+				}
+			}
+		}
+		offset += info->Size;
+	}
+}
+#endif
 
 FILE* OpenLog(const char* prefix) {
 	std::error_code error;
@@ -128,16 +196,14 @@ FILE* OpenLog(const char* prefix) {
 }
 
 void WriterLoop() {
-	auto&   state       = GetState();
-	FILE*   rows        = nullptr;
-	FILE*   frames      = nullptr;
-	int64_t last_ns     = 0;
-	int64_t last_cpu_ns = 0;
-	int64_t last_cycles = 0;
+	auto&     state  = GetState();
+	FILE*     rows   = nullptr;
+	FILE*     frames = nullptr;
+	CpuSample last;
 	for (;;) {
 		const auto interval = Interval().load(std::memory_order_relaxed);
 		if (interval <= 0) {
-			last_ns = 0;
+			last.now_ns = 0;
 			std::this_thread::sleep_for(std::chrono::milliseconds(250));
 			continue;
 		}
@@ -148,14 +214,14 @@ void WriterLoop() {
 				return;
 			}
 			std::fprintf(rows, "unix_ms,tag,interval_ms,frames,frame_max_ms,process_cpu_ms,"
-			                   "gpu_thread_mcycles");
+			                   "gpu_thread_mcycles,gpu_thread_run_ms");
 			for (const auto* name: CounterNames) {
 				std::fprintf(rows, ",%s", name);
 			}
 			std::fprintf(rows, "\n");
 			std::fprintf(frames, "unix_ms,tag,frame_ms\n");
 		}
-		if (last_ns == 0) {
+		if (last.now_ns == 0) {
 			// Start a fresh interval: drop what the counters gathered while telemetry was off.
 			for (auto& slot: state.counters) {
 				slot.value.exchange(0, std::memory_order_relaxed);
@@ -166,23 +232,26 @@ void WriterLoop() {
 				std::lock_guard lock(state.frame_mutex);
 				state.frame_rows.clear();
 			}
-			last_ns = NowNs();
-			SampleCpu(&last_cpu_ns, &last_cycles);
+			last = SampleCpu();
 			std::this_thread::sleep_for(std::chrono::milliseconds(interval));
 			continue;
 		}
-		const auto now_ns = NowNs();
-		int64_t    cpu_ns = 0;
-		int64_t    cycles = 0;
-		SampleCpu(&cpu_ns, &cycles);
-		std::fprintf(rows, "%lld,%lld,%.1f,%lld,%.2f,%.1f,%.2f",
+		const auto sample      = SampleCpu();
+		const auto interval_ns = sample.now_ns - last.now_ns;
+		const auto cycles      = sample.gpu_cycles - last.gpu_cycles;
+		// The GPU thread's cycles count at the time-stamp counter's rate.
+		const auto tsc_per_ns =
+		    interval_ns > 0 ? static_cast<double>(sample.tsc - last.tsc) / static_cast<double>(interval_ns)
+		                    : 0.0;
+		const double run_ms = tsc_per_ns > 0.0 ? static_cast<double>(cycles) / tsc_per_ns / 1e6 : 0.0;
+		std::fprintf(rows, "%lld,%lld,%.1f,%lld,%.2f,%.1f,%.2f,%.2f",
 		             static_cast<long long>(UnixMs()),
 		             static_cast<long long>(Tag().load(std::memory_order_relaxed)),
-		             static_cast<double>(now_ns - last_ns) / 1e6,
+		             static_cast<double>(interval_ns) / 1e6,
 		             static_cast<long long>(state.frames.exchange(0, std::memory_order_relaxed)),
 		             static_cast<double>(state.frame_max_ns.exchange(0, std::memory_order_relaxed)) / 1e6,
-		             static_cast<double>(cpu_ns - last_cpu_ns) / 1e6,
-		             static_cast<double>(cycles - last_cycles) / 1e6);
+		             static_cast<double>(sample.process_ns - last.process_ns) / 1e6,
+		             static_cast<double>(cycles) / 1e6, run_ms);
 		for (size_t i = 0; i < state.counters.size(); i++) {
 			const auto value = state.counters[i].value.exchange(0, std::memory_order_relaxed);
 			if (IsCount(i)) {
@@ -193,9 +262,7 @@ void WriterLoop() {
 		}
 		std::fprintf(rows, "\n");
 		std::fflush(rows);
-		last_ns     = now_ns;
-		last_cpu_ns = cpu_ns;
-		last_cycles = cycles;
+		last = sample;
 
 		std::vector<FrameRow> frame_rows;
 		{
@@ -217,9 +284,22 @@ bool Enabled() {
 	return Interval().load(std::memory_order_relaxed) > 0;
 }
 
+bool OnGpuThread() {
+	return t_gpu_thread;
+}
+
 void Add(Counter counter, int64_t value) {
 	GetState().counters[static_cast<size_t>(counter)].value.fetch_add(value,
 	                                                                  std::memory_order_relaxed);
+}
+
+void AddWait(Counter counter, int64_t ns) {
+	Add(counter, ns);
+	Add(static_cast<Counter>(static_cast<uint32_t>(counter) + 1), 1);
+	if (t_gpu_thread) {
+		Add(Counter::GpuLockWait, ns);
+		Add(Counter::GpuLockWaits, 1);
+	}
 }
 
 void Frame(int64_t frame_ns) {
@@ -239,11 +319,29 @@ void Frame(int64_t frame_ns) {
 }
 
 void RegisterGpuThread() {
+	t_gpu_thread = true;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	DetectCoreKinds(GetState().core_kind);
 	HANDLE thread = nullptr;
 	if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread,
 	                    THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0) != 0) {
 		GetState().gpu_thread.store(thread, std::memory_order_release);
+	}
+#endif
+}
+
+void SampleGpuCore() {
+	if (!Enabled()) {
+		return;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	PROCESSOR_NUMBER number {};
+	GetCurrentProcessorNumberEx(&number);
+	const auto index = static_cast<uint32_t>(number.Group) * 64 + number.Number;
+	if (index < 256 && GetState().core_kind[index] == 1) {
+		Add(Counter::GpuOnECore, 1);
+	} else {
+		Add(Counter::GpuOnPCore, 1);
 	}
 #endif
 }
