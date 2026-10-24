@@ -325,4 +325,4 @@ A felhasználó kérése: ne neki kelljen harc közben kapcsolgatni (a kézi vá
 Folyamat: a felhasználó a sima `Play Wolverine AMD Async.bat`-tal indít, szól, ha harcban van → Claude háttérben futtatja az `experiment.py`-t → utána `experiment_report.py`.
 
 ## 2026-10-24 — Opus — `48427a9` csomag
-CI zöld (run 40094657971). `C:\Games\Wolverine-AMD-Asyncmulator` = `48427a9` (telemetria + zárvárás-zónák), tartalék `emulator-8dd98fa`; az `emulator-665b12b` lomtárba.
+CI zöld (run 40094657971). `C:\Games\Wolverine-AMD-Async\emulator` = `48427a9` (telemetria + zárvárás-zónák), tartalék `emulator-8dd98fa`; az `emulator-665b12b` lomtárba.
