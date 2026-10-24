@@ -106,8 +106,8 @@ def main():
 
     if rows:
         keys = [k for k in rows[0].keys() if k.endswith("_ms") and k not in ("unix_ms", "interval_ms", "frame_max_ms", "process_cpu_ms")]
-        counts = [k for k in ("guest_faults", "readback_waits", "buffer_locks", "memory_locks", "spin_locks", "mutexes",
-                              "gpu_locks", "cmdbufs") if k in rows[0]]
+        counts = [k for k in ("guest_faults", "readback_waits", "buffer_locks", "memory_locks", "ranges_locks", "spin_locks", "mutexes",
+                              "gpu_locks", "ranges_changes", "clamp_locked", "clamp_ring_saved", "cmdbufs") if k in rows[0]]
         out.append("\nPer frame (ms or count), GPU thread busy/idle share, emulator CPU cores, GPU thread GHz running:")
         header = f"{'':22s}" + "".join(f"{names[t]:>10s}" for t in sorted(names))
         out.append(header)

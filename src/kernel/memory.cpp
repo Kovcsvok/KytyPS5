@@ -288,8 +288,10 @@ public:
 	bool Add(uint64_t start, uint64_t size, uint64_t offset, int protection, int memory_type,
 	         VirtualRangeType type, const char* name, bool disallow_merge = false) {
 		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
+		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
+		NoteChangeLocked(start, size);
 
 		if (start == 0 || size == 0) {
 			return false;
@@ -321,8 +323,10 @@ public:
 
 	bool Remove(uint64_t start, uint64_t size) {
 		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
+		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
+		NoteChangeLocked(start, size);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -338,7 +342,7 @@ public:
 
 	bool HasOverlap(uint64_t start, uint64_t size) {
 		std::shared_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
 
 		return FindOverlap(start, size) != nullptr;
 	}
@@ -346,7 +350,7 @@ public:
 	bool QueryOverlap(uint64_t start, uint64_t size, Range* out) {
 		EXIT_IF(out == nullptr);
 		std::shared_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
 
 		const auto* overlap = FindOverlap(start, size);
 		if (overlap == nullptr) {
@@ -358,8 +362,10 @@ public:
 
 	bool ReleaseReserved(uint64_t start, uint64_t size) {
 		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
+		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
+		NoteChangeLocked(start, size);
 
 		for (size_t index = 0; index < m_ranges.size(); index++) {
 			auto& r = m_ranges[index];
@@ -376,8 +382,10 @@ public:
 	                 uint64_t offset, int protection, int memory_type, VirtualRangeType type,
 	                 const char* name, bool disallow_merge = false) {
 		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
+		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
+		NoteChangeLocked(start, size);
 
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
@@ -425,8 +433,10 @@ public:
 
 	void Rename(uint64_t start, uint64_t size, const char* name) {
 		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
+		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
+		NoteChangeLocked(start, size);
 
 		auto position = LowerBound(start);
 		if (position != m_ranges.end() && position->start == start && position->size == size) {
@@ -439,16 +449,20 @@ public:
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
 		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
+		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
+		NoteChangeLocked(start, size);
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
 
 	void SetMemoryType(uint64_t start, uint64_t size, int memory_type) {
 		std::unique_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
-		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
+		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
+		NoteChangeLocked(start, size);
 
 		EditUnlocked(start, size, [memory_type](Range* r) { r->memory_type = memory_type; });
 	}
@@ -457,7 +471,7 @@ public:
 		EXIT_IF(out == nullptr);
 
 		std::shared_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
 
 		auto next = std::upper_bound(
 		    m_ranges.begin(), m_ranges.end(), addr,
@@ -481,7 +495,7 @@ public:
 		EXIT_IF(out == nullptr);
 
 		std::shared_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
 		out->clear();
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
@@ -519,9 +533,34 @@ public:
 		return m_generation.load(std::memory_order_acquire);
 	}
 
+	// Lock-free: whether a change after generation `since`, up to `until`, touched
+	// [start, end); also true when the change ring no longer holds all of them.
+	[[nodiscard]] bool ChangedSince(uint64_t since, uint64_t until, uint64_t start,
+	                                uint64_t end) const noexcept {
+		if (until < since || until - since > ChangeRingSize) {
+			return true;
+		}
+		for (auto generation = since + 1; generation <= until; generation++) {
+			const auto& change = m_changes[generation % ChangeRingSize];
+			if (change.generation.load(std::memory_order_acquire) != generation) {
+				return true;
+			}
+			const auto change_start = change.start.load(std::memory_order_relaxed);
+			const auto change_end   = change.end.load(std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_acquire);
+			if (change.generation.load(std::memory_order_relaxed) != generation) {
+				return true;
+			}
+			if (change_start < end && start < change_end) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	uint64_t ClampRangeSize(uint64_t virtual_addr, uint64_t size) {
 		std::shared_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
 
 		if (virtual_addr == 0 || size == 0 || size > UINT64_MAX - virtual_addr) {
 			return 0;
@@ -558,7 +597,7 @@ public:
 
 	uint64_t CountPageTableEntries(bool gpu) {
 		std::shared_lock lock(m_mutex, std::defer_lock);
-		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::RangesLockWait);
 
 		uint64_t used = 0;
 		for (const auto& r: m_ranges) {
@@ -745,11 +784,33 @@ private:
 		return nullptr;
 	}
 
+	// Under m_mutex (exclusive), at the start of a change of [start, start + size): records the
+	// range for the next generation (a seqlock entry), then publishes the generation.
+	void NoteChangeLocked(uint64_t start, uint64_t size) {
+		const auto next   = m_generation.load(std::memory_order_relaxed) + 1;
+		auto&      change = m_changes[next % ChangeRingSize];
+		change.generation.store(0, std::memory_order_relaxed);
+		std::atomic_thread_fence(std::memory_order_release);
+		change.start.store(start, std::memory_order_relaxed);
+		change.end.store(UINT64_MAX - start < size ? UINT64_MAX : start + size,
+		                 std::memory_order_relaxed);
+		change.generation.store(next, std::memory_order_release);
+		m_generation.store(next, std::memory_order_release);
+	}
+
 	std::vector<Range> m_ranges;
 	std::shared_mutex  m_mutex; // readers (per-draw range checks) share it
 	// Bumped by every change of the ranges: TryClampRangeSize's per-thread answers are valid
 	// while it is unchanged.
 	std::atomic<uint64_t> m_generation {1};
+	// KYTY_CLAMP_RING: the range each recent change touched, by generation.
+	struct Change {
+		std::atomic<uint64_t> generation {0};
+		std::atomic<uint64_t> start {0};
+		std::atomic<uint64_t> end {0};
+	};
+	static constexpr uint64_t          ChangeRingSize = 256;
+	std::array<Change, ChangeRingSize> m_changes {};
 };
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
@@ -1064,12 +1125,25 @@ uint64_t TryClampRangeSize(uint64_t vaddr, uint64_t size) {
 		const char* value = std::getenv("KYTY_CLAMP_CACHE");
 		return value == nullptr || value[0] != '0';
 	}();
-	thread_local std::array<Answer, 64> answers {};
+	// KYTY_CLAMP_RING (live, default 0): an answer stays valid across changes of other ranges
+	// (VirtualRanges::ChangedSince), so a thread does not wait for the range lock while the
+	// guest maps or frees memory elsewhere; 1024 answers per thread instead of 64.
+	static auto& ring_switch = Common::LiveSwitches::Get("KYTY_CLAMP_RING", 0);
+	const bool   ring        = ring_switch.load(std::memory_order_relaxed) != 0;
+	thread_local std::array<Answer, 1024> answers {};
 	const auto generation = g_virtual_ranges->Generation();
-	auto&      answer     = answers[((vaddr >> 12u) ^ (size >> 12u) ^ size) & 63u];
+	auto&      answer     = answers[((vaddr >> 12u) ^ (size >> 12u) ^ size) & (ring ? 1023u : 63u)];
 	if (cached && answer.generation == generation && answer.vaddr == vaddr && answer.size == size) {
 		return answer.clamped;
 	}
+	if (cached && ring && answer.generation != 0 && answer.vaddr == vaddr && answer.size == size &&
+	    !g_virtual_ranges->ChangedSince(answer.generation, generation, vaddr,
+	                                    UINT64_MAX - vaddr < size ? UINT64_MAX : vaddr + size)) {
+		answer.generation = generation;
+		Common::Telemetry::Add(Common::Telemetry::Counter::ClampRingSaved, 1);
+		return answer.clamped;
+	}
+	Common::Telemetry::Add(Common::Telemetry::Counter::ClampLocked, 1);
 	const auto clamped_size = g_virtual_ranges->ClampRangeSize(vaddr, size);
 	answer                  = {generation, vaddr, size, clamped_size};
 	if (clamped_size != 0 && clamped_size != size) {

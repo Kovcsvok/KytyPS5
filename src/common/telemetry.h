@@ -30,8 +30,10 @@ enum class Counter : uint32_t {
 	ReadbackWaits,  // count
 	BufferLockWait, // any thread: the contended buffer-cache range lock
 	BufferLockWaits, // count
-	MemoryLockWait, // any thread: a contended guest-memory lock
+	MemoryLockWait, // any thread: a contended guest-memory lock (backing store, address space)
 	MemoryLockWaits, // count
+	RangesLockWait, // any thread: the contended virtual-range table lock (VirtualRanges)
+	RangesLockWaits, // count
 	SpinLockWait,   // any thread: a contended texture-cache or region-tracking spin lock
 	SpinLockWaits,  // count
 	MutexWait,      // any thread: a contended Common::Mutex (render context, GPU queues, ...)
@@ -50,6 +52,12 @@ enum class Counter : uint32_t {
 	GpuBlocked,     // GPU thread: waiting with every guest queue blocked (outside Process)
 	GpuOnPCore,     // count: Process calls that started on a performance core
 	GpuOnECore,     // count: ... on an efficiency core (hybrid CPUs)
+	GpuMemoryLockWait, // GPU thread: the MemoryLockWait part of GpuLockWait
+	GpuRangesLockWait, // GPU thread: the RangesLockWait part of GpuLockWait
+	RangesHold,     // any thread: time a change holds the virtual-range table lock
+	RangesChanges,  // count: changes of the virtual-range table
+	ClampLocked,    // count: TryClampRangeSize answers computed under the range lock
+	ClampRingSaved, // count: cached answers KYTY_CLAMP_RING kept across unrelated changes
 	Count
 };
 

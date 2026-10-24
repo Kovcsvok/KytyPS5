@@ -27,11 +27,12 @@ constexpr const char* CounterNames[] = {
     "findbuffers_ms",  "createbuffer_ms",   "buildkey_ms",      "materialize_ms",
     "guest_fault_ms",  "guest_faults",      "readback_wait_ms", "readback_waits",
     "buffer_lock_ms",  "buffer_locks",      "memory_lock_ms",   "memory_locks",
-    "spin_lock_ms",    "spin_locks",        "mutex_ms",         "mutexes",
+    "ranges_lock_ms",  "ranges_locks",      "spin_lock_ms",    "spin_locks",        "mutex_ms",         "mutexes",
     "gpu_busy_ms",     "cmdbufs",           "gpu_lock_ms",      "gpu_locks",
     "gpu_fence_ms",    "gpu_cond_ms",       "gpu_operation_ms", "gpu_record_ms",
     "gpu_submit_ms",   "gpu_protect_ms",    "gpu_fault_ms",     "gpu_blocked_ms",
-    "gpu_on_pcore",    "gpu_on_ecore",
+    "gpu_on_pcore",    "gpu_on_ecore",      "gpu_memory_lock_ms", "gpu_ranges_lock_ms",
+    "ranges_hold_ms",  "ranges_changes",    "clamp_locked",     "clamp_ring_saved",
 };
 static_assert(std::size(CounterNames) == static_cast<size_t>(Counter::Count));
 
@@ -41,12 +42,16 @@ bool IsCount(size_t index) {
 		case Counter::ReadbackWaits:
 		case Counter::BufferLockWaits:
 		case Counter::MemoryLockWaits:
+		case Counter::RangesLockWaits:
 		case Counter::SpinLockWaits:
 		case Counter::MutexWaits:
 		case Counter::CommandBuffers:
 		case Counter::GpuLockWaits:
 		case Counter::GpuOnPCore:
-		case Counter::GpuOnECore: return true;
+		case Counter::GpuOnECore:
+		case Counter::RangesChanges:
+		case Counter::ClampLocked:
+		case Counter::ClampRingSaved: return true;
 		default: return false;
 	}
 }
@@ -299,6 +304,11 @@ void AddWait(Counter counter, int64_t ns) {
 	if (t_gpu_thread) {
 		Add(Counter::GpuLockWait, ns);
 		Add(Counter::GpuLockWaits, 1);
+		if (counter == Counter::MemoryLockWait) {
+			Add(Counter::GpuMemoryLockWait, ns);
+		} else if (counter == Counter::RangesLockWait) {
+			Add(Counter::GpuRangesLockWait, ns);
+		}
 	}
 }
 
