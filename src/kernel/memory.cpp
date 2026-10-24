@@ -246,6 +246,7 @@ uint64_t RangeHistoryNowUs() {
 }
 
 void RecordRangeEvent(char op, uint64_t start, uint64_t size, int type, const char* name) {
+	Common::Telemetry::ScopedTime time(Common::Telemetry::Counter::RangesEvent);
 	auto& e   = g_range_history[g_range_history_next % RangeHistorySize];
 	e.seq     = ++g_range_history_next;
 	e.op      = op;
@@ -271,6 +272,16 @@ void RecordRangeEvent(char op, uint64_t start, uint64_t size, int type, const ch
 	}
 }
 } // namespace
+
+// KYTY_RANGE_EDIT (live, default 0): 1 = the VirtualRanges changes that cut ranges (Protect,
+// SetMemoryType, a partial Rename or Remove, ReplaceSpan) work on the overlapping ranges only
+// (binary search, one splice, a merge with the neighbours) instead of copying, sorting and
+// merging the whole table under the exclusive lock; ReleaseReserved finds its range by binary
+// search.
+static bool RangeEditLocal() {
+	static auto& mode = Common::LiveSwitches::Get("KYTY_RANGE_EDIT", 0);
+	return mode.load(std::memory_order_relaxed) != 0;
+}
 
 class VirtualRanges {
 public:
@@ -334,8 +345,17 @@ public:
 			m_ranges.erase(position);
 			return true;
 		}
-		auto removed = RemoveUnlocked(start, size);
-		MergeUnlocked();
+		bool removed = false;
+		{
+			Common::Telemetry::ScopedTime edit_time(Common::Telemetry::Counter::RangesEdit);
+			Common::Telemetry::Add(Common::Telemetry::Counter::RangesEdits, 1);
+			if (RangeEditLocal()) {
+				removed = RemoveLocalUnlocked(start, size);
+			} else {
+				removed = RemoveUnlocked(start, size);
+				MergeUnlocked();
+			}
+		}
 		RecordRangeEvent('R', start, size, -1, removed ? "(partial)" : "(nothing removed)");
 		return removed;
 	}
@@ -367,6 +387,15 @@ public:
 		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
 		NoteChangeLocked(start, size);
 
+		if (RangeEditLocal()) {
+			auto position = LowerBound(start);
+			if (position != m_ranges.end() && position->start == start && position->size == size &&
+			    IsReservedRangeType(position->type)) {
+				RecordRangeEvent('r', start, size, static_cast<int>(position->type), position->name);
+				m_ranges.erase(position);
+			}
+			return true;
+		}
 		for (size_t index = 0; index < m_ranges.size(); index++) {
 			auto& r = m_ranges[index];
 			if (r.start == start && r.size == size && IsReservedRangeType(r.type)) {
@@ -386,6 +415,9 @@ public:
 		Common::Telemetry::ScopedTime hold(Common::Telemetry::Counter::RangesHold);
 		Common::Telemetry::Add(Common::Telemetry::Counter::RangesChanges, 1);
 		NoteChangeLocked(start, size);
+		Common::Telemetry::ScopedTime edit_time(Common::Telemetry::Counter::RangesEdit);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesEdits, 1);
+		const bool local = RangeEditLocal();
 
 		if (start == 0 || size == 0 || size > UINT64_MAX - start) {
 			return false;
@@ -393,7 +425,10 @@ public:
 
 		auto current = start;
 		const auto end = start + size;
-		while (current < end) {
+		if (local && !CoveredUnlocked(start, end, expected_type)) {
+			return false;
+		}
+		while (!local && current < end) {
 			const Range* candidate = nullptr;
 			for (const auto& r: m_ranges) {
 				if (r.type == expected_type && current >= r.start &&
@@ -423,7 +458,11 @@ public:
 		replacement.type           = type;
 		replacement.disallow_merge = disallow_merge;
 		CopyVirtualRangeName(replacement.name, name);
-		RemoveUnlocked(start, size);
+		if (local) {
+			RemoveLocalUnlocked(start, size);
+		} else {
+			RemoveUnlocked(start, size);
+		}
 		auto position = LowerBound(start);
 		const auto index = static_cast<size_t>(position - m_ranges.begin());
 		m_ranges.insert(position, replacement);
@@ -690,6 +729,12 @@ private:
 		if (size == 0) {
 			return;
 		}
+		Common::Telemetry::ScopedTime edit_time(Common::Telemetry::Counter::RangesEdit);
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesEdits, 1);
+		if (RangeEditLocal()) {
+			EditLocalUnlocked(start, size, edit);
+			return;
+		}
 
 		std::vector<Range> out;
 		auto               edit_end = End(start, size);
@@ -747,6 +792,120 @@ private:
 		return removed;
 	}
 
+	// KYTY_RANGE_EDIT: the indexes [first, last) of the ranges overlapping [start, end) (the table
+	// is sorted and its ranges do not overlap).
+	std::pair<size_t, size_t> OverlapIndexesUnlocked(uint64_t start, uint64_t end) {
+		auto first = LowerBound(start);
+		if (first != m_ranges.begin() &&
+		    End(std::prev(first)->start, std::prev(first)->size) > start) {
+			--first;
+		}
+		auto last = first;
+		while (last != m_ranges.end() && last->start < end) {
+			++last;
+		}
+		return {static_cast<size_t>(first - m_ranges.begin()),
+		        static_cast<size_t>(last - m_ranges.begin())};
+	}
+
+	// KYTY_RANGE_EDIT: replaces m_ranges[first, last) with `pieces`, then merges them with each
+	// other and with their neighbours.
+	void SpliceUnlocked(size_t first, size_t last, const std::vector<Range>& pieces) {
+		const auto common = std::min(last - first, pieces.size());
+		std::copy_n(pieces.begin(), common, m_ranges.begin() + static_cast<std::ptrdiff_t>(first));
+		if (pieces.size() > common) {
+			m_ranges.insert(m_ranges.begin() + static_cast<std::ptrdiff_t>(first + common),
+			                pieces.begin() + static_cast<std::ptrdiff_t>(common), pieces.end());
+		} else {
+			m_ranges.erase(m_ranges.begin() + static_cast<std::ptrdiff_t>(first + common),
+			               m_ranges.begin() + static_cast<std::ptrdiff_t>(last));
+		}
+		// The pairs (first - 1, first) ... (end - 1, end).
+		size_t index = (first == 0 ? 0 : first - 1);
+		size_t end   = first + pieces.size();
+		while (index < end && index + 1 < m_ranges.size()) {
+			auto& current = m_ranges[index];
+			auto& next    = m_ranges[index + 1];
+			if (End(current.start, current.size) == next.start && SameMergeKey(current, next)) {
+				current.size += next.size;
+				m_ranges.erase(m_ranges.begin() + static_cast<std::ptrdiff_t>(index + 1));
+				end--;
+			} else {
+				index++;
+			}
+		}
+	}
+
+	// KYTY_RANGE_EDIT: EditUnlocked on the overlapping ranges only.
+	template <typename EditFunc>
+	void EditLocalUnlocked(uint64_t start, uint64_t size, EditFunc edit) {
+		const auto edit_end      = End(start, size);
+		const auto [first, last] = OverlapIndexesUnlocked(start, edit_end);
+		if (first == last) {
+			return;
+		}
+
+		std::vector<Range> pieces;
+		pieces.reserve(last - first + 2);
+		for (auto index = first; index < last; index++) {
+			const auto& r         = m_ranges[index];
+			const auto  r_end     = End(r.start, r.size);
+			const auto  mid_start = std::max(start, r.start);
+			const auto  mid_end   = std::min(edit_end, r_end);
+
+			AddPiece(&pieces, r, r.start, mid_start);
+
+			Range mid = r;
+			mid.start = mid_start;
+			mid.size  = mid_end - mid_start;
+			if (mid.type == VirtualRangeType::Direct) {
+				mid.offset += mid_start - r.start;
+			}
+			edit(&mid);
+			pieces.push_back(mid);
+
+			AddPiece(&pieces, r, mid_end, r_end);
+		}
+		SpliceUnlocked(first, last, pieces);
+	}
+
+	// KYTY_RANGE_EDIT: RemoveUnlocked on the overlapping ranges only.
+	bool RemoveLocalUnlocked(uint64_t start, uint64_t size) {
+		if (size == 0) {
+			return false;
+		}
+
+		const auto rem_end       = End(start, size);
+		const auto [first, last] = OverlapIndexesUnlocked(start, rem_end);
+		if (first == last) {
+			return false;
+		}
+
+		std::vector<Range> pieces;
+		for (auto index = first; index < last; index++) {
+			const auto& r     = m_ranges[index];
+			const auto  r_end = End(r.start, r.size);
+			AddPiece(&pieces, r, r.start, std::max(start, r.start));
+			AddPiece(&pieces, r, std::min(rem_end, r_end), r_end);
+		}
+		SpliceUnlocked(first, last, pieces);
+		return true;
+	}
+
+	// KYTY_RANGE_EDIT: whether ranges of `type` cover all of [start, end).
+	bool CoveredUnlocked(uint64_t start, uint64_t end, VirtualRangeType type) {
+		const auto [first, last] = OverlapIndexesUnlocked(start, end);
+		auto current             = start;
+		for (auto index = first; index < last && current < end; index++) {
+			const auto& r = m_ranges[index];
+			if (r.type != type || r.start > current) {
+				return false;
+			}
+			current = std::min(end, End(r.start, r.size));
+		}
+		return current >= end;
+	}
+
 	void MergeUnlocked() {
 		if (m_ranges.size() < 2) {
 			return;
@@ -787,6 +946,8 @@ private:
 	// Under m_mutex (exclusive), at the start of a change of [start, start + size): records the
 	// range for the next generation (a seqlock entry), then publishes the generation.
 	void NoteChangeLocked(uint64_t start, uint64_t size) {
+		Common::Telemetry::Add(Common::Telemetry::Counter::RangesSize,
+		                       static_cast<int64_t>(m_ranges.size()));
 		const auto next   = m_generation.load(std::memory_order_relaxed) + 1;
 		auto&      change = m_changes[next % ChangeRingSize];
 		change.generation.store(0, std::memory_order_relaxed);

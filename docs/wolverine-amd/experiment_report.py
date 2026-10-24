@@ -107,7 +107,8 @@ def main():
     if rows:
         keys = [k for k in rows[0].keys() if k.endswith("_ms") and k not in ("unix_ms", "interval_ms", "frame_max_ms", "process_cpu_ms")]
         counts = [k for k in ("guest_faults", "readback_waits", "buffer_locks", "memory_locks", "ranges_locks", "spin_locks", "mutexes",
-                              "gpu_locks", "ranges_changes", "clamp_locked", "clamp_ring_saved", "cmdbufs") if k in rows[0]]
+                              "gpu_locks", "ranges_changes", "ranges_edits", "clamp_locked", "clamp_ring_saved",
+                              "cmdbufs") if k in rows[0]]
         out.append("\nPer frame (ms or count), GPU thread busy/idle share, emulator CPU cores, GPU thread GHz running:")
         header = f"{'':22s}" + "".join(f"{names[t]:>10s}" for t in sorted(names))
         out.append(header)
@@ -134,6 +135,12 @@ def main():
                 cores = sum(int(r["gpu_on_pcore"]) + int(r["gpu_on_ecore"]) for r in tr) or 1
                 col["gpu on e-core %"] = sum(int(r["gpu_on_ecore"]) for r in tr) / cores * 100
                 derived = ["gpu off-cpu ms", "gpu known waits ms", "gpu unexplained ms", "gpu on e-core %"]
+            if "ranges_edits" in rows[0]:
+                tot = lambda k: sum(float(r[k]) for r in tr)
+                col["ranges hold/change ms"] = tot("ranges_hold_ms") / max(tot("ranges_changes"), 1)
+                col["ranges edit/each ms"] = tot("ranges_edit_ms") / max(tot("ranges_edits"), 1)
+                col["ranges table size"] = tot("ranges_size") / max(tot("ranges_changes"), 1)
+                derived += ["ranges hold/change ms", "ranges edit/each ms", "ranges table size"]
             table[tag] = col
         for k in ["gpu busy %", "gpu idle %", "cpu cores", "gpu thread GHz"] + derived + keys + counts:
             out.append(f"{k:22s}" + "".join(f"{table[t][k]:10.2f}" for t in sorted(names)))

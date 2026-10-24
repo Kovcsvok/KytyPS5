@@ -58,6 +58,10 @@ enum class Counter : uint32_t {
 	RangesChanges,  // count: changes of the virtual-range table
 	ClampLocked,    // count: TryClampRangeSize answers computed under the range lock
 	ClampRingSaved, // count: cached answers KYTY_CLAMP_RING kept across unrelated changes
+	RangesEdit,     // any thread: range-table changes that cut ranges (inside RangesHold)
+	RangesEdits,    // count
+	RangesSize,     // count: the range table's size at each change (/ RangesChanges = average)
+	RangesEvent,    // any thread: RecordRangeEvent, the range history with a stack trace
 	Count
 };
 
