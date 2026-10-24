@@ -461,3 +461,9 @@ Automatikus mérés (`experiment_2026-10-24_192813`, 27 × 10 s, ABC CBA, harc).
 - **W1 a GPU-szálon:** `gpu_process_ms` 64,8 → **55,5**, `gpu_readmem_ms` 13,4 → 8,1, `gpu_copyqueue_ms` 11,9 → 7,2, `gpu_submit_ms` 13,5 → 8,9, üresjárat 4,4 → 7,4 ms; vendég `guest_fault_ms` 175 → 147. A délutáni X2-vel (readback-queue és `BACKING_LOCKS=2` nélkül: +2,0%) szemben most a vendégek írási visszaolvasásai is a readback-queue-n mennek.
 - **B2 (nyitott kérdés):** a `BACKING_LOCKS=2` önmagában ugyanannyit hoz, mint a readback-queue-val (W0-hoz +2,3% n.s.; a reggeli R0-hoz képest a +11,8% tehát főleg a zár nélküli másolásból jön). A readback-queue a vendégvárást csökkenti (138 → 100 ms), de a GPU-szálat terheli (üresjárat 13,1 → 4,4 ms); az `ASYNC_WRITE_READBACK=1`-gyel együtt éri meg.
 - **Döntés:** élő alap + `KYTY_ASYNC_WRITE_READBACK=1` (readback-queue, `RANGE_TICK=1`, `FLUSH_US=500`, `BACKING_LOCKS=2` marad).
+
+## 2026-10-24 — Opus — harci A/B: `KYTY_DGC_DRAWS` 0 / 1 az új alapállással (W1, `Play Wolverine AMD DGC.bat`)
+Automatikus mérés (`experiment_2026-10-24_193944`, 24 × 10 s ABBA, harc).
+- **FPS:** D0 14,1; D1 14,3, párosított **+1,4% (±4,8, n=12)** – nem szignifikáns. p99 166 → 132 ms, 1% low 6,0 → 7,6, max 336 → 300 (a farok jobb, de az átlag nem).
+- **A GPU-szálon alig spórol:** `gpu_fault_ms` 7,0 → 6,0 (a Tracy szerinti 4,1 ms mesh-indirekt laphibából csak ~1 ms tűnik el), `gpu_readmem_ms` 8,4 → 6,8, `gpu_process_ms` 58,4 → 56,9; közben `materialize_ms` 18,3 → 21,3 és a vendég `readback_wait_ms` 131 → 172.
+- **Döntés:** `KYTY_DGC_DRAWS=0` marad. Ha később kell: megnézni, mely `ExecutePreparedDraw`-laphibák maradnak DGC mellett (legacy quad / nem DGC-képes rajzolások?). Következő célpont: `MaterializeResources` (~18 ms / képkocka, a GPU-szál legnagyobb tétele) kódszinten.
