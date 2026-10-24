@@ -323,3 +323,6 @@ A felhasználó kérése: ne neki kelljen harc közben kapcsolgatni (a kézi vá
 - **`docs/wolverine-amd/experiment.py`:** a live fájlt `--dwell` másodpercenként (alap 10) átírja A B B A sorrendben a megadott beállítások között, `KYTY_EXPERIMENT` címkével és bekapcsolt telemetriával; a végén (vagy `--restore`) visszaállítja a fájlt; menetrend: `logs/experiment_<idő>.json`; `--tracy N` közben Tracy-t is rögzít (Profile indítással). Példa: `python experiment.py --minutes 3 "A:KYTY_READBACK_QUEUE_ASYNC=0,KYTY_READBACK_RANGE_TICK=0,KYTY_READBACK_QUEUE_FLUSH_US=0" "B:KYTY_READBACK_QUEUE_ASYNC=1,KYTY_READBACK_RANGE_TICK=1,KYTY_READBACK_QUEUE_FLUSH_US=1"`.
 - **`docs/wolverine-amd/experiment_report.py`:** beállításonként FPS, p50/p99 képkockaidő, 1% low, max, és **párosított összevetés** (minden blokk a szomszédos alap-blokkokhoz mérve: a jelenet sodródása kiesik), plusz a telemetria képkockánként, a GPU-szál foglaltsága/üresjárata, CPU-magok, a GPU-szál tényleges futási frekvenciája.
 Folyamat: a felhasználó a sima `Play Wolverine AMD Async.bat`-tal indít, szól, ha harcban van → Claude háttérben futtatja az `experiment.py`-t → utána `experiment_report.py`.
+
+## 2026-10-24 — Opus — `48427a9` csomag
+CI zöld (run 40094657971). `C:\Games\Wolverine-AMD-Asyncmulator` = `48427a9` (telemetria + zárvárás-zónák), tartalék `emulator-8dd98fa`; az `emulator-665b12b` lomtárba.
