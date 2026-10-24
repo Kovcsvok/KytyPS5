@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/spinBackoff.h"
+#include "common/telemetry.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 
@@ -34,6 +35,9 @@ public:
 		if (m_lock.test_and_set(std::memory_order_acquire)) {
 			// A thread that already owns it would wait forever.
 			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
+			KYTY_PROFILER_BLOCK("LockWait(spin)", profiler::colors::RedA100);
+			Common::Telemetry::ScopedTime wait(Common::Telemetry::Counter::SpinLockWait);
+			Common::Telemetry::Add(Common::Telemetry::Counter::SpinLockWaits, 1);
 			Common::SpinAcquire(m_lock);
 		}
 		m_owner.store(thread, std::memory_order_relaxed);

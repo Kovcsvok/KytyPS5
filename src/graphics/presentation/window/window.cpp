@@ -8,6 +8,7 @@
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/telemetry.h"
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "common/timer.h"
@@ -966,6 +967,9 @@ void WindowContext::UpdateTitle() {
 	static double   worst_fps     = 0.0;
 	report_frames++;
 	longest_frame = std::max(longest_frame, now - last_frame);
+	// KYTY_TELEMETRY_MS: one row per frame.
+	Common::Telemetry::Frame(static_cast<int64_t>(static_cast<double>(now - last_frame) * 1e9 /
+	                                              static_cast<double>(frequency)));
 	last_frame    = now;
 	if (now - fps_start >= frequency) {
 		current_fps = static_cast<double>(fps_frames) * static_cast<double>(frequency) /

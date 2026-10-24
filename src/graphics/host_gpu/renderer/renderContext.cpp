@@ -4,6 +4,7 @@
 #include "common/liveSwitches.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/telemetry.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/presentation/videoOut.h"
@@ -208,6 +209,8 @@ VideoOut::VideoOutDriver& RenderContext::GetVideoOut() const {
 
 bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept {
 	KYTY_PROFILER_FUNCTION();
+	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::GuestFault);
+	Common::Telemetry::Add(Common::Telemetry::Counter::GuestFaults, 1);
 	// The host reports the faulting byte, not the instruction's access width. Both caches
 	// resolve its page; guessing a width can cross the end of a valid guest mapping.
 	constexpr uint64_t fault_size = 1;

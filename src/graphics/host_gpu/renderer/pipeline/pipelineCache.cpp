@@ -6,6 +6,7 @@
 #include "common/liveSwitches.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/telemetry.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -1547,6 +1548,7 @@ struct PipelineCache::ProgramCache {
 		ShaderReadChunks read_chunks(ShaderReadChunks::Mode());
 		{
 			KYTY_PROFILER_BLOCK("ProgramCache::BuildKey");
+			Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::BuildKey);
 			lookup_key.stage           = stage;
 			lookup_key.hash            = params.hash;
 			lookup_key.user_data_count = params.user_data_count;
@@ -1594,6 +1596,7 @@ struct PipelineCache::ProgramCache {
 			bool materialized = false;
 			{
 				KYTY_PROFILER_BLOCK("ProgramCache::MaterializeResources");
+				Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::Materialize);
 				materialized = Materialize(entry->second, runtime, read_chunks);
 				if (ShaderRecompiler::IR::SrtNativeStats stats;
 				    ShaderRecompiler::IR::TakeSrtNativeReport(stats)) {
@@ -2031,6 +2034,7 @@ struct PipelineCache::ProgramCache {
 	void ExpandShaderFunctions(const ShaderParams& params, std::span<const uint32_t> user_data,
 	                           uint32_t wave_size, std::vector<uint32_t>& expanded,
 	                           ShaderReadChunks* read_chunks) {
+		KYTY_PROFILER_BLOCK("ProgramCache::ExpandShaderFunctions");
 		std::string reason;
 		if (!function_expander.Expand(
 		        params.code, params.Base(), user_data,

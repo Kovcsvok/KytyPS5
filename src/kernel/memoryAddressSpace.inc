@@ -192,7 +192,8 @@ public:
 		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
 			return nullptr;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		auto            mapping = m_maps.upper_bound(vaddr);
 		if (mapping == m_maps.begin()) {
 			return nullptr;
@@ -210,7 +211,8 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		const auto      end   = vaddr + size;
 		auto            first = m_maps.lower_bound(vaddr);
 		if (first != m_maps.begin()) {
@@ -268,14 +270,16 @@ public:
 		}
 
 		{
-			std::lock_guard lock(m_mutex);
+			std::unique_lock lock(m_mutex, std::defer_lock);
+			Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 			EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
 			NoteMappingsChanged();
 		}
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
 #else
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		void* mapped = MapView(vaddr, size, backing_offset, mode, failure_reason);
 		if (mapped == nullptr || reinterpret_cast<uint64_t>(mapped) != vaddr) {
 			return false;
@@ -300,7 +304,8 @@ public:
 		const auto            end = vaddr + size;
 		std::vector<MapEntry> targets;
 		{
-			std::lock_guard lock(m_mutex);
+			std::unique_lock lock(m_mutex, std::defer_lock);
+			Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 			auto            current = vaddr;
 			while (current < end) {
 				MapEntry entry {};
@@ -362,7 +367,8 @@ public:
 
 		MapEntry old {};
 		{
-			std::lock_guard lock(m_mutex);
+			std::unique_lock lock(m_mutex, std::defer_lock);
+			Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 			auto            next = m_maps.upper_bound(vaddr);
 			if (next != m_maps.begin()) {
 				auto entry = std::prev(next);
@@ -389,7 +395,8 @@ public:
 			const bool unmapped =
 			    UnmapViewPreservePlaceholder(reinterpret_cast<void*>(old.vaddr), old.size);
 			if (!unmapped) {
-				std::lock_guard lock(m_mutex);
+				std::unique_lock lock(m_mutex, std::defer_lock);
+				Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 				m_maps.emplace(old.vaddr, old);
 				NoteMappingsChanged();
 				return false;
@@ -434,7 +441,8 @@ public:
 			EXIT_IF(!MapFixed(old.vaddr, old.size, old.backing_offset, old.mode));
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		m_maps.emplace(old.vaddr, old);
 		NoteMappingsChanged();
 		return false;
@@ -445,7 +453,8 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		RemoveMappingsUnlocked(vaddr, size);
 
 		if (placeholder_preserved != nullptr) {
@@ -460,7 +469,8 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		const auto      end     = vaddr + size;
 		auto            current = vaddr;
 
@@ -486,7 +496,8 @@ private:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		const auto      end     = vaddr + size;
 		auto            current = vaddr;
 		while (current < end) {
@@ -761,7 +772,8 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return vaddr >= range.first && vaddr + size <= range.first + range.second;
 		});
@@ -771,7 +783,8 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return std::any_of(m_owned.begin(), m_owned.end(), [vaddr, size](const auto& range) {
 			return VirtualRangesOverlap(vaddr, size, range.first, range.second);
 		});
@@ -795,7 +808,8 @@ public:
 		if (!Owns(vaddr, size)) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		auto            mapping = m_mapped.upper_bound(vaddr);
 		if (mapping != m_mapped.begin()) {
 			--mapping;
@@ -815,7 +829,8 @@ public:
 		if (size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return ProtectMappedUnlocked(vaddr, size, mode);
 	}
 
@@ -824,14 +839,16 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return ProtectMappedUnlocked(vaddr, size, mode);
 	}
 
 	bool MapBacking(uint64_t vaddr, uint64_t size, uint64_t backing_offset,
 	                VirtualMemory::Mode               mode,
 	                GuestBackingStore::FailureReason* failure_reason = nullptr) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 		const bool replacing = ContainsMappedUnlocked(vaddr, size, MappingType::Backing);
 #else
@@ -859,7 +876,8 @@ public:
 	}
 
 	bool UnmapBacking(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		if (!ContainsMappedUnlocked(vaddr, size, MappingType::Backing)) {
 			return false;
 		}
@@ -880,7 +898,8 @@ public:
 			return 0;
 		}
 		alignment = std::max<uint64_t>(alignment != 0 ? alignment : PageSize(), PageSize());
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		if (search_addr == 0) {
 			auto addr = FindFreeAlignedUnlocked(HOST_SYSTEM_MANAGED_MIN,
 			                                    HOST_SYSTEM_MANAGED_MAX + 1u, size, alignment);
@@ -897,7 +916,8 @@ public:
 			return 0;
 		}
 		alignment = std::max<uint64_t>(alignment, PageSize());
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return FindFreeAlignedUnlocked(search_start, search_end, size, alignment);
 	}
 
@@ -905,24 +925,28 @@ public:
 		if (vaddr == 0 || size == 0 || !IsPageAligned(vaddr) || !IsPageAligned(size)) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 	bool TestContainsFree(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 #endif
 
 	bool ReleaseFree(uint64_t vaddr, uint64_t size) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		return FindContaining(vaddr, size) != m_free.end();
 	}
 
 	bool Commit(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		if (!ConsumeUnlocked(vaddr, size)) {
 			return false;
 		}
@@ -957,7 +981,8 @@ public:
 		if (vaddr == 0 || size == 0 || !IsPageAligned(vaddr) || !IsPageAligned(size)) {
 			return false;
 		}
-		std::lock_guard lock(m_mutex);
+		std::unique_lock lock(m_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::MemoryLockWait);
 		if (!ContainsMappedUnlocked(vaddr, size, MappingType::Private)) {
 			return false;
 		}

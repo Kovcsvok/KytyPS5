@@ -5,6 +5,7 @@
 #include "common/liveSwitches.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/telemetry.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/addressBindingReport.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -453,10 +454,12 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 }
 
 void BufferCache::Register(BufferId id) {
+	KYTY_PROFILER_FUNCTION();
 	ChangeRegister<true>(id);
 }
 
 void BufferCache::Unregister(BufferId id) {
+	KYTY_PROFILER_FUNCTION();
 	ChangeRegister<false>(id);
 }
 
@@ -599,6 +602,7 @@ void BufferCache::DeleteBuffer(BufferId id) {
 // (notes/cloud/T3_IMAGE_LIFETIME.md): runs 88/97/99 lost the device reading "a destroyed buffer's
 // VA + offset"; if that stops with this on, the reader holds a buffer address past the delete.
 void BufferCache::EraseBuffer(BufferId id, bool gpu_done) {
+	KYTY_PROFILER_FUNCTION();
 	if (!m_pending_write_readbacks.empty()) {
 		CompleteQueueReadbacksOf(m_slot_buffers[id].Handle());
 	}
@@ -673,7 +677,8 @@ bool BufferCache::DownloadBufferWindow(Buffer& buffer, uint64_t vaddr, uint64_t 
 	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
 		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
 		                                           "buffer download");
-		    std::unique_lock lock(m_dirty_ranges_mutex);
+		    std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		    Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
 			    copies.emplace_back(start - buffer_address, total_size, end - start);
 			    // Keep packed ranges on separate cache lines, as in shadPS4.
@@ -778,7 +783,8 @@ void BufferCache::DownloadBufferCopies(Buffer& buffer, std::vector<vk::BufferCop
 			Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
 			                                      mapped + (copy.dstOffset - offset), copy.size);
 		}
-		std::unique_lock lock(m_dirty_ranges_mutex);
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		for (const auto& copy: copies) {
 			m_downloading_ranges.Subtract(buffer_address + copy.srcOffset, copy.size);
 		}
@@ -867,7 +873,8 @@ bool BufferCache::WriteClean(uint64_t vaddr, const void* data, uint64_t size) {
 	}
 	{
 		// A download publishes the GPU's older value of these bytes when it lands.
-		std::shared_lock lock(m_dirty_ranges_mutex);
+		std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		if (m_downloading_ranges.Intersects(vaddr, size)) {
 			return false;
 		}
@@ -881,7 +888,8 @@ bool BufferCache::WriteClean(uint64_t vaddr, const void* data, uint64_t size) {
 	WriteDataBuffer(m_slot_buffers[*owner], vaddr, data, size);
 	if (HasGpuDirtyBytes(vaddr, size)) {
 		// Overwritten in full: guest memory holds the value the GPU copy will have.
-		std::unique_lock lock(m_dirty_ranges_mutex);
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		m_gpu_modified_ranges.Subtract(vaddr, size);
 	}
 	m_texture_cache.InvalidateMemory(vaddr, size);
@@ -944,6 +952,8 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		if (tick != 0) {
 			{
 				KYTY_PROFILER_BLOCK("BufferCache::WaitWriteReadback");
+				Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::ReadbackWait);
+				Common::Telemetry::Add(Common::Telemetry::Counter::ReadbackWaits, 1);
 				if ((tick & QueueReadbackTickBit) != 0) {
 					// KYTY_READBACK_QUEUE_ASYNC: only the readback queue's copy is waited for.
 					WaitQueueReadback(tick);
@@ -979,6 +989,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 
 void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) {
 	KYTY_PROFILER_BLOCK("BufferCache::ReadMemory(GPU thread)");
+	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::GpuReadMemory);
 	ReadbackStats::Scope stats(vaddr, is_write);
 	if (is_write && !IsRegionRegistered(vaddr, size)) {
 		return;
@@ -1030,7 +1041,8 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 	if (stats.Enabled()) {
 		stats.FindWriter([this](uint64_t tick) { return m_scheduler.IsFree(tick); });
 		uint64_t         dirty_bytes = 0;
-		std::shared_lock lock(m_dirty_ranges_mutex);
+		std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		m_gpu_modified_ranges.ForEachInRange(
 		    window_begin, window_end - window_begin,
 		    [&](uint64_t start, uint64_t end) { dirty_bytes += end - start; });
@@ -1088,7 +1100,8 @@ bool BufferCache::TryDirectReadback(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	m_memory_tracker.ForEachDownloadRange<false>(
 	    begin, end - begin, [&](uint64_t address, uint64_t bytes) noexcept {
 		    pages.emplace_back(address, bytes);
-		    std::shared_lock lock(m_dirty_ranges_mutex);
+		    std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		    Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		    m_gpu_modified_ranges.ForEachInRange(
 		        address, bytes, [&](uint64_t start, uint64_t stop) { dirty += stop - start; });
 	    });
@@ -1098,7 +1111,8 @@ bool BufferCache::TryDirectReadback(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	}
 	uint64_t copied = 0;
 	{
-		std::unique_lock lock(m_dirty_ranges_mutex);
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		// A queued download of these bytes would publish them again when it lands.
 		if (m_downloading_ranges.Intersects(begin, end - begin)) {
 			return false;
@@ -1173,7 +1187,8 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
 	{
-		std::shared_lock lock(m_dirty_ranges_mutex);
+		std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		// A queued main-queue download of these bytes would publish them again when it lands.
 		if (m_downloading_ranges.Intersects(window_begin, window_end - window_begin)) {
 			return false;
@@ -1206,6 +1221,7 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	}
 
 	KYTY_PROFILER_BLOCK("BufferCache::CopyQueueReadback");
+	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::GpuCopyQueue);
 	auto& state  = m_copy_queue_readback;
 	auto  device = m_graphics.device;
 	if (state.pool == nullptr) {
@@ -1273,7 +1289,8 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	}
 	// Guest memory holds the bytes before they stop counting as GPU-written, so a concurrent
 	// clean read never sees them stale.
-	std::unique_lock lock(m_dirty_ranges_mutex);
+	std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+	Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 	for (const auto& copy: copies) {
 		m_gpu_modified_ranges.Subtract(buffer_address + copy.srcOffset, copy.size);
 	}
@@ -1654,7 +1671,8 @@ bool BufferCache::FinishDirectReadback(uint64_t vaddr, uint64_t size, bool is_wr
 	if (snapshot && !buffer.Mapped().empty() && m_scheduler.IsFree(tick) &&
 	    buffer.IsInBounds(page_begin, page_end - page_begin) &&
 	    !OverlapsPendingWriteReadback(page_begin, page_end)) {
-		std::unique_lock lock(m_dirty_ranges_mutex);
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		if (!m_downloading_ranges.Intersects(page_begin, page_end - page_begin)) {
 			const auto* mapped = buffer.Mapped().data();
 			m_gpu_modified_ranges.ForEachInRange(
@@ -1750,7 +1768,8 @@ bool BufferCache::WidenSparseReadback(const Buffer& buffer, uint64_t& window_beg
 	}
 	uint64_t dirty = 0;
 	{
-		std::shared_lock lock(m_dirty_ranges_mutex);
+		std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		m_gpu_modified_ranges.ForEachInRange(
 		    begin, end - begin, [&](uint64_t start, uint64_t stop) { dirty += stop - start; });
 	}
@@ -1878,7 +1897,8 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
 	{
-		std::shared_lock lock(m_dirty_ranges_mutex);
+		std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		// A queued main-queue download of these bytes would publish them again when it lands.
 		if (m_downloading_ranges.Intersects(window_begin, window_end - window_begin)) {
 			stats.busy++;
@@ -1901,7 +1921,8 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 	}
 	{
 		// Only the GPU thread adds GPU-written or downloading ranges, so the copies still hold.
-		std::unique_lock lock(m_dirty_ranges_mutex);
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		for (const auto& copy: copies) {
 			m_downloading_ranges.Add(buffer_address + copy.srcOffset, copy.size);
 			m_gpu_modified_ranges.Subtract(buffer_address + copy.srcOffset, copy.size);
@@ -2090,7 +2111,8 @@ bool BufferCache::LandQueueReadback(uint64_t tick) {
 		}
 	}
 	{
-		std::unique_lock lock(m_dirty_ranges_mutex);
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		for (const auto& copy: slot->copies) {
 			m_downloading_ranges.Subtract(slot->source_address + copy.srcOffset, copy.size);
 		}
@@ -2192,6 +2214,7 @@ BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
 }
 
 BufferCache::OverlapResult BufferCache::ResolveOverlaps(uint64_t vaddr, uint64_t size) {
+	KYTY_PROFILER_FUNCTION();
 	static constexpr int      StreamLeapThreshold = 16;
 	static constexpr uint64_t StreamLeapSize      = CACHING_PAGESIZE * 128;
 
@@ -2245,6 +2268,7 @@ BufferCache::OverlapResult BufferCache::ResolveOverlaps(uint64_t vaddr, uint64_t
 }
 
 void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumulate_stream_score) {
+	KYTY_PROFILER_FUNCTION();
 	auto& new_buffer = m_slot_buffers[new_id];
 	auto& overlap    = m_slot_buffers[overlap_id];
 	if (accumulate_stream_score) {
@@ -2258,6 +2282,8 @@ void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumul
 }
 
 BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
+	KYTY_PROFILER_FUNCTION();
+	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::CreateBuffer);
 	EXIT_IF(m_scheduler.Current().IsInvalid());
 	const auto end = Common::AlignUp(vaddr + size, CACHING_PAGESIZE);
 	if (vaddr < CACHING_PAGESIZE) {
@@ -2473,7 +2499,8 @@ void BufferCache::MarkGpuWritten(uint64_t vaddr, uint64_t size) {
 	KYTY_PROFILER_BLOCK("Obtain::MarkWritten");
 	NoteGpuWriteTick(vaddr, size);
 	{
-		std::unique_lock lock(m_dirty_ranges_mutex);
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		m_gpu_modified_ranges.Add(vaddr, size);
 	}
 	ReadbackStats::NoteWrite(vaddr, size, m_scheduler.CurrentTick());
@@ -2631,7 +2658,8 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::IsCleanForConcurrentRead(uint64_t vaddr, uint64_t size) const {
-	std::shared_lock lock(m_dirty_ranges_mutex);
+	std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+	Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 	return !m_gpu_modified_ranges.Intersects(vaddr, size) &&
 	       !m_downloading_ranges.Intersects(vaddr, size);
 }

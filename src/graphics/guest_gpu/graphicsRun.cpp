@@ -5,6 +5,7 @@
 #include "common/liveSwitches.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/telemetry.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
@@ -753,6 +754,7 @@ void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
+	Common::Telemetry::RegisterGpuThread();
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
 
@@ -772,6 +774,7 @@ void GuestGpu::ThreadRun(void* data) {
 					break;
 				}
 				KYTY_PROFILER_BLOCK("GuestGpu::WaitForWork");
+				Common::Telemetry::ScopedTime idle(Common::Telemetry::Counter::GpuIdle);
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
@@ -1012,6 +1015,7 @@ bool GuestGpu::Process(Submission& submission) {
 Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
                                            std::span<const uint32_t> commands) {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Process");
+	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::GpuProcess);
 	EXIT_IF(g_current_execution != nullptr);
 	EXIT_IF(commands.size() > UINT32_MAX);
 	if (execution.m_buffer_stack.empty() && !commands.empty()) {

@@ -4,6 +4,7 @@
 #include "common/liveSwitches.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/telemetry.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -316,10 +317,14 @@ struct CommandScheduler::GpuTimer {
 			    stamps[1] >= stamps[0]) {
 				const auto begin = std::max(stamps[0], last_end);
 				if (stamps[1] > begin) {
-					busy_ns += static_cast<double>(stamps[1] - begin) * period_ns;
+					const auto stamp_ns = static_cast<double>(stamps[1] - begin) * period_ns;
+					busy_ns += stamp_ns;
+					Common::Telemetry::Add(Common::Telemetry::Counter::GpuBusy,
+					                       static_cast<int64_t>(stamp_ns));
 				}
 				last_end = std::max(last_end, stamps[1]);
 				buffers++;
+				Common::Telemetry::Add(Common::Telemetry::Counter::CommandBuffers, 1);
 			}
 			pending.pop_front();
 		}
