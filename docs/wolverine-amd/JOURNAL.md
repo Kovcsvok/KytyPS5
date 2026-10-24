@@ -361,3 +361,11 @@ Mérés: automatikus harci A/B `KYTY_CLAMP_RING` 0 / 1.
 
 ## 2026-10-24 — Opus — `c8611c9` csomag
 CI zöld (run 40099595395). `C:\Games\Wolverine-AMD-Async\emulator` = `c8611c9` (tartománytábla-zár mérés, `KYTY_CLAMP_RING`), tartalék `emulator-81931a5`; az `emulator-48427a9` lomtárba. Következő: automatikus harci mérés `KYTY_CLAMP_RING` 0 / 1.
+
+## 2026-10-24 — Opus — harci A/B: `KYTY_CLAMP_RING` 0 / 1 (`c8611c9`)
+Automatikus mérés (`experiment_2026-10-24_160824`, 18 × 10 s blokk ABBA, harc a Trask-jelenetben).
+- **FPS:** R0 9,7 → R1 10,3; párosított **+7,8% (±10,3, n=9)** – iránya jó, nem szignifikáns. p99 500 → 400 ms, 1% low 2,0 → 2,5 fps, max 818 → 601 ms.
+- **A gyanú beigazolódott:** a GPU-szál zárvárásának (28,1 ms/képkocka) zöme a tartománytábla: `gpu_ranges_lock_ms` 19,7 (a backing/address space csak 8,3). R1-gyel 13,6 (−6,1), `gpu_lock_ms` 28,1 → 21,8, `findbuffers_ms` 20,7 → 14,3.
+- `clamp_locked` 8816 → 2938 /képkocka: a nyereség zöme az 1024 helyes gyorsítótárból jön, a gyűrű maga csak ~160 választ ment meg képkockánként.
+- **Az igazi ok:** a tábla minden módosítása ~0,72 ms-ig tartja a kizárólagos zárat (`ranges_hold_ms` 27,9 / `ranges_changes` 38,9 képkockánként; R1-ben is 0,72). A `Protect` / `SetMemoryType` (`EditUnlocked`) és a részleges `Remove` (`RemoveUnlocked`) az egész vektort újramásolja, utána a `MergeUnlocked` teljes `std::sort` + két újabb teljes másolat; az `Add` / `Remove` / ... `RecordRangeEvent`-je a zár alatt `CaptureStackBackTrace`-t is hív.
+- Döntés: `KYTY_CLAMP_RING=1` az élő alapállás (`kyty_live.txt`). Következő jelölt: a módosítások helyben, csak az érintett tartományokon (bináris keresés + egy splice + helyi összevonás), élő kapcsolóval.
