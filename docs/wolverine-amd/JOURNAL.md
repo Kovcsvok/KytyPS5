@@ -551,3 +551,5 @@ A `FORKS.md` „Átvételi terv” szakasza: a Senaxx `df053d75` alap és a mion
 - Statisztika (`KYTY_READBACK_STATS`): 8192 elemes jelölőgyűrű; az aszinkron (readback-queue) út is rögzíti az írót és a letöltött bájtokat; új sor: `downloads: faulting bytes GPU-written N, only other bytes of the window M`.
 - Kockázat: címalapú (BDA) shaderírás követett lapra nem állít bitet (eddig is csak véletlenül töltődött le). Ha hiba: `KYTY_WRITE_BITMAP=0`.
 - Teszt: 30 s `KYTY_READBACK_STATS=1` + bitmap, majd ABBA `KYTY_WRITE_BITMAP` 0 / 1 harcban (az első bekapcsolás új permutációkat fordít).
+
+CI zöld elsőre (run 40215289910). `C:\Games\Wolverine-AMD-Async\emulator` = `5931ea8` (írási bitmap, `KYTY_WRITE_BITMAP` alap 0), tartalék `emulator-395e39f`; az `emulator-65878c0` lomtárba. `Play Wolverine AMD Async.bat` pin → `5931ea8969bba3999d9369cb1cc0915dca6a7f47` (első indítás hideg shader-cache, `KytyPRG2`). Következő: 30 s `KYTY_READBACK_STATS=1` + `KYTY_WRITE_BITMAP=1` harcban, majd ABBA `KYTY_WRITE_BITMAP` 0 / 1.
