@@ -183,8 +183,9 @@ private:
 	// of its window that the bitmap shows no finished tracked write wrote leave the GPU-written
 	// set; written ones get their bit cleared and stop being tracked until downloaded. Pages a
 	// tracked write still in flight may write are left as they are (mionstyle7 3524eff9: waiting
-	// for them chased the writes of each new frame).
-	void RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// for them chased the writes of each new frame). With KYTY_WRITE_BITMAP_UNPROTECT the dropped
+	// pages lose their protection too; true when the faulting pages were among them.
+	bool RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, uint64_t size);
 	void ReportWriteBitmap();
 	void TouchBuffer(const Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
@@ -426,7 +427,7 @@ private:
 	std::vector<PendingWriteReadback>                  m_pending_write_readbacks;
 	// Write bitmap (WriteBitmapAddress): the buffer; the whole pages whose GPU-written bytes all
 	// came through tracked bindings; the tracked writes the GPU may still run, first byte ->
-	// {end, tick} (page-aligned). Guarded by m_dirty_ranges_mutex, as m_gpu_modified_ranges.
+	// {end, tick} (page-aligned). GPU thread only, as the writes to m_gpu_modified_ranges.
 	std::unique_ptr<Buffer>                            m_write_bitmap;
 	bool                                               m_write_bitmap_failed = false;
 	RangeSet                                           m_bitmap_tracked;
@@ -436,6 +437,7 @@ private:
 		uint64_t                              dropped     = 0;
 		uint64_t                              written     = 0;
 		uint64_t                              in_flight   = 0;
+		uint64_t                              unprotected = 0;
 		uint64_t                              bindings    = 0;
 		uint64_t                              bytes       = 0;
 		std::chrono::steady_clock::time_point report      = std::chrono::steady_clock::now();

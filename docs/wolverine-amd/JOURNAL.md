@@ -553,3 +553,15 @@ A `FORKS.md` „Átvételi terv” szakasza: a Senaxx `df053d75` alap és a mion
 - Teszt: 30 s `KYTY_READBACK_STATS=1` + bitmap, majd ABBA `KYTY_WRITE_BITMAP` 0 / 1 harcban (az első bekapcsolás új permutációkat fordít).
 
 CI zöld elsőre (run 40215289910). `C:\Games\Wolverine-AMD-Async\emulator` = `5931ea8` (írási bitmap, `KYTY_WRITE_BITMAP` alap 0), tartalék `emulator-395e39f`; az `emulator-65878c0` lomtárba. `Play Wolverine AMD Async.bat` pin → `5931ea8969bba3999d9369cb1cc0915dca6a7f47` (első indítás hideg shader-cache, `KytyPRG2`). Következő: 30 s `KYTY_READBACK_STATS=1` + `KYTY_WRITE_BITMAP=1` harcban, majd ABBA `KYTY_WRITE_BITMAP` 0 / 1.
+
+## 2026-10-25 — Opus — írási bitmap a harcban: fagyás, ABBA, javítás (`KYTY_WRITE_BITMAP_UNPROTECT`)
+Mérés (`5931ea8`, harc, `Play Wolverine AMD Async.bat`):
+- Első bekapcsolás: ~39 s fagyás (`longest frame 38932 ms`), közben a GPU-szál alig dolgozott, a `Shaders: … CS` számláló ~3 s-onként nőtt. Ugyanebben a futásban `KYTY_WRITE_BITMAP_MIN_KB=4194304`-gyel (nincs követett kötés) nem fagyott, majd teljes követéssel újra bekapcsolva sem: egyszeri fordítás volt (a jelölős compute-változatok a GPU-szálon fordulnak), nem hibás adat. Címalapú (BDA) shaderírás nincs: a SPIR-V emitter nem tud ilyet kiadni (`PrepareMemoryResourceAccess` kilép rá).
+- Működés: 5 s alatt ~30 ezer követett kötés, ~100 ezer finomítás, 0,5–3,5 millió lap eldobva letöltés nélkül, ~15 ezer írt.
+- ABBA 3 perc (`experiment_2026-10-25_191035.json`): B (bitmap) **−10,9% ±4,7** (17,0 → 15,1 fps), p99 134 → 283 ms. Képkockánként: `readback_wait_ms` 93,9 → 17,3 (a vendég alig vár letöltésre), de `guest_faults` 751 → 1717, `buffer_lock_ms` 0,07 → 6,8, `materialize_ms` 10,0 → 12,4, GPU-szál tétlen 10,9 → 17,3 ms.
+- Ok: az eldobott lapok védettek maradtak, mindegyik külön hibával oldódott fel (eddig egy letöltés az egész ablakot feloldotta); a finomítás a zár alatt olvasta a BAR-on lévő bitmapet (nem gyorsítótárazott olvasás).
+
+Javítás (élő, a bitmap mellett):
+- **`KYTY_WRITE_BITMAP_UNPROTECT`** (élő, alap 1): a finomítás az eldobott lapfutásokat rögtön feloldja (`UnmarkRegionAsGpuModified`), kivéve ami futó letöltéssel (`m_downloading_ranges`, függő írási visszaolvasás) fed át; ha a hibázó lap is köztük van, a hívó letöltés nélkül visszatér. Napló: `…, N unprotected`.
+- A finomítás a bitmapet zár nélkül olvassa: a követett halmazt, a futó írásokat és a GPU-írt halmazt csak a GPU-szál módosítja; a zár csak a halmazok módosítását fedi.
+- Teszt: ABBA `KYTY_WRITE_BITMAP` 0 / 1 harcban; ha jobb, `KYTY_WRITE_BITMAP_UNPROTECT` 0 / 1 is.

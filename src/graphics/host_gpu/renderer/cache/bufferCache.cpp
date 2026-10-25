@@ -1026,10 +1026,12 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 	CompletePendingWriteReadbacks(page_begin, page_end);
 	// KYTY_WRITE_BITMAP: the window's tracked pages the GPU did not write stop being GPU-written,
 	// so this page may need no download and the window downloads only what was written.
-	RefineWithWriteBitmap(buffer, vaddr, size);
-	if (m_memory_tracker.IsRegionGpuModified(page_begin, page_end - page_begin) &&
+	const bool unprotected = RefineWithWriteBitmap(buffer, vaddr, size);
+	if ((unprotected || m_memory_tracker.IsRegionGpuModified(page_begin, page_end - page_begin)) &&
 	    !HasGpuDirtyBytes(page_begin, page_end - page_begin)) {
-		m_memory_tracker.UnmarkRegionAsGpuModified(page_begin, page_end - page_begin);
+		if (!unprotected) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(page_begin, page_end - page_begin);
+		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
@@ -1346,7 +1348,7 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 	auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 	stats.SetBuffer(buffer.CpuAddress(), buffer.Size());
 	// KYTY_WRITE_BITMAP, as in ReadMemoryOnGpu.
-	RefineWithWriteBitmap(buffer, vaddr, size);
+	const bool unprotected = RefineWithWriteBitmap(buffer, vaddr, size);
 	const auto read_page = vaddr / TRACKER_PAGE_SIZE;
 	if (!is_write && StaleInflightReadsEnabled() && !Libs::LibKernel::Memory::ForceSyncReadback() &&
 	    !m_scheduler.IsFree(buffer.last_gpu_write_tick)) {
@@ -1364,9 +1366,11 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 	}
 
 	// As in ReadMemoryOnGpu: a GPU-owned page without bytes to download only needs unprotecting.
-	if (m_memory_tracker.IsRegionGpuModified(page_begin, page_end - page_begin) &&
+	if ((unprotected || m_memory_tracker.IsRegionGpuModified(page_begin, page_end - page_begin)) &&
 	    !HasGpuDirtyBytes(page_begin, page_end - page_begin)) {
-		m_memory_tracker.UnmarkRegionAsGpuModified(page_begin, page_end - page_begin);
+		if (!unprotected) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(page_begin, page_end - page_begin);
+		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
@@ -2589,9 +2593,17 @@ vk::DeviceAddress BufferCache::WriteBitmapAddress() {
 	return m_write_bitmap->BufferDeviceAddress();
 }
 
-void BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, uint64_t size) {
+// KYTY_WRITE_BITMAP_UNPROTECT (live, default 1): pages a refinement drops lose their protection at
+// once. Otherwise each was unprotected by a fault of its own, where a download used to unprotect
+// its whole window (ABBA 2026-10-25, combat: 2.3x the guest faults, -10.9% fps).
+static bool WriteBitmapUnprotectEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_WRITE_BITMAP_UNPROTECT", 1);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
+bool BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	if (m_write_bitmap == nullptr) {
-		return;
+		return false;
 	}
 	KYTY_PROFILER_BLOCK("BufferCache::RefineWithWriteBitmap");
 	constexpr uint64_t Page     = TRACKER_PAGE_SIZE;
@@ -2605,12 +2617,13 @@ void BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, ui
 	const auto begin = Common::AlignDown(window_begin, Page);
 	const auto end   = std::min(Common::AlignUp(window_end, Page), WriteBitmapLimit);
 	if (end <= begin) {
-		return;
+		return false;
 	}
-	std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
-	Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
+	// GPU thread, which alone changes the tracked set, the writes in flight and the GPU-written
+	// set: the bitmap is read without the lock (its uncached reads held it ~7 ms a frame, ABBA
+	// 2026-10-25), which only covers the changes guest threads may be reading.
 	if (m_bitmap_tracked.Empty() || !m_bitmap_tracked.Intersects(begin, end - begin)) {
-		return;
+		return false;
 	}
 	m_bitmap_stats.refinements++;
 	// Tracked writes the GPU may still run, on any page of the words looked at: their pages stay
@@ -2691,12 +2704,38 @@ void BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, ui
 		});
 	}
 	flush_word();
+	const bool unprotect = WriteBitmapUnprotectEnabled();
+	{
+		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
+		for (const auto& [from, to]: unwritten) {
+			m_gpu_modified_ranges.Subtract(from, to - from);
+		}
+		for (const auto& [from, to]: written) {
+			m_bitmap_tracked.Subtract(from, to - from);
+		}
+		if (unprotect) {
+			// A landing download publishes its older bytes over these pages: they stay protected.
+			std::erase_if(unwritten, [&](const auto& run) {
+				return m_downloading_ranges.Intersects(run.first, run.second - run.first) ||
+				       OverlapsPendingWriteReadback(run.first, run.second);
+			});
+		}
+	}
+	if (!unprotect) {
+		return false;
+	}
+	// As a fault on one of them would (ReadMemoryOnGpu): no byte of these pages waits for a
+	// download. The tracker is changed outside the lock, as the downloads do.
+	const auto page_begin = Common::AlignDown(vaddr, Page);
+	const auto page_end   = Common::AlignUp(vaddr + size, Page);
+	bool       faulting   = false;
 	for (const auto& [from, to]: unwritten) {
-		m_gpu_modified_ranges.Subtract(from, to - from);
+		m_memory_tracker.UnmarkRegionAsGpuModified(from, to - from);
+		m_bitmap_stats.unprotected += (to - from) / Page;
+		faulting = faulting || (from <= page_begin && page_end <= to);
 	}
-	for (const auto& [from, to]: written) {
-		m_bitmap_tracked.Subtract(from, to - from);
-	}
+	return faulting;
 }
 
 // KYTY_WRITE_BITMAP, every 5 s (GPU thread).
@@ -2714,9 +2753,10 @@ void BufferCache::ReportWriteBitmap() {
 	}
 	::printf("Write bitmap (5 s): %" PRIu64 " tracked bindings (%" PRIu64 " MiB), %" PRIu64
 	         " refinements: %" PRIu64 " pages dropped unwritten, %" PRIu64 " written, %" PRIu64
-	         " left to a running write; %" PRIu64 " MiB tracked, %zu writes in flight\n",
+	         " left to a running write, %" PRIu64 " unprotected; %" PRIu64
+	         " MiB tracked, %zu writes in flight\n",
 	         s.bindings, s.bytes >> 20u, s.refinements, s.dropped, s.written, s.in_flight,
-	         tracked >> 20u, m_bitmap_inflight.size());
+	         s.unprotected, tracked >> 20u, m_bitmap_inflight.size());
 	std::fflush(stdout);
 	s = {.report = now};
 }
