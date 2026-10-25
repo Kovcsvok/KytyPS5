@@ -498,3 +498,6 @@ Lekérve: `refs/remotes/upstream/main` = `83f8bfd3` (2026-10-25), `refs/senaxx/r
 - **Shader-helyesség (vizuális fázisra, program-cache-t érint):** `ecc30a1f` S_FLBIT, `9210264d` V_CVT_PK telítés, `e864cb20` V_FRACT, `67c89e09`/`72903bfc` V_PERMLANE16, `9a20c6f7` DPP16, `59d8256b` 11/10 bites float tárolás, `77a8f307` S_MEMREALTIME.
 - **Shader-cache perzisztencia és előmelegítés** (`4b651f2b`, `bfc37762`, `18160043`, `ec8b75b2`, `dd5bc26c`): első megjelenéskori akadásokra; nagy átalakítás, nálunk saját program-cache van.
 - Sorrend: előbb a `KYTY_SRT_FAST_READ` A/B (a csomag kész), utána a RELEASE_MEM-flushok számlálása, majd a kis upstream GPU-szál-commitok.
+
+## 2026-10-25 — Opus — teljes fork-átnézés (`docs/wolverine-amd/FORKS.md`)
+1244 fork (a forkok forkjai is), 1011 aktív, ~3000 ág helyi blobless klónnal (`D:\KytyAnalysisorkscan`), 18 178 egyedi, upstreamben nem szereplő commit témák szerint. A Senaxx azért maradt ki korábban, mert a régi szkript a compare API hibáit csendben átugrotta. Fő jelöltek: draw prep scanner (Senaxx `6632a241`, Revi `73ffc2ee`: Wolverine CP 37,8 → 33,8 ms), írási bitmap + bitmapos tiszta olvasás (mionstyle7 `a507e89f`: a vendég-visszaolvasások ~78%-a sosem írt bájt), Senaxx `6625a63e` tracker dirty walk. A szkriptek: `docs/wolverine-amd/forkscan/`.
