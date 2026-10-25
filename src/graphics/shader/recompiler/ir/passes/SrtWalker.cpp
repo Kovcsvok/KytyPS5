@@ -515,11 +515,17 @@ constexpr uint32_t NativeAfterWalkers = 8;
 
 // Set while VerifyNative's reference walkers run.
 thread_local bool g_native_suppressed = false;
+// SetSrtNativeCompileBlocked.
+thread_local bool g_native_compile_blocked = false;
 
 SrtNativeStats g_native_stats;
 bool           g_native_report = false;
 
 } // namespace
+
+void SetSrtNativeCompileBlocked(bool blocked) {
+	g_native_compile_blocked = blocked;
+}
 
 bool TakeSrtNativeReport(SrtNativeStats& stats) {
 	if (!g_native_report) {
@@ -537,7 +543,8 @@ void SrtWalker::BindNative() {
 	}
 	const auto& program = m_program;
 	if (program.native_code == nullptr) {
-		if (program.native_attempted || ++program.native_uses < NativeAfterWalkers) {
+		if (g_native_compile_blocked || program.native_attempted ||
+		    ++program.native_uses < NativeAfterWalkers) {
 			return;
 		}
 		program.native_attempted = true;

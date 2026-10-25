@@ -1263,6 +1263,17 @@ const uint8_t* FindGpuCleanBackingCached(uint64_t vaddr, uint64_t size) {
 	return backing;
 }
 
+const uint8_t* FindConcurrentCleanBacking(uint64_t vaddr, uint64_t size) {
+	if (g_guest_address_space == nullptr) {
+		return nullptr;
+	}
+	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) &&
+	    !GetGpuResources().GetBufferCache().IsCleanForConcurrentRead(vaddr, size)) {
+		return nullptr;
+	}
+	return g_guest_address_space->FindBacking(vaddr, size);
+}
+
 bool TryReadCleanFaultingBytes(uint64_t fault_vaddr, uint64_t vaddr, void* data, uint64_t size) {
 	return g_gpu_resources != nullptr &&
 	       g_gpu_resources->CanServeCleanRead(fault_vaddr, vaddr, size) &&

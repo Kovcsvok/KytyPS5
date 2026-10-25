@@ -126,6 +126,11 @@ bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t
 // The same answer with the backing lookup kept per page until a mapping changes and the texture
 // lock only for a page holding an image (KYTY_SRT_PAGE_CACHE, see memory.cpp).
 [[nodiscard]] const uint8_t* FindGpuCleanBackingCached(uint64_t vaddr, uint64_t size);
+// Any thread (the draw-prep scanner, KYTY_DRAW_PREP): the backing bytes of [vaddr, vaddr + size)
+// when one mapping holds them and the buffer cache has no GPU-written byte among them, else
+// nullptr. The texture cache is not asked, and the answer can be stale by the time the bytes are
+// read: the GPU thread checks every byte a preparation read before it uses the preparation.
+[[nodiscard]] const uint8_t* FindConcurrentCleanBacking(uint64_t vaddr, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);
 // Like ClampRangeSize, but 0 for a range that starts outside committed memory instead of EXIT.
 [[nodiscard]] uint64_t TryClampRangeSize(uint64_t vaddr, uint64_t size);

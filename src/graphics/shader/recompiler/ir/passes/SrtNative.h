@@ -72,6 +72,10 @@ struct SrtNativeStats {
 // True, with the totals, once after each doubling of the number of plans compiled.
 bool TakeSrtNativeReport(SrtNativeStats& stats);
 
+// This thread's walkers use a plan's native code once it exists but never compile it (the
+// draw-prep scanner, KYTY_DRAW_PREP: only the GPU thread compiles and counts).
+void SetSrtNativeCompileBlocked(bool blocked);
+
 class SrtNativeCode {
 public:
 	~SrtNativeCode();

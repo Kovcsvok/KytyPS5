@@ -993,6 +993,29 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info);
 }
 
+bool DrawPrepHasVertexShader(const HW::Shader& sh_ctx) {
+	return DrawHasValidVertexShader(sh_ctx);
+}
+
+bool DrawPrepPixelState(const HW::Context& ctx, const HW::Shader& sh_ctx,
+                        std::array<Prospero::ColorComponentMapping, 8>& mapping) {
+	static_assert(RENDER_COLOR_ATTACHMENTS_MAX == 8);
+	const auto color_output_mask = DrawColorOutputMask(ctx);
+	const bool ps_active         = sh_ctx.GetPs().ps_regs.data_addr != 0 &&
+	                       (color_output_mask != 0 ||
+	                        PixelShaderHasDepthOrCoverageSideEffects(ctx.GetShaderRegisters()));
+	mapping = {};
+	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+		const auto& rt = ctx.GetRenderTarget(slot);
+		if ((color_output_mask & (1u << slot)) != 0 && rt.base.addr != 0) {
+			mapping[slot] = TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
+			                                             rt.info.channel_order)
+			                    .export_mapping;
+		}
+	}
+	return ps_active;
+}
+
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
 	                                        DrawRenderState& state) {

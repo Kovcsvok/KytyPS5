@@ -24,6 +24,7 @@
 namespace Libs::Graphics {
 
 struct GraphicContext;
+struct ShaderParams;
 struct RenderColorInfo;
 struct RenderDepthInfo;
 class CommandBuffer;
@@ -34,6 +35,10 @@ class Shader;
 class UserConfig;
 struct ComputeShaderInfo;
 } // namespace HW
+
+namespace DrawPrep {
+struct PacketResult;
+} // namespace DrawPrep
 
 #pragma pack(push, 1)
 
@@ -190,6 +195,16 @@ public:
 	ShaderProgram GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                const HW::ShaderRegisters&   sh,
 	                                ShaderComputeInputInfo&      input_info);
+	// Draw prep (KYTY_DRAW_PREP, drawPrep.h), scanner thread: the SRT refreshes GetGraphicsPrograms
+	// would run for these registers, into `out`. False when nothing was prepared.
+	bool DrawPrepGraphics(const HW::VertexShaderInfo& vertex_regs,
+	                      const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,
+	                      const HW::Context& context, const HW::UserConfig& user_config,
+	                      std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
+	                      bool pixel_active, DrawPrep::PacketResult& out);
+	// The same for a dispatch: the SRT refresh GetComputeProgram would run.
+	bool DrawPrepCompute(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
+	                     ShaderComputeInputInfo& input_info, DrawPrep::PacketResult& out);
 
 	Pipeline& GetGraphicsPipeline(std::span<const RenderColorInfo>       colors,
 	                              const RenderDepthInfo&                 depth,
@@ -212,6 +227,18 @@ public:
 
 private:
 	struct ProgramCache;
+
+	// GetGraphicsPrograms' and GetComputeProgram's stage inputs from the registers (shared with
+	// the draw-prep scanner).
+	bool DescribeGraphicsStages(const HW::VertexShaderInfo& vertex_regs,
+	                            const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,
+	                            const HW::Context& context, const HW::UserConfig& user_config,
+	                            std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping,
+	                            bool pixel_active, std::array<ShaderVertexInputInfo, 3>& vertex_info,
+	                            ShaderPixelInputInfo&        pixel_info,
+	                            std::array<ShaderParams, 3>& vertex_params, ShaderParams& pixel_params);
+	ShaderParams DescribeComputeStage(const HW::ComputeShaderInfo& regs, const HW::ShaderRegisters& sh,
+	                                  ShaderComputeInputInfo& input_info);
 
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
