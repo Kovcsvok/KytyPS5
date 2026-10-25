@@ -513,3 +513,11 @@ Lekérve: `refs/remotes/upstream/main` = `83f8bfd3` (2026-10-25), `refs/senaxx/r
 
 ## 2026-10-25 — Opus — `395e39f` csomag
 CI zöld elsőre (run 40189210446). `C:\Games\Wolverine-AMD-Async\emulator` = `395e39f` (draw prep scanner, `KYTY_DRAW_PREP`, alap 0), tartalék `emulator-65878c0`; az `emulator-5b20fed` lomtárba. Következő: 1 perc `KYTY_DRAW_PREP=1` + `KYTY_DRAW_PREP_VERIFY=1` harcban (mismatch, kiszolgálási arány), utána A/B 0 / 1; a `KYTY_SRT_FAST_READ` A/B is még hátravan.
+
+## 2026-10-25 — Opus — draw prep: ellenőrzés és harci A/B (`395e39f`)
+**Ellenőrző mód** (`run_2026-10-25_132235.log`, 65 s harc, `KYTY_DRAW_PREP=1` + `VERIFY=1`): összeomlás nincs. 10 s-onként ~420–475 ezer csomag, a GPU-szál ~430–475 ezer kérése (`takes`) közül **~340–376 ezer átvett (~80%)**, ebből 51–74 ezer ismételt (DRAW_INDIRECT_MULTI). Kihagyás: ismeretlen pár ~210–250 ezer (főleg olyan rajzolások, amelyekhez a GPU-szál nem kér programot), bejárás sikertelen 6–13 ezer, lemaradás 1–10 ezer; GPU-oldali tévesztés: nincs eredmény 64–100 ezer, bemenet 5–9 ezer, bájtok 4–9 ezer, más bejegyzés 0. **Ellenőrzés: ~2,1 M összevetésből 2 eltérés** (egy 10 s-os ablakban, pixel shader `0x1851ce34b005d0e2`, `flattened_srt`). Valószínű ok: a vendég CPU a `Validate` és az ellenőrző bejárás között írta a bájtot (a GPU-szál saját bejárása is ugyanígy versenyez a CPU-írással); megerősítendő.
+**A/B** (`experiment_2026-10-25_132622`, 27 × 10 s, ABC CBA, harc). P0 = alap; P1 = `DRAW_PREP=1`; F1 = `SRT_FAST_READ=1`.
+- **FPS:** P0 13,0; **P1 15,6, párosított +20,5% (±12,1)**; **F1 15,8, +22,1% (±8,3)** – mindkettő szignifikáns. p99 151 / 150 / 137 ms, 1% low 6,6 / 6,6 / 7,3; max 258 / **654** / 269 ms (P1-ben egy kiugró képkocka).
+- **P1 a GPU-szálon:** `materialize_ms` 21,6 → **8,8**, `gpu_process_ms` 62,7 → **42,3**, busy 81 → 66%, üresjárat 10,5 → 15,0 ms, `buildkey` 1,8 → 0,9. A GPU-szál már nem az egyetlen plafon.
+- **F1:** `materialize_ms` 21,6 → 17,4 (a gyors olvasás mechanizmusa), de `gpu_process_ms` 62,7 → 49,9 és a vendég `guest_fault_ms` 214 → 154 is esett: az F1-blokkok az ABC CBA sorrend miatt sosem szomszédosak P0-val, így a jelenet változása is benne lehet.
+- **Döntés:** élő alap `KYTY_DRAW_PREP=1`, `KYTY_SRT_FAST_READ=1` (régi: `userdata\kyty_live.before-drawprep.txt`). Következő: ABBA alap ↔ mindkettő, a 654 ms-os kiugrás és a 2 eltérés utánanézése.
