@@ -521,3 +521,10 @@ CI zöld elsőre (run 40189210446). `C:\Games\Wolverine-AMD-Async\emulator` = `3
 - **P1 a GPU-szálon:** `materialize_ms` 21,6 → **8,8**, `gpu_process_ms` 62,7 → **42,3**, busy 81 → 66%, üresjárat 10,5 → 15,0 ms, `buildkey` 1,8 → 0,9. A GPU-szál már nem az egyetlen plafon.
 - **F1:** `materialize_ms` 21,6 → 17,4 (a gyors olvasás mechanizmusa), de `gpu_process_ms` 62,7 → 49,9 és a vendég `guest_fault_ms` 214 → 154 is esett: az F1-blokkok az ABC CBA sorrend miatt sosem szomszédosak P0-val, így a jelenet változása is benne lehet.
 - **Döntés:** élő alap `KYTY_DRAW_PREP=1`, `KYTY_SRT_FAST_READ=1` (régi: `userdata\kyty_live.before-drawprep.txt`). Következő: ABBA alap ↔ mindkettő, a 654 ms-os kiugrás és a 2 eltérés utánanézése.
+
+## 2026-10-25 — Opus — megerősítő ABBA: alap ↔ `DRAW_PREP=1` + `SRT_FAST_READ=1`
+`experiment_2026-10-25_133354` (24 × 10 s ABBA, harc). B0 = mindkettő 0, B1 = mindkettő 1.
+- **FPS:** B0 14,3; B1 14,8, párosított **+3,5% (±5,9, n=12) – nem szignifikáns**. p50 66,8 / 66,3 ms, p99 151 / 150 ms, max 485 / 332 ms (a 654 ms-os kiugrás nem jött vissza).
+- **A GPU-szál tehermentesül:** `materialize_ms` 21,8 → 9,7, `gpu_process_ms` 60,8 → 46,9, busy 87 → 69%, üresjárat 6,4 → 14,1 ms. A korábbi +20,5 / +22,1% tehát nagyrészt jelenetzaj volt (ABC CBA, nagy szórás); a mechanizmus valódi, de **az FPS-t már nem a GPU-szál köti**.
+- **A vendégoldal a plafon:** `guest_fault_ms` 183 → 214, `readback_wait_ms` 112 → 146 (~156–171 várás / képkocka): a gyorsabb GPU-szál mellett a játék szálai többet várnak a visszaolvasásokra.
+- **Döntés:** mindkét kapcsoló marad élő alapon (a GPU-szálnak ~14 ms tartaléka lett, a farok nem romlott). Következő célpont: a vendégszálak visszaolvasásai – a FORKS.md 2. pontja (írási bitmap + bitmapos tiszta olvasás, mionstyle7 `a507e89f`: a vendég-visszaolvasások ~78%-a sosem írt bájt).
