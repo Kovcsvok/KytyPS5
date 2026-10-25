@@ -528,3 +528,6 @@ CI zöld elsőre (run 40189210446). `C:\Games\Wolverine-AMD-Async\emulator` = `3
 - **A GPU-szál tehermentesül:** `materialize_ms` 21,8 → 9,7, `gpu_process_ms` 60,8 → 46,9, busy 87 → 69%, üresjárat 6,4 → 14,1 ms. A korábbi +20,5 / +22,1% tehát nagyrészt jelenetzaj volt (ABC CBA, nagy szórás); a mechanizmus valódi, de **az FPS-t már nem a GPU-szál köti**.
 - **A vendégoldal a plafon:** `guest_fault_ms` 183 → 214, `readback_wait_ms` 112 → 146 (~156–171 várás / képkocka): a gyorsabb GPU-szál mellett a játék szálai többet várnak a visszaolvasásokra.
 - **Döntés:** mindkét kapcsoló marad élő alapon (a GPU-szálnak ~14 ms tartaléka lett, a farok nem romlott). Következő célpont: a vendégszálak visszaolvasásai – a FORKS.md 2. pontja (írási bitmap + bitmapos tiszta olvasás, mionstyle7 `a507e89f`: a vendég-visszaolvasások ~78%-a sosem írt bájt).
+
+## 2026-10-25 — Opus — terv: írási bitmap + bitmapos tiszta olvasás
+A `FORKS.md` „Átvételi terv” szakasza: a Senaxx `df053d75` alap és a mionstyle7 kötelező javításai (`270bba48` BAR-olvasás, `0b55d9b1` bitteszt az atomikus előtt, `3524eff9` futó írásra nem vár), majd a vendégszálas kiszolgálás (`a507e89f` + 3). Nálunk a korlátos írás már megvan, ezért előbb build nélküli mérés (`KYTY_READBACK_STATS=1`, 20–30 s harcban): a visszaolvasások korlát nélküli nagy kötésekből jönnek-e, és mennyi letöltött bájt változik valójában.

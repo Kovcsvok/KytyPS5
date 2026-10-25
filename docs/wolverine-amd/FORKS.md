@@ -53,3 +53,15 @@ A mi mostani képünk (harc, ~15 fps): a GPU-szál a plafon (~55 ms / képkocka,
 2. **Írási bitmap + bitmapos tiszta olvasás** (Senaxx `df053d75` / mionstyle7 `a507e89f`): a vendégszálak várakozására; shaderkódot érint.
 3. Kicsi és független: **Senaxx `6625a63e`** tracker dirty walk.
 4. Utána mérés szerint: parallel materialize (Revi), readback-előrejelzés (mionstyle7), submit szál (ClGratton), RELEASE_MEM-kötegelés.
+
+## Átvételi terv: írási bitmap + bitmapos tiszta olvasás (2026-10-25)
+
+**Mit csinál a forrás.** Senaxx `df053d75` (+361 sor, `KYTY_WRITE_BITMAP=1`): ha egy shader olyan kötésen ír, amelynek írt tartományát a gazdagép nem tudja behatárolni (és a kötés ≥ `KYTY_WRITE_BITMAP_MIN_KB`, alap 1 MiB), a shader minden tárolása/atomikus művelete beállítja a 4 KiB-os lapja bitjét egy 32 MiB-os bitmapben (host-koherens eszközmemória, 1 TiB alatti címek). Visszaolvasáskor (`RefineWithWriteBitmap`) a bit nélküli lapok letöltés nélkül kikerülnek a GPU-írt halmazból. A mionstyle7 erre épülő javításai kötelezők: `270bba48` (a bitmap BAR-on nem gyorsítótárazott, szavanként egyszer olvasandó – nélküle a GPU-szál 41%-a ment rá), `0b55d9b1` (tárolás előtt bitteszt, nélküle egy compute shader 78 ms lett az atomikus ütközéstől), `3524eff9` (a futó írásokra nem várni). A vendégszálas kiszolgálás: `a507e89f` + `6e62f48b` + `5f4d93d5` + `c837d857` (`IsBitmapCleanForConcurrentRead` a meglévő tiszta-olvasási útban, a lap feloldása a vendégszálon, epoch-védelemmel).
+
+**Mi van már nálunk.** Korlátos írás (`KYTY_BOUNDED_BUFFER_WRITES=1`, `ComputeBufferWriteExtents`, `ObtainBufferWritten`): ahol az írt tartomány kiszámítható, csak az lesz GPU-írt. A bitmap csak a maradék, korlát nélküli írásokra hat. Vendégszálas tiszta olvasás: `RenderContext::CanServeCleanRead` → `BufferCache::IsCleanForConcurrentRead`; ide köthető be a bitmapos feltétel.
+
+**Lépések.**
+0. **Mérés, build nélkül:** 20–30 s `KYTY_READBACK_STATS=1` harcban (drága, csak rövid ablakra): pufferenként írók (shader-hash), legnagyobb kötés, letöltött vs. ténylegesen változott bájtok. Döntési szabály: ha a visszaolvasási idő zöme olyan pufferekre esik, amelyek írója korlát nélküli nagy kötés, és a letöltések nagy része nem változtat bájtot, jöhet az 1. lépés; ha a korlátos írások dominálnak, a bitmap keveset hoz.
+1. **Build (shaderkódot érint):** Senaxx `df053d75` + mionstyle7 `270bba48`, `0b55d9b1`, `3524eff9`, a mi `NativeStorageBuffer` / `MarkGpuWritten` / `ReadMemoryOnGpu` / readback-queue utunkra igazítva; `KYTY_WRITE_BITMAP` élő kapcsolóval (bekapcsoláskor új permutációk fordulnak). A `ResourceSpecialization` és a `BindingLayout` új mezői miatt a program-lemezcache formátumát emelni kell → egyszeri teljes shader-újrafordítás (első indítás lassú); ennél a buildnél a `KYTY_PROGRAM_CACHE_GIT_REVISION` rögzítése nem marad.
+2. **Build:** bitmapos tiszta olvasás a vendégszálon (`a507e89f` + 3 javítás) a `CanServeCleanRead`-be, `KYTY_BITMAP_CLEAN_READ` élő kapcsolóval.
+Mindkét buildnél automatikus harci A/B.
