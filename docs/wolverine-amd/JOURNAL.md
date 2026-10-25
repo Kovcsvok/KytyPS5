@@ -510,3 +510,6 @@ Lekérve: `refs/remotes/upstream/main` = `83f8bfd3` (2026-10-25), `refs/senaxx/r
 - Kihagyva a Senaxx-ból: `SrtGpuFill` (nálunk nincs), a párhuzamos fokozat-előkészítés (`TakePrepared`). A kutatási kulcsrészeket (inline hívási célok, kibontott függvények) a scanner nem számolja: az ilyen programnál a GPU-szál `MissEntry`-vel bejár.
 - Kockázat: a scanner a saját regisztermásolatából hívja a `PrepareProgram`-ot (a VS a csúcsattribútum-táblákat is olvassa); hibás regiszterekkel ez a scanner szálon hibához vezethet. Védelmek: csak ismert jó shaderpár, a megbízhatatlan regiszterállapot (`tainted`) kizárva. Ha összeomlik: `KYTY_DRAW_PREP=0`.
 - Teszt: (1) 1 perc `KYTY_DRAW_PREP=1` + `KYTY_DRAW_PREP_VERIFY=1` harcban, a naplóban 0 mismatch és a kiszolgálási arány; (2) automatikus harci A/B `KYTY_DRAW_PREP` 0 / 1.
+
+## 2026-10-25 — Opus — `395e39f` csomag
+CI zöld elsőre (run 40189210446). `C:\Games\Wolverine-AMD-Async\emulator` = `395e39f` (draw prep scanner, `KYTY_DRAW_PREP`, alap 0), tartalék `emulator-65878c0`; az `emulator-5b20fed` lomtárba. Következő: 1 perc `KYTY_DRAW_PREP=1` + `KYTY_DRAW_PREP_VERIFY=1` harcban (mismatch, kiszolgálási arány), utána A/B 0 / 1; a `KYTY_SRT_FAST_READ` A/B is még hátravan.
