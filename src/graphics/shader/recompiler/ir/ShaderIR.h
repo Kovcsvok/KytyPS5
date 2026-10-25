@@ -125,6 +125,8 @@ struct BufferResource {
 	bool                   scalar             = false;
 	// Research: the shader computes the record count; the host binds a capped range.
 	bool                   gpu_records        = false;
+	// From ResourceSpecialization::Buffer::write_tracked (KYTY_WRITE_BITMAP).
+	bool                   write_tracked      = false;
 
 	bool operator==(const BufferResource& other) const = default;
 };
@@ -445,6 +447,10 @@ struct BindingLayout {
 	uint32_t                       memory_offset_dword = 0;
 	uint32_t                       memory_offset_count = 0;
 	bool                           has_dispatch_dimensions = false;
+	// Some memory binding is write-tracked (KYTY_WRITE_BITMAP): WriteTrackDword() holds the GPU
+	// write bitmap's device address (2 dwords), then the guest address of each memory binding's
+	// first byte (2 dwords each; 0 = not tracked in this draw).
+	bool                           write_tracking = false;
 	std::vector<uint32_t>          user_data_registers;
 	std::vector<DescriptorBinding> descriptors;
 
@@ -455,8 +461,11 @@ struct BindingLayout {
 	[[nodiscard]] uint32_t DispatchDimensionsDword() const {
 		return BufferLengthDword() + memory_offset_count;
 	}
-	[[nodiscard]] uint32_t ShaderDataDwords() const {
+	[[nodiscard]] uint32_t WriteTrackDword() const {
 		return DispatchDimensionsDword() + (has_dispatch_dimensions ? 3u : 0u);
+	}
+	[[nodiscard]] uint32_t ShaderDataDwords() const {
+		return WriteTrackDword() + (write_tracking ? 2u + 2u * memory_offset_count : 0u);
 	}
 	[[nodiscard]] bool UsesPushData() const {
 		return push_data_start_dword != PushData::NoStart;

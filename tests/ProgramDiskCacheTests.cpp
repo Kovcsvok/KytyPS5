@@ -35,6 +35,7 @@ IR::CompiledShaderInfo SampleInfo() {
 	buffer.image_alias     = 1;
 	buffer.read = buffer.written = buffer.atomic = buffer.formatted = buffer.scalar = true;
 	buffer.gpu_records = true;
+	buffer.write_tracked = true;
 	info.info.buffers.push_back(buffer);
 	IR::ImageResource image;
 	image.source             = 3;
@@ -78,6 +79,7 @@ IR::CompiledShaderInfo SampleInfo() {
 	info.bindings.memory_offset_dword     = 6;
 	info.bindings.memory_offset_count     = 2;
 	info.bindings.has_dispatch_dimensions = true;
+	info.bindings.write_tracking          = true;
 	info.bindings.user_data_registers     = {0, 1, 2};
 	info.bindings.descriptors.push_back({IR::DescriptorBindingKind::Samplers, {0, 3}});
 	return info;

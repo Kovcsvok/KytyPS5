@@ -97,6 +97,10 @@ bool AnyMappedDeviceBuffer() noexcept {
 	return g_any_mapped_device_buffer.load(std::memory_order_relaxed);
 }
 
+void RequireHostReadBarrier() noexcept {
+	g_any_mapped_device_buffer.store(true, std::memory_order_relaxed);
+}
+
 Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsage usage,
                uint64_t cpu_address, vk::BufferUsageFlags flags, uint64_t size)
     : m_graphics(&graphics), m_scheduler(&scheduler), m_usage(usage), m_cpu_address(cpu_address),

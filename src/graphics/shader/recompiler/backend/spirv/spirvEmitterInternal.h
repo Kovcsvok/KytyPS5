@@ -123,6 +123,12 @@ struct EmitterState {
 	uint32_t                                         storage_buffer_u64_variable = 0;
 	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> memory_byte_offsets {};
 	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> memory_dword_lengths {};
+	// Write bitmap (BindingLayout::write_tracking): the bitmap's device address, each memory
+	// binding's guest base (u64 ids; a base of 0 is not tracked in that draw), and whether the
+	// instruction being emitted writes memory.
+	uint32_t                                         write_bitmap_address = 0;
+	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> write_track_bases {};
+	bool                                             emitting_write = false;
 	uint32_t                                         bda_pagetable_variable  = 0;
 	uint32_t                                         fault_buffer_variable   = 0;
 	uint32_t                                         bda_pointer_function    = 0;
@@ -432,7 +438,8 @@ uint32_t EmitShaderDataDwordLoad(EmitterState& state, uint32_t dword_index);
 
 // A thread-dimension compute dispatch whose counts the shader reads from GPU memory.
 [[nodiscard]] bool DispatchDimensionsIndirect(const EmitterState& state);
-// Guest DMA, or DispatchDimensionsIndirect: the module uses physical storage buffer pointers.
+// Guest DMA, DispatchDimensionsIndirect, or a write bitmap: the module uses physical storage
+// buffer pointers.
 [[nodiscard]] bool UsesPhysicalAddresses(const EmitterState& state);
 
 uint32_t StorageBufferPackedStride(const EmitterState& state, const IR::MemoryInfo& mem);
@@ -452,6 +459,10 @@ struct MemoryResourceAccess {
 	uint32_t              byte_offset      = 0;
 	bool                  add_index_offset = false;
 	spv::MemoryAccessMask memory_access    = spv::MemoryAccessMaskNone;
+	// Storage buffers: the width of the elements the access indexes.
+	uint32_t              element_bits     = 32;
+	// Write-tracked binding, while a writing instruction is emitted: its guest base (u64 id).
+	uint32_t              write_base       = 0;
 };
 
 MemoryResourceAccess PrepareMemoryResourceAccess(EmitterState& state, const IR::MemoryInfo& mem);

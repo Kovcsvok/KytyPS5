@@ -139,7 +139,7 @@ void KeyBuilder::Specialization(const IR::ResourceSpecialization& specialization
 		U32(buffer.packed_stride);
 		U32(static_cast<uint32_t>(buffer.descriptor_format));
 		U32(buffer.descriptor_swizzle);
-		U32(buffer.zero_stride_oob ? 1u : 0u);
+		U32((buffer.zero_stride_oob ? 1u : 0u) | (buffer.write_tracked ? 2u : 0u));
 	}
 	U64(specialization.images.size());
 	for (const auto& image: specialization.images) {
@@ -181,6 +181,7 @@ static void WriteShaderInfo(Writer& w, const IR::ShaderInfo& s) {
 		w.Bool(b.formatted);
 		w.Bool(b.scalar);
 		w.Bool(b.gpu_records);
+		w.Bool(b.write_tracked);
 	}
 	w.U32(static_cast<uint32_t>(s.images.size()));
 	for (const auto& i: s.images) {
@@ -265,6 +266,7 @@ static bool ReadShaderInfo(Reader& r, IR::ShaderInfo& s) {
 		b.formatted          = r.Bool();
 		b.scalar             = r.Bool();
 		b.gpu_records        = r.Bool();
+		b.write_tracked      = r.Bool();
 	}
 	if (!r.Count(count)) return false;
 	s.images.resize(count);
@@ -355,6 +357,7 @@ void SerializeInfo(const IR::CompiledShaderInfo& info, std::vector<uint8_t>& out
 	w.U32(l.memory_offset_dword);
 	w.U32(l.memory_offset_count);
 	w.Bool(l.has_dispatch_dimensions);
+	w.Bool(l.write_tracking);
 	w.Words(l.user_data_registers);
 	w.U32(static_cast<uint32_t>(l.descriptors.size()));
 	for (const auto& d: l.descriptors) {
@@ -383,6 +386,7 @@ bool DeserializeInfo(std::span<const uint8_t>& in, IR::CompiledShaderInfo& info)
 	l.memory_offset_dword     = r.U32();
 	l.memory_offset_count     = r.U32();
 	l.has_dispatch_dimensions = r.Bool();
+	l.write_tracking          = r.Bool();
 	r.Words(l.user_data_registers);
 	if (!r.Count(count)) return false;
 	l.descriptors.resize(count);

@@ -13,6 +13,9 @@ struct ResourceSpecialization {
 		Prospero::BufferFormat descriptor_format               = Prospero::BufferFormat::kInvalid;
 		uint32_t               descriptor_swizzle              = DstSel(4, 5, 6, 7);
 		bool                   zero_stride_oob                 = false;
+		// Written at addresses the host cannot bound: the shader records the pages it writes in
+		// the GPU write bitmap (KYTY_WRITE_BITMAP, BufferCache::ObtainBufferTracked).
+		bool                   write_tracked                   = false;
 		bool                   operator==(const Buffer&) const = default;
 	};
 
@@ -43,6 +46,9 @@ struct ResourceSpecialization {
 
 	bool operator==(const ResourceSpecialization&) const = default;
 };
+
+// KYTY_WRITE_BITMAP (live, default 0): ResourceSpecialization::Buffer::write_tracked.
+[[nodiscard]] bool WriteBitmapEnabled();
 
 // Extracts the descriptor/SRT value graph before resource specialization. The returned plan owns
 // its values and is independent of the translated shader CFG.

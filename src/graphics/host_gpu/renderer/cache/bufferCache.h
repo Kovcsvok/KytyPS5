@@ -86,6 +86,19 @@ public:
 	                                                               uint64_t written_vaddr,
 	                                                               uint64_t written_size,
 	                                                               BufferId id = {});
+	// GPU write bitmap (KYTY_WRITE_BITMAP, live): one bit per 4 KiB guest page below
+	// WriteBitmapLimit, set by shaders through written bindings whose stores the host cannot bound.
+	// Its device address, or 0 when the switch is off or the bitmap is unavailable.
+	static constexpr uint64_t WriteBitmapLimit = uint64_t {1} << 40u;
+	[[nodiscard]] vk::DeviceAddress WriteBitmapAddress();
+	// KYTY_WRITE_BITMAP_MIN_KB (live, default 1024): smaller unbounded written bindings are not
+	// tracked; the bitmap pays off where a binding spans much more than it writes.
+	[[nodiscard]] static uint64_t   WriteBitmapMinBytes();
+	// ObtainBuffer for such a written binding: its pages become bitmap-tracked, so a guest read
+	// of a page the GPU did not write needs no download (RefineWithWriteBitmap).
+	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferTracked(uint64_t vaddr, uint64_t size,
+	                                                               bool     is_texel_buffer,
+	                                                               BufferId id = {});
 	[[nodiscard]] StreamBuffer&                GetUtilityBuffer(MemoryUsage usage) noexcept {
 		switch (usage) {
 			case MemoryUsage::Upload: return m_staging_buffer;
@@ -163,8 +176,16 @@ private:
 	using PageTable = MultiLevelPageTable<BufferId, CACHING_PAGEBITS, 44, 20>;
 	static_assert(CACHING_PAGESIZE == (uint64_t {1} << PageTable::kPageBits));
 	void WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source, uint64_t size);
-	// Records bytes a binding makes GPU-written (after SynchronizeBuffer marked their pages).
-	void MarkGpuWritten(uint64_t vaddr, uint64_t size);
+	// Records bytes a binding makes GPU-written (after SynchronizeBuffer marked their pages);
+	// `tracked`: through a write-bitmap binding (ObtainBufferTracked).
+	void MarkGpuWritten(uint64_t vaddr, uint64_t size, bool tracked = false);
+	// GPU thread, before the readback of a guest fault on [vaddr, vaddr + size): the tracked pages
+	// of its window that the bitmap shows no finished tracked write wrote leave the GPU-written
+	// set; written ones get their bit cleared and stop being tracked until downloaded. Pages a
+	// tracked write still in flight may write are left as they are (mionstyle7 3524eff9: waiting
+	// for them chased the writes of each new frame).
+	void RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, uint64_t size);
+	void ReportWriteBitmap();
 	void TouchBuffer(const Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
 	void JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumulate_stream_score);
@@ -403,6 +424,23 @@ private:
 	// IsCleanForConcurrentRead; the GPU thread reads them without it.
 	mutable std::shared_mutex                          m_dirty_ranges_mutex;
 	std::vector<PendingWriteReadback>                  m_pending_write_readbacks;
+	// Write bitmap (WriteBitmapAddress): the buffer; the whole pages whose GPU-written bytes all
+	// came through tracked bindings; the tracked writes the GPU may still run, first byte ->
+	// {end, tick} (page-aligned). Guarded by m_dirty_ranges_mutex, as m_gpu_modified_ranges.
+	std::unique_ptr<Buffer>                            m_write_bitmap;
+	bool                                               m_write_bitmap_failed = false;
+	RangeSet                                           m_bitmap_tracked;
+	std::map<uint64_t, std::pair<uint64_t, uint64_t>>  m_bitmap_inflight;
+	struct WriteBitmapStats {
+		uint64_t                              refinements = 0;
+		uint64_t                              dropped     = 0;
+		uint64_t                              written     = 0;
+		uint64_t                              in_flight   = 0;
+		uint64_t                              bindings    = 0;
+		uint64_t                              bytes       = 0;
+		std::chrono::steady_clock::time_point report      = std::chrono::steady_clock::now();
+	};
+	WriteBitmapStats                                   m_bitmap_stats;
 	uint64_t                                           m_direct_readbacks = 0;
 	MemoryTracker                                      m_memory_tracker;
 	StreamBuffer                                       m_staging_buffer;

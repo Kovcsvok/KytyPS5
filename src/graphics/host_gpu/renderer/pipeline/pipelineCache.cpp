@@ -2487,7 +2487,9 @@ void PipelineCache::InitializeProgramDiskCache() {
 		                 "KYTY_PROGRAM_DISK_CACHE=2 forces it)");
 		return;
 	}
-	auto signature = fmt::format("KytyPRG1:{}:{}:bindless={}:float_atomics={}\n", git_hash,
+	// KytyPRG2: records carry the write bitmap's fields (BufferResource::write_tracked,
+	// BindingLayout::write_tracking); the older ones, under any revision, are another file.
+	auto signature = fmt::format("KytyPRG2:{}:{}:bindless={}:float_atomics={}\n", git_hash,
 	                             driver_signature,
 	                             m_graphics.bindless_enabled && Config::BindlessImagesEnabled(),
 	                             Config::FloatImageAtomicsEnabled());

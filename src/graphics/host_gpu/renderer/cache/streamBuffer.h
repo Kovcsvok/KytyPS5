@@ -41,6 +41,9 @@ inline constexpr vk::BufferUsageFlags AllFlags =
 // so the buffer cache can read finished GPU writes without a GPU copy. True once any such
 // buffer exists; submissions then make device writes visible to the host.
 [[nodiscard]] bool AnyMappedDeviceBuffer() noexcept;
+// The host reads device writes to some other mapped device memory (the buffer cache's GPU write
+// bitmap) once their tick completes: from now on, submissions end as with a mapped buffer.
+void RequireHostReadBarrier() noexcept;
 
 // Device-loss triage: prints which buffer with a device address covers the faulting GPU
 // address, live or among the last destroyed ones (and how long ago), or that none does.

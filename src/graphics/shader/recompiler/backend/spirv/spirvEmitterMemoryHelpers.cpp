@@ -60,6 +60,67 @@ void EmitMemoryOffsets(EmitterState& state) {
 		state.memory_dword_lengths[i] =
 		    EmitShaderDataDwordLoad(state, state.program.bindings.BufferLengthDword() + i);
 	}
+	if (state.program.bindings.write_tracking) {
+		const auto load64 = [&](uint32_t dword) {
+			return DeviceAddressFromWords(state, EmitShaderDataDwordLoad(state, dword),
+			                              EmitShaderDataDwordLoad(state, dword + 1u));
+		};
+		const auto start           = state.program.bindings.WriteTrackDword();
+		state.write_bitmap_address = load64(start);
+		for (uint32_t i = 0; i < state.program.bindings.memory_offset_count; i++) {
+			state.write_track_bases[i] = load64(start + 2u + 2u * i);
+		}
+	}
+}
+
+// KYTY_WRITE_BITMAP: a store or atomic through a write-tracked binding sets the bit of its guest
+// page (4 KiB) in the GPU write bitmap; the host then downloads only pages that were written. A
+// binding the host does not track in this draw has a base of 0 and skips it. The word is loaded
+// first and ORed only when the bit is clear (mionstyle7 0b55d9b1): with an atomic for every store,
+// a dispatch writing one region serialised its whole grid on one word (a ~150-instruction compute
+// shader took ~78 ms on an RTX 4070). A stale load only costs one extra atomic.
+static void EmitWriteBitmapMark(EmitterState& state, const MemoryResourceAccess& access,
+                                uint32_t index) {
+	const auto u64     = TypeScalarU64(state);
+	const auto tracked = Binary(state, spv::OpINotEqual, TypeBool(state), access.write_base,
+	                            ConstantDeviceAddress(state, 0));
+	EmitIfCondition(state, tracked, [&]() {
+		const auto element = Unary(state, spv::OpUConvert, u64, index);
+		const auto shift   = access.element_bits == 64u ? 3u : 2u;
+		const auto address = Binary(state, spv::OpIAdd, u64, access.write_base,
+		                            Binary(state, spv::OpShiftLeftLogical, u64, element,
+		                                   ConstantDeviceAddress(state, shift)));
+		const auto page    = Binary(state, spv::OpShiftRightLogical, u64, address,
+		                            ConstantDeviceAddress(state, 12));
+		const auto word    = Binary(state, spv::OpShiftRightLogical, u64, page,
+		                            ConstantDeviceAddress(state, 5));
+		// The bitmap's words (BufferCache::WriteBitmapLimit, 1 TiB): bound ranges end below it,
+		// but the 64-bit atomics' bounds check counts dwords.
+		constexpr uint64_t words = (uint64_t {1} << 40u) / 4096u / 32u;
+		const auto inside = Binary(state, spv::OpULessThan, TypeBool(state), word,
+		                           ConstantDeviceAddress(state, words));
+		EmitIfCondition(state, inside, [&]() {
+			const auto bit = Binary(
+			    state, spv::OpShiftLeftLogical, TypeU32(state), ConstantU32(state, 1),
+			    Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+			           Unary(state, spv::OpUConvert, TypeU32(state), page), ConstantU32(state, 31)));
+			const auto pointer = Unary(state, spv::OpConvertUToPtr, TypePhysicalU32Pointer(state),
+			                           Binary(state, spv::OpIAdd, u64, state.write_bitmap_address,
+			                                  Binary(state, spv::OpShiftLeftLogical, u64, word,
+			                                         ConstantDeviceAddress(state, 2))));
+			const auto current = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpLoad, TypeU32(state), current, pointer,
+			                          spv::MemoryAccessAlignedMask, 4u);
+			const auto unset = Binary(state, spv::OpIEqual, TypeBool(state),
+			                          Binary(state, spv::OpBitwiseAnd, TypeU32(state), current, bit),
+			                          ConstantU32(state, 0));
+			EmitIfCondition(state, unset, [&]() {
+				state.builder.AddFunction(spv::OpAtomicOr, TypeU32(state), state.builder.AllocateId(),
+				                          pointer, ConstantU32(state, spv::ScopeDevice),
+				                          ConstantU32(state, 0), bit);
+			});
+		});
+	});
 }
 
 uint32_t LdsDwordCount(const EmitterState& state) {
@@ -114,12 +175,19 @@ MemoryResourceAccess PrepareStorageBufferResourceAccess(EmitterState& state,
 	const auto array_index =
 	    ResourceForDescriptor(state, IR::DescriptorBindingKind::Buffers, mem.resource);
 	MemoryResourceAccess access {
-	    .kind = mem.kind,
-	    .memory_access = mem.coherent ? spv::MemoryAccessVolatileMask : spv::MemoryAccessMaskNone};
+	    .kind          = mem.kind,
+	    .memory_access = mem.coherent ? spv::MemoryAccessVolatileMask : spv::MemoryAccessMaskNone,
+	    .element_bits  = variable == state.storage_buffer_u64_variable ? 64u : 32u};
 	access.object_pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, pointer_type, access.object_pointer, variable,
 	                          ConstantU32(state, array_index));
 	access.byte_offset = state.memory_byte_offsets[array_index];
+	if (state.emitting_write &&
+	    (mem.kind == IR::ResourceKind::Buffer || mem.kind == IR::ResourceKind::ScalarBuffer) &&
+	    state.program.bindings.write_tracking && mem.resource < state.program.info.buffers.size() &&
+	    state.program.info.buffers[mem.resource].write_tracked) {
+		access.write_base = state.write_track_bases[array_index];
+	}
 	// Some NVIDIA drivers return zero from OpArrayLength for ranges over 2 GiB.
 	// Use the actual bound range, including alignment, without truncating guest memory.
 	access.length = state.memory_dword_lengths[array_index];
@@ -210,6 +278,9 @@ uint32_t EmitMemoryElementPointer(EmitterState& state, const MemoryResourceAcces
 uint32_t EmitStorageBufferElementPointer(EmitterState& state,
                                          const MemoryResourceAccess& access, uint32_t index,
                                          uint32_t pointer_type) {
+	if (access.write_base != 0) {
+		EmitWriteBitmapMark(state, access, index);
+	}
 	const auto pointer = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpAccessChain, pointer_type, pointer, access.object_pointer,
 	                          ConstantU32(state, 0), index);

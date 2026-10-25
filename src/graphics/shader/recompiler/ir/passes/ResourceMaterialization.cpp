@@ -1552,6 +1552,17 @@ bool MaterializeStatsEnabled() {
 	return enabled.load(std::memory_order_relaxed) != 0;
 }
 
+// KYTY_WRITE_BITMAP=1 (live): buffers written at addresses the host cannot bound record the pages
+// they write in a GPU bitmap, so a guest read of a page the shader did not write needs no download
+// (Senaxx df053d75, with mionstyle7's fixes). Wolverine combat 2026-10-25 (KYTY_READBACK_STATS):
+// ~35% of the readback time went to the 2.8 GB heap 0x1210000000, which compute shader
+// 0x4a6967edbcca1f05 binds whole as written; 95-100% of the downloaded bytes were unchanged.
+// Switching it on compiles new permutations of the programs concerned.
+bool WriteBitmapEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_WRITE_BITMAP", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
 MaterializeStats& ThreadMaterializeStats() {
 	thread_local MaterializeStats stats;
 	return stats;
@@ -1631,6 +1642,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.clear();
 	specialization.buffers.reserve(program.info.buffers.size());
+	const bool write_bitmap = WriteBitmapEnabled();
 	for (uint32_t i = 0; i < program.info.buffers.size(); ++i) {
 		bool evaluated = evaluate(program.info.buffers[i].source, snapshot.buffers[i],
 		                          program.info.buffers[i].written);
@@ -1705,6 +1717,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		    .descriptor_swizzle =
 		        program.info.buffers[i].formatted ? descriptor.DstSelXYZW() : DstSel(4, 5, 6, 7),
 		    .zero_stride_oob = descriptor.OutOfBounds() == 0u && stride == 0u,
+		    .write_tracked   = write_bitmap && program.info.buffers[i].written &&
+		                     program.info.buffers[i].image_alias == BufferResource::NoImageAlias &&
+		                     i < program.buffer_writes_bounded.size() &&
+		                     program.buffer_writes_bounded[i] == 0u,
 		});
 	}
 	{
@@ -1826,6 +1842,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		buffers[index].packed_stride      = specialization.buffers[index].packed_stride;
 		buffers[index].descriptor_format  = specialization.buffers[index].descriptor_format;
 		buffers[index].descriptor_swizzle = specialization.buffers[index].descriptor_swizzle;
+		buffers[index].write_tracked      = specialization.buffers[index].write_tracked;
 	}
 	auto& images = program.info.images;
 	const auto original_image_count = images.size();

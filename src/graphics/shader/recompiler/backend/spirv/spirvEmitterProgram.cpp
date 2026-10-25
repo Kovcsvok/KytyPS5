@@ -260,6 +260,14 @@ void EmitDirectInstruction(ValueEmitContext& ctx, const IR::Inst& inst) {
 		ctx.Define(inst, ctx.other_half->Result(inst));
 		return;
 	}
+	// Write bitmap: storage-buffer element pointers made for this instruction mark their pages.
+	struct WriteScope {
+		EmitterState& state;
+		~WriteScope() { state.emitting_write = false; }
+	} write_scope {ctx.state};
+	const auto access        = IR::BufferAccessOf(op);
+	ctx.state.emitting_write = ctx.state.program.bindings.write_tracking &&
+	                           (access == IR::BufferAccess::Write || access == IR::BufferAccess::Atomic);
 	switch (op) {
 #define VALUE_OPCODE(name, ...)                                                                    \
 	case IR::ValueOpcode::name: return Invoke(Emit##name, ctx, inst);
