@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <immintrin.h>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -2907,7 +2908,31 @@ bool BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, ui
 	m_gpu_modified_ranges.ForEachInRange(begin, end - begin, [&](uint64_t from, uint64_t to) {
 		pieces.emplace_back(from, to);
 	});
-	auto*      words  = reinterpret_cast<uint32_t*>(m_write_bitmap->Mapped().data());
+	auto* words = reinterpret_cast<uint32_t*>(m_write_bitmap->Mapped().data());
+	// KYTY_WRITE_BITMAP_BULK_READ (live, default 1): the words of the window are read up front in
+	// 64-byte streaming loads. One uncached 4-byte read per word took most of the ~11 us a
+	// refinement (~450 pages, 14 words) cost the GPU thread (Tracy, combat 2026-10-29). Only the
+	// span of the GPU-written pieces, up to 1 KiB of words; a wider one is read word by word.
+	static auto&   bulk_read  = Common::LiveSwitches::Get("KYTY_WRITE_BITMAP_BULK_READ", 1);
+	const uint64_t first_word =
+	    pieces.empty() ? 0 : Common::AlignDown(pieces.front().first / Page >> 5u, 16u);
+	const uint64_t last_word = pieces.empty() ? 0 : (pieces.back().second - 1) / Page >> 5u;
+	const bool     bulk = bulk_read.load(std::memory_order_relaxed) != 0 && !pieces.empty() &&
+	                  last_word - first_word < 256u;
+	auto&          snapshot = m_bitmap_snapshot;
+	if (bulk) {
+		snapshot.resize(Common::AlignUp(last_word + 1 - first_word, 16u));
+		auto*       source = reinterpret_cast<__m128i*>(words + first_word);
+		auto*       target = reinterpret_cast<__m128i*>(snapshot.data());
+		for (size_t i = 0; i < snapshot.size() / 4u; i++) {
+			_mm_storeu_si128(target + i, _mm_stream_load_si128(source + i));
+		}
+	}
+	const auto read_word = [&](uint64_t word_index) {
+		return bulk && word_index >= first_word && word_index - first_word < snapshot.size()
+		           ? snapshot[word_index - first_word]
+		           : words[word_index];
+	};
 	const auto append = [](std::vector<std::pair<uint64_t, uint64_t>>& runs, uint64_t page) {
 		if (!runs.empty() && runs.back().second == page) {
 			runs.back().second = page + Page;
@@ -2938,7 +2963,7 @@ bool BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, ui
 				if (word_index != cached_index) {
 					flush_word();
 					cached_index = word_index;
-					cached_word  = words[word_index];
+					cached_word  = read_word(word_index);
 					cached_keep  = !in_flight.Empty() && in_flight.Intersects(word_index * WordSpan,
 					                                                          WordSpan);
 				}

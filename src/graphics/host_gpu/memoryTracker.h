@@ -126,7 +126,7 @@ public:
 		static_assert(std::is_nothrow_invocable_v<RangeFunc&, uint64_t, uint64_t>);
 		static_assert(std::is_nothrow_invocable_v<UploadFunc&>);
 		CheckNotInUploadCallback();
-		Iterate<true>(vaddr, size, [](RegionManager*, uint64_t, uint64_t) {});
+		CreateRegions(vaddr, size);
 		const auto* previous_upload_owner = std::exchange(s_upload_owner, this);
 		const auto  upload_region = [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
             manager->lock.lock();
@@ -176,6 +176,12 @@ private:
 	// to read its CPU summary, a cache miss per 4 MiB. Each manager mirrors that summary into
 	// m_cpu_summary_bits, so the walk reads a bitmap word per 256 MiB instead.
 	static bool UseRegionBitmap();
+
+	// KYTY_TRACKER_PRESENT_BITS (live, default 1; Senaxx 6625a63e): every upload made sure each 4 MiB
+	// region of its range existed, a walk over ~700 regions for the 2.7 GiB buffer Wolverine binds
+	// ~29k times a frame. Regions are never removed, so a bit per created region (a word per 256 MiB)
+	// tells when the whole range exists already.
+	void CreateRegions(uint64_t vaddr, uint64_t size);
 
 	// Calls func(manager, offset, bytes) for each existing region of the range whose CPU summary
 	// bit is set (conservative like the summary itself).
@@ -253,6 +259,7 @@ private:
 
 	std::unique_ptr<std::atomic<RegionManager*>[]> m_regions;
 	std::unique_ptr<std::atomic<uint64_t>[]>       m_cpu_summary_bits;
+	std::unique_ptr<std::atomic<uint64_t>[]>       m_present_bits;
 	std::vector<std::unique_ptr<RegionManager>>    m_region_storage;
 	std::mutex                                     m_region_mutex;
 	PageManager&                                   m_page_manager;

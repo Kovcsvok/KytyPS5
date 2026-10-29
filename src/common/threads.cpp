@@ -23,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef KYTY_WIN_CS
 #include <windows.h> // IWYU pragma: keep
@@ -258,6 +259,55 @@ void Thread::ApplyGpuThreadPriority() {
 		applied = wanted;
 		SetCurrentPriority(static_cast<int>(wanted));
 	}
+#ifdef KYTY_WIN_CS
+	// KYTY_GPU_THREAD_CPUS (live, default 0): 1 keeps the thread on the performance cores of a hybrid
+	// CPU (combat 2026-10-29: the GPU thread ran 14% of its time on an i5-14600KF's E-cores).
+	static auto&         cpus         = LiveSwitches::Get("KYTY_GPU_THREAD_CPUS", 0);
+	thread_local int64_t cpus_applied = 0;
+	const auto           cpus_wanted  = cpus.load(std::memory_order_relaxed);
+	if (cpus_wanted != cpus_applied) {
+		cpus_applied = cpus_wanted;
+		DWORD_PTR process_mask = 0;
+		DWORD_PTR system_mask  = 0;
+		if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask) == 0) {
+			return;
+		}
+		DWORD_PTR mask = process_mask;
+		if (cpus_wanted != 0) {
+			// Group 0 only: the performance cores are the highest efficiency class.
+			DWORD length = 0;
+			GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length);
+			std::vector<uint8_t> buffer(length);
+			DWORD_PTR            performance = 0;
+			if (length != 0 && GetLogicalProcessorInformationEx(
+			                       RelationProcessorCore,
+			                       reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+			                           buffer.data()),
+			                       &length) != 0) {
+				int highest = -1;
+				for (DWORD offset = 0; offset < length;) {
+					const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
+					    buffer.data() + offset);
+					if (info->Processor.GroupMask[0].Group == 0) {
+						const int efficiency = info->Processor.EfficiencyClass;
+						if (efficiency > highest) {
+							highest     = efficiency;
+							performance = 0;
+						}
+						if (efficiency == highest) {
+							performance |= static_cast<DWORD_PTR>(info->Processor.GroupMask[0].Mask);
+						}
+					}
+					offset += info->Size;
+				}
+			}
+			if ((performance & process_mask) != 0) {
+				mask = performance & process_mask;
+			}
+		}
+		SetThreadAffinityMask(GetCurrentThread(), mask);
+	}
+#endif
 }
 
 bool Thread::IsMainThread() {

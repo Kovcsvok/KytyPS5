@@ -473,6 +473,7 @@ private:
 		std::chrono::steady_clock::time_point report      = std::chrono::steady_clock::now();
 	};
 	WriteBitmapStats                                   m_bitmap_stats;
+	std::vector<uint32_t>                              m_bitmap_snapshot; // RefineWithWriteBitmap
 	uint64_t                                           m_direct_readbacks = 0;
 	MemoryTracker                                      m_memory_tracker;
 	StreamBuffer                                       m_staging_buffer;

@@ -11,6 +11,31 @@ static_assert(std::atomic<void*>::is_always_lock_free);
 MemoryTracker::MemoryTracker(PageManager& page_manager): m_page_manager(page_manager) {
 	m_regions          = std::make_unique<std::atomic<RegionManager*>[]>(REGION_COUNT);
 	m_cpu_summary_bits = std::make_unique<std::atomic<uint64_t>[]>(SUMMARY_WORDS);
+	m_present_bits     = std::make_unique<std::atomic<uint64_t>[]>(SUMMARY_WORDS);
+}
+
+void MemoryTracker::CreateRegions(uint64_t vaddr, uint64_t size) {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_TRACKER_PRESENT_BITS", 1);
+	ValidateRange(vaddr, size);
+	if (size != 0 && enabled.load(std::memory_order_relaxed) != 0) {
+		const uint64_t first   = vaddr / TRACKER_REGION_SIZE;
+		const uint64_t last    = (vaddr + size - 1) / TRACKER_REGION_SIZE;
+		bool           present = true;
+		for (uint64_t word = first / 64; present && word <= last / 64; word++) {
+			uint64_t mask = ~uint64_t {0};
+			if (word == first / 64) {
+				mask &= ~uint64_t {0} << (first % 64);
+			}
+			if (word == last / 64 && last % 64 != 63) {
+				mask &= (uint64_t {1} << (last % 64 + 1)) - 1;
+			}
+			present = (m_present_bits[word].load(std::memory_order_acquire) & mask) == mask;
+		}
+		if (present) {
+			return;
+		}
+	}
+	Iterate<true>(vaddr, size, [](RegionManager*, uint64_t, uint64_t) {});
 }
 
 bool MemoryTracker::UseRegionBitmap() {
@@ -73,6 +98,7 @@ RegionManager* MemoryTracker::GetOrCreateRegion(uint64_t index) {
 	ptr->SetCpuSummaryBit(&m_cpu_summary_bits[index / 64], uint64_t {1} << (index % 64));
 	m_region_storage.push_back(std::move(manager));
 	m_regions[index].store(ptr, std::memory_order_release);
+	m_present_bits[index / 64].fetch_or(uint64_t {1} << (index % 64), std::memory_order_release);
 	return ptr;
 }
 
