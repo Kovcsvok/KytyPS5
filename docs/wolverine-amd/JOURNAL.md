@@ -624,3 +624,6 @@ A felhasználó nem tudta reprodukálni a mérés utáni `ErrorDeviceLost`-ot �
 - **`KYTY_GPU_THREAD_CPUS`** (alap 0): 1 = a GPU-szál és a record-szál (`ApplyGpuThreadPriority`) affinitása a legmagasabb `EfficiencyClass`-ú (P-)magokra (0. processzorcsoport); 0 = vissza a folyamat maszkjára.
 - Teszt: harci A/B, A = alap (új kapcsolók 0, `GPU_THREAD_CPUS=0`), B = `PRESENT_BITS=1, BULK_READ=1, TRUST_HASH=1`, C = B + `GPU_THREAD_CPUS=1`. Nézd: `gpu busy %`, `gpu on e-core %`, `gpu_process_ms`, `gpu_protect_ms`.
 - Nyitott, nagyobb tételek: a bitmap protect-churnje (halasztott védés a writer végéig – a címkék sorrendje miatt kockázatos), a GPU-szál SRT-readbackjei indirekt dispatch alatt.
+
+## 2026-10-29 — Opus — `63bdc92` csomag
+CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `63bdc92`, tartalék `emulator-2e0af0d`; az `emulator-5931ea8` lomtárba. A pin marad `5931ea8…`. Új élő sorok: `KYTY_TRACKER_PRESENT_BITS=1`, `KYTY_WRITE_BITMAP_BULK_READ=1`, `KYTY_EXPAND_TRUST_HASH=1`, `KYTY_GPU_THREAD_CPUS=0`. Az Async indító mostantól DGC-vel indul. Következő: harci A/B (A: az új három 0 + CPUS 0, B: az új három 1, C: B + `GPU_THREAD_CPUS=1`).
