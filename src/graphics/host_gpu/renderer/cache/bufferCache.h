@@ -128,6 +128,9 @@ public:
 	[[nodiscard]] bool              IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool              IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	void                            ProcessFaultBuffer();
+	// GPU thread, between submissions: KYTY_EAGER_WRITEBACK (see bufferCache.cpp). True while hot
+	// pages wait for a submitted writer or an eager copy has not landed yet.
+	bool                            EagerWriteback();
 	// GPU thread: writes bytes on a page protected because the GPU wrote to it, without
 	// downloading the page: the host copy through the backing store, the GPU copy in the command
 	// stream, after the GPU's earlier writes. Bytes the GPU had written are then current on both
@@ -361,6 +364,33 @@ private:
 	// The pending tick, or 0 when the main queue must download the window.
 	[[nodiscard]] uint64_t BeginQueueReadback(Buffer& buffer, uint64_t window_begin,
 	                                          uint64_t window_end, uint64_t writer_tick);
+	// Several runs of one buffer in one slot, each with its own pending entry of the same tick
+	// (KYTY_EAGER_WRITEBACK); runs overlapping a landing readback or download are left out.
+	[[nodiscard]] uint64_t BeginQueueReadback(Buffer& buffer,
+	                                          std::span<const std::pair<uint64_t, uint64_t>> runs,
+	                                          uint64_t writer_tick);
+	// KYTY_EAGER_WRITEBACK (see bufferCache.cpp): page -> time of its last guest fault (ms), and
+	// the ticks of the eager copies not landed yet. GPU thread only.
+	std::unordered_map<uint64_t, uint64_t> m_eager_history;
+	std::vector<uint64_t>                  m_eager_ticks;
+	struct EagerStats {
+		uint64_t                              passes    = 0;
+		uint64_t                              posted    = 0;
+		uint64_t                              pages     = 0;
+		uint64_t                              landed    = 0;
+		uint64_t                              redirtied = 0;
+		uint64_t                              joined    = 0;
+		uint64_t                              writer_waits = 0;
+		uint64_t                              no_slot   = 0;
+		uint64_t                              us        = 0;
+		bool                                  pending   = false;
+		std::chrono::steady_clock::time_point last_pass = {};
+		std::chrono::steady_clock::time_point report    = std::chrono::steady_clock::now();
+	};
+	EagerStats m_eager_stats;
+	void       NoteEagerFault(uint64_t page_begin, uint64_t page_end);
+	bool       LandEagerReadbacks();
+	void       ReportEagerWriteback(int64_t age_ms);
 	// Publishes the copy to guest memory. False when the GPU wrote its bytes again meanwhile.
 	bool               LandQueueReadback(uint64_t tick);
 	void               WaitQueueReadback(uint64_t tick) const;

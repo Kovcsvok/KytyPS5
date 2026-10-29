@@ -1021,6 +1021,7 @@ void BufferCache::ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write) 
 	// labels.
 	const auto page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto page_end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	NoteEagerFault(page_begin, page_end);
 	// Pages of an asynchronous write readback stay GPU-owned until its download is
 	// published.
 	CompletePendingWriteReadbacks(page_begin, page_end);
@@ -1322,6 +1323,210 @@ bool BufferCache::TryCopyQueueReadback(Buffer& buffer, uint64_t window_begin, ui
 	return true;
 }
 
+// KYTY_EAGER_WRITEBACK=<ms> (live, default 0 = off; todojuegos67-bot 2363a19f, not measured there):
+// eager write-back of hot GPU-written pages. Wolverine's guest threads read the same GPU-written
+// pages every frame (combat 2026-10-25, KYTY_READBACK_STATS: ~160 reads per frame on 430-480 pages
+// of the 2.8 GB heap 0x1210000000; 60-70% of the readbacks found their writer done), each a fault,
+// a GPU-thread round trip and a readback-queue copy the guest waits for. Here the GPU thread,
+// between submissions and while idle, at most every KYTY_EAGER_WRITEBACK_US (live, default 500),
+// copies every page that faulted within the last <ms> ms and is GPU-written again once the page's
+// writer has executed (WriterTick): on the readback queue as a guest's readback does
+// (KYTY_READBACK_QUEUE_ASYNC slots, runs of one buffer share one, at most half the slots), and
+// publishes the copy when it has landed. The guest then reads the bytes without a fault; one that
+// faults first waits for the same copy. Data is never older than at a fault: only bytes whose
+// writer has finished, and a page the GPU writes again stays protected.
+static uint64_t SteadyMs() {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	                                 std::chrono::steady_clock::now().time_since_epoch())
+	                                 .count());
+}
+
+void BufferCache::NoteEagerFault(uint64_t page_begin, uint64_t page_end) {
+	static auto& eager_ms = Common::LiveSwitches::Get("KYTY_EAGER_WRITEBACK", 0);
+	const auto   age      = eager_ms.load(std::memory_order_relaxed);
+	if (age <= 0 || page_end - page_begin > 16 * TRACKER_PAGE_SIZE) {
+		return;
+	}
+	const auto now_ms = SteadyMs();
+	if (m_eager_history.size() >= 16384) {
+		std::erase_if(m_eager_history, [&](const auto& entry) {
+			return now_ms - entry.second > static_cast<uint64_t>(age);
+		});
+		if (m_eager_history.size() >= 16384) {
+			m_eager_history.clear();
+		}
+	}
+	for (auto page = page_begin; page < page_end; page += TRACKER_PAGE_SIZE) {
+		m_eager_history[page] = now_ms;
+	}
+}
+
+bool BufferCache::EagerWriteback() {
+	static auto& eager_ms    = Common::LiveSwitches::Get("KYTY_EAGER_WRITEBACK", 0);
+	static auto& interval_us = Common::LiveSwitches::Get("KYTY_EAGER_WRITEBACK_US", 500);
+	const auto   age         = eager_ms.load(std::memory_order_relaxed);
+	ReportEagerWriteback(age);
+	const bool landing = LandEagerReadbacks();
+	if (age <= 0) {
+		m_eager_history.clear();
+		m_eager_stats.pending = false;
+		return landing;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	if (start - m_eager_stats.last_pass <
+	    std::chrono::microseconds(std::max<int64_t>(interval_us.load(std::memory_order_relaxed), 0))) {
+		return landing || m_eager_stats.pending;
+	}
+	m_eager_stats.last_pass = start;
+	m_eager_stats.pending   = false;
+	if (m_eager_history.empty() || m_graphics.readback_queue == nullptr ||
+	    !CopyQueueReadbackEnabled()) {
+		return landing;
+	}
+	KYTY_PROFILER_BLOCK("BufferCache::EagerWriteback");
+	m_eager_stats.passes++;
+	auto& master = m_scheduler.GetMasterSemaphore();
+	master.Poll();
+	const auto now_ms = SteadyMs();
+	struct Candidate {
+		BufferId id;
+		uint64_t page   = 0;
+		uint64_t writer = 0;
+	};
+	std::vector<Candidate> candidates;
+	bool                   writer_waiting = false;
+	{
+		std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
+		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
+		for (auto it = m_eager_history.begin(); it != m_eager_history.end();) {
+			const auto page = it->first;
+			if (now_ms - it->second > static_cast<uint64_t>(age)) {
+				it = m_eager_history.erase(it);
+				continue;
+			}
+			++it;
+			// GPU-written again, and not on its way back already.
+			if (!m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE) ||
+			    m_downloading_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+				continue;
+			}
+			const auto* owner = m_page_table.Find(page >> PageTable::kPageBits);
+			if (owner == nullptr || !*owner ||
+			    !m_slot_buffers[*owner].IsInBounds(page, TRACKER_PAGE_SIZE)) {
+				continue;
+			}
+			const auto writer = WriterTick(m_slot_buffers[*owner], page, page + TRACKER_PAGE_SIZE);
+			if (!master.IsFree(writer)) {
+				// Only a submitted writer is worth polling for; one in the open command buffer is
+				// seen again after the next submission.
+				writer_waiting = writer_waiting || writer < m_scheduler.CurrentTick();
+				continue;
+			}
+			candidates.push_back({*owner, page, writer});
+		}
+	}
+	if (writer_waiting) {
+		m_eager_stats.writer_waits++;
+	}
+	std::ranges::sort(candidates, [](const Candidate& a, const Candidate& b) {
+		return a.id.index != b.id.index ? a.id.index < b.id.index : a.page < b.page;
+	});
+	// Guest faults keep at least half of the readback-queue slots.
+	auto budget = static_cast<int64_t>(std::ranges::count_if(
+	                  m_queue_readbacks.slots, [](const auto& slot) { return slot.value == 0; })) -
+	              static_cast<int64_t>(m_queue_readbacks.slots.size() / 2);
+	constexpr size_t                           MaxRuns = 64;
+	std::vector<std::pair<uint64_t, uint64_t>> runs;
+	for (size_t i = 0; i < candidates.size();) {
+		const auto id     = candidates[i].id;
+		uint64_t   writer = 0;
+		size_t     pages  = 0;
+		runs.clear();
+		for (; i < candidates.size() && candidates[i].id.index == id.index && runs.size() <= MaxRuns;
+		     i++) {
+			const auto page = candidates[i].page;
+			if (!runs.empty() && runs.back().second == page) {
+				runs.back().second = page + TRACKER_PAGE_SIZE;
+			} else if (runs.size() == MaxRuns) {
+				break;
+			} else {
+				runs.emplace_back(page, page + TRACKER_PAGE_SIZE);
+			}
+			writer = std::max(writer, candidates[i].writer);
+			pages++;
+		}
+		if (budget <= 0) {
+			m_eager_stats.no_slot++;
+			break;
+		}
+		if (const auto tick = BeginQueueReadback(m_slot_buffers[id], runs, writer); tick != 0) {
+			m_eager_ticks.push_back(tick);
+			m_eager_stats.posted++;
+			m_eager_stats.pages += pages;
+			budget--;
+		}
+	}
+	m_eager_stats.us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                              std::chrono::steady_clock::now() - start)
+	                                              .count());
+	m_eager_stats.pending = writer_waiting;
+	return writer_waiting || !m_eager_ticks.empty();
+}
+
+// GPU thread: publishes the eager copies that have executed, as a guest's FinishWriteReadback
+// would. True while some have not.
+bool BufferCache::LandEagerReadbacks() {
+	if (m_eager_ticks.empty()) {
+		return false;
+	}
+	uint64_t reached = 0;
+	RequireVulkanSuccess(
+	    m_graphics.device.getSemaphoreCounterValue(m_queue_readbacks.semaphore, &reached),
+	    "read queue readback semaphore");
+	for (size_t t = 0; t < m_eager_ticks.size();) {
+		const auto tick = m_eager_ticks[t];
+		if ((tick & QueueReadbackValueMask) > reached) {
+			t++;
+			continue;
+		}
+		m_eager_ticks.erase(m_eager_ticks.begin() + static_cast<std::ptrdiff_t>(t));
+		// A guest fault may have completed it already.
+		const auto pending = std::ranges::find_if(
+		    m_pending_write_readbacks, [&](const PendingWriteReadback& p) { return p.tick == tick; });
+		if (pending != m_pending_write_readbacks.end()) {
+			const bool clean = CompletePendingWriteReadback(
+			    static_cast<size_t>(pending - m_pending_write_readbacks.begin()));
+			m_eager_stats.landed++;
+			if (!clean) {
+				m_eager_stats.redirtied++;
+			}
+		}
+	}
+	return !m_eager_ticks.empty();
+}
+
+// KYTY_EAGER_WRITEBACK, every 5 s (GPU thread).
+void BufferCache::ReportEagerWriteback(int64_t age_ms) {
+	const auto now = std::chrono::steady_clock::now();
+	auto&      s   = m_eager_stats;
+	if (now - s.report < std::chrono::seconds(5)) {
+		return;
+	}
+	if (age_ms > 0 || s.passes != 0) {
+		::printf("Eager write-back (5 s, KYTY_EAGER_WRITEBACK=%lld): %" PRIu64 " passes in %.1f ms, %" PRIu64
+		         " copies of %" PRIu64 " pages posted (%" PRIu64 " passes without a free slot), %" PRIu64
+		         " landed (%" PRIu64 " written again meanwhile), %" PRIu64 " guest faults joined one, %" PRIu64
+		         " passes waited for a writer, %zu hot pages\n",
+		         static_cast<long long>(age_ms), s.passes, static_cast<double>(s.us) / 1000.0, s.posted,
+		         s.pages, s.no_slot, s.landed, s.redirtied, s.joined, s.writer_waits,
+		         m_eager_history.size());
+		std::fflush(stdout);
+	}
+	const auto last_pass = s.last_pass;
+	const bool pending   = s.pending;
+	s                    = {.pending = pending, .last_pass = last_pass, .report = now};
+}
+
 // GPU thread. Returns the tick the guest must wait for, or 0 when the fault is already resolved.
 uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_write,
                                          uint64_t& window_begin, uint64_t& window_end) {
@@ -1337,11 +1542,15 @@ uint64_t BufferCache::BeginWriteReadback(uint64_t vaddr, uint64_t size, bool is_
 	}
 	const auto page_begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto page_end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	NoteEagerFault(page_begin, page_end);
 	// Another guest's readback of this page is still landing: wait for the same download.
 	for (const auto& pending: m_pending_write_readbacks) {
 		if (pending.begin < page_end && page_begin < pending.end) {
 			window_begin = pending.begin;
 			window_end   = pending.end;
+			if (std::ranges::find(m_eager_ticks, pending.tick) != m_eager_ticks.end()) {
+				m_eager_stats.joined++;
+			}
 			return pending.tick;
 		}
 	}
@@ -1594,6 +1803,7 @@ void BufferCache::BeginBackgroundReadback(uint64_t vaddr, uint64_t size) {
 		if (pending.begin < page_end && page_begin < pending.end &&
 		    m_scheduler.IsFree(pending.tick)) {
 			CompletePendingWriteReadback(i);
+			i = 0;
 		} else {
 			i++;
 		}
@@ -1759,6 +1969,19 @@ bool BufferCache::CompletePendingWriteReadback(size_t index) {
 	bool clean = true;
 	if ((pending.tick & QueueReadbackTickBit) != 0) {
 		clean = LandQueueReadback(pending.tick);
+		// KYTY_EAGER_WRITEBACK: the other runs of the same slot landed with it. Callers that walk
+		// the list start over after a completion.
+		std::vector<PendingWriteReadback> siblings;
+		std::erase_if(m_pending_write_readbacks, [&](const PendingWriteReadback& other) {
+			if (other.tick != pending.tick) {
+				return false;
+			}
+			siblings.push_back(other);
+			return true;
+		});
+		for (const auto& sibling: siblings) {
+			UnmarkPublishedRange(sibling.begin, sibling.end);
+		}
 	} else {
 		m_scheduler.Wait(pending.tick);
 		m_scheduler.WaitPriorityOperations(pending.tick);
@@ -1909,12 +2132,25 @@ void BufferCache::ReportRangeTickReadbacks() {
 // main-queue download.
 uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, uint64_t window_end,
                                          uint64_t writer_tick) {
+	const std::pair<uint64_t, uint64_t> window {window_begin, window_end};
+	return BeginQueueReadback(buffer, std::span(&window, 1), writer_tick);
+}
+
+uint64_t BufferCache::BeginQueueReadback(Buffer&                                        buffer,
+                                         std::span<const std::pair<uint64_t, uint64_t>> runs,
+                                         uint64_t writer_tick) {
 	constexpr uint64_t StagingSize = 4ull * 1024 * 1024;
 	auto&              stats       = m_queue_readback_stats;
 	if (m_graphics.readback_queue == nullptr || !CopyQueueReadbackEnabled()) {
 		return 0;
 	}
-	if (OverlapsPendingWriteReadback(window_begin, window_end)) {
+	std::vector<std::pair<uint64_t, uint64_t>> accepted;
+	for (const auto& run: runs) {
+		if (!OverlapsPendingWriteReadback(run.first, run.second)) {
+			accepted.push_back(run);
+		}
+	}
+	if (accepted.empty()) {
 		stats.busy++;
 		return 0;
 	}
@@ -1933,28 +2169,47 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
+	bool                        too_large      = false;
 	const auto                  buffer_address = buffer.CpuAddress();
 	{
 		std::shared_lock lock(m_dirty_ranges_mutex, std::defer_lock);
 		Common::Telemetry::LockCounted(lock, Common::Telemetry::Counter::BufferLockWait);
 		// A queued main-queue download of these bytes would publish them again when it lands.
-		if (m_downloading_ranges.Intersects(window_begin, window_end - window_begin)) {
+		std::erase_if(accepted, [&](const auto& run) {
+			return m_downloading_ranges.Intersects(run.first, run.second - run.first);
+		});
+		if (accepted.empty()) {
 			stats.busy++;
 			return 0;
 		}
-		m_memory_tracker.ForEachDownloadRange<false>(
-		    window_begin, window_end - window_begin, [&](uint64_t address, uint64_t bytes) noexcept {
-			    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
-				    copies.emplace_back(start - buffer_address, total_size, end - start);
-				    total_size += Common::AlignUp(end - start, 64);
+		size_t kept = 0;
+		for (const auto& run: accepted) {
+			const auto first    = copies.size();
+			uint64_t   run_size = total_size;
+			m_memory_tracker.ForEachDownloadRange<false>(
+			    run.first, run.second - run.first, [&](uint64_t address, uint64_t bytes) noexcept {
+				    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+					    copies.emplace_back(start - buffer_address, run_size, end - start);
+					    run_size += Common::AlignUp(end - start, 64);
+				    });
 			    });
-		    });
+			if (run_size > StagingSize) {
+				copies.resize(first);
+				too_large = true;
+				break;
+			}
+			if (copies.size() != first) {
+				// Only a run with bytes to copy gets a pending entry.
+				total_size       = run_size;
+				accepted[kept++] = run;
+			}
+		}
+		accepted.resize(kept);
 	}
 	if (copies.empty()) {
-		return 0;
-	}
-	if (total_size > StagingSize) {
-		stats.too_large++;
+		if (too_large) {
+			stats.too_large++;
+		}
 		return 0;
 	}
 	{
@@ -2058,7 +2313,9 @@ uint64_t BufferCache::BeginQueueReadback(Buffer& buffer, uint64_t window_begin, 
 	const uint64_t tick  = QueueReadbackTickBit | (index << QueueReadbackSlotShift) | value;
 	slot->posted.store(value, std::memory_order_release);
 	slot->state.store(QueueCopyPending, std::memory_order_release);
-	m_pending_write_readbacks.push_back({window_begin, window_end, tick});
+	for (const auto& run: accepted) {
+		m_pending_write_readbacks.push_back({run.first, run.second, tick});
+	}
 	stats.posted++;
 	if (writer_in_flight) {
 		stats.inflight++;
@@ -2183,6 +2440,7 @@ void BufferCache::CompleteQueueReadbacksOf(vk::Buffer source) {
 		const auto* slot = (tick & QueueReadbackTickBit) != 0 ? FindQueueReadbackSlot(tick) : nullptr;
 		if (slot != nullptr && slot->source == source) {
 			(void)CompletePendingWriteReadback(i);
+			i = 0;
 		} else {
 			i++;
 		}
@@ -2223,7 +2481,9 @@ void BufferCache::CompletePendingWriteReadbacks(uint64_t begin, uint64_t end) {
 	for (size_t i = 0; i < m_pending_write_readbacks.size();) {
 		const auto& pending = m_pending_write_readbacks[i];
 		if (pending.begin < end && begin < pending.end) {
+			// A completion may remove entries before i too (KYTY_EAGER_WRITEBACK siblings).
 			CompletePendingWriteReadback(i);
+			i = 0;
 		} else {
 			i++;
 		}

@@ -2,9 +2,11 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RANGESET_H_
 
 #include "common/assert.h"
+#include "common/liveSwitches.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <map>
 
 namespace Libs::Graphics {
@@ -16,6 +18,25 @@ public:
 		auto       it  = m_ranges.lower_bound(address);
 		if (it != m_ranges.begin() && std::prev(it)->second >= address) {
 			it = std::prev(it);
+		}
+		// KYTY_RANGESET_REUSE (live, default 1; upstream 9eef2e14): an addition inside or
+		// extending a range keeps its node instead of erasing and allocating one.
+		static auto& reuse = Common::LiveSwitches::Get("KYTY_RANGESET_REUSE", 1);
+		if (reuse.load(std::memory_order_relaxed) != 0) {
+			if (it == m_ranges.end() || it->first > address) {
+				it = m_ranges.emplace_hint(it, address, end);
+			} else {
+				if (it->second >= end) {
+					return;
+				}
+				it->second = end;
+			}
+			auto next = std::next(it);
+			while (next != m_ranges.end() && next->first <= it->second) {
+				it->second = std::max(it->second, next->second);
+				next       = m_ranges.erase(next);
+			}
+			return;
 		}
 		uint64_t begin = address;
 		uint64_t last  = end;

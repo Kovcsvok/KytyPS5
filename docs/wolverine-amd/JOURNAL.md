@@ -565,3 +565,30 @@ Javítás (élő, a bitmap mellett):
 - **`KYTY_WRITE_BITMAP_UNPROTECT`** (élő, alap 1): a finomítás az eldobott lapfutásokat rögtön feloldja (`UnmarkRegionAsGpuModified`), kivéve ami futó letöltéssel (`m_downloading_ranges`, függő írási visszaolvasás) fed át; ha a hibázó lap is köztük van, a hívó letöltés nélkül visszatér. Napló: `…, N unprotected`.
 - A finomítás a bitmapet zár nélkül olvassa: a követett halmazt, a futó írásokat és a GPU-írt halmazt csak a GPU-szál módosítja; a zár csak a halmazok módosítását fedi.
 - Teszt: ABBA `KYTY_WRITE_BITMAP` 0 / 1 harcban; ha jobb, `KYTY_WRITE_BITMAP_UNPROTECT` 0 / 1 is.
+
+## 2026-10-29 — Opus — upstream átnézése (`83f8bfd3` → `5e837a9b`, 95 commit)
+A 10-25-i átnézés óta. Az águnk az upstreammel nincs összefésülve (322 commit hiányzik), az átvétel kézi portolás. A Frank fork (`mn3ema/KytyPS5-Frank`) 10-21 óta nem változott.
+- **Zömében más játékok / helyesség:** shader-utasítások (S_QUADMASK, 16 és 24 bites szorzások, tesszelláció: quad domain, fractional-even, CCW), NGS2/AudioOut2, savedata, memória-refaktor (`ffc81377`, `09753bf8`, 448 MiB flexible memory), launcher, GT7 DCC. Nem a mi szűk keresztmetszetünk (vendégszálak visszaolvasási várakozása).
+- **Már megvan nálunk:** `2463e3aa` (EOP-címke a backing store-ba): a `PublishLabelAtCompletion` eleve `WriteBacking`-gel ír. `1be1c6c4` visszavonja az `a358b84`-et (CP-oldali flip-várás): nálunk ez `KYTY_FLIP_WAIT_SUSPEND`, alap 0, nincs teendő.
+- **Indirekt rajzolás GPU-ról olvasott rekordokból** (`a5b3673a`, `a833e1b7`): az upstream a `DRAW_INDIRECT_MULTI` rekordjait a GPU-val olvastatja, a patchelt vertex/instance SGPR-eket a VS prológ tölti a Vulkan BaseVertex/BaseInstance-ből. Nálunk a `DrawIndirectMulti` a GPU-szálon CPU-val olvassa a rekordokat (és a count-ot), és a `DRAW_INDIRECT` csomag SGPR-címeit (`buffer[1..2]`) figyelmen kívül hagyja. Az alapinfrastruktúra (GPU-rekordos multi-draw) hiányzik, shaderkódot érint; most a GPU-szál nem a plafon, ezért halasztva.
+- **Kicsi, átvehető:** `9eef2e14` range-set csomópont-újrahasznosítás → átvéve **`KYTY_RANGESET_REUSE`** (élő, alap 1) kapcsolóval (`rangeSet.h`, a `m_gpu_modified_ranges`, `m_downloading_ranges` stb. `Add`-ja: a már lefedett vagy bővített tartomány nem foglal új csomópontot). Shader-fordítást nem érint.
+- **Nem vettem át (most):** `fd6b28c4` (`-march=x86-64-v3 -ffp-contract=off`): fordítási kapcsoló, élőben nem A/B-zhető, várható nyereség pár %; `7eb8abb2`, `a526a8b9`, `3f9666ac` (IR-fordítás gyorsítása, csak a shader-fordítás idejére hat); `1ec69f8e` + `597137e8` (dinamikus cull/front face, kevesebb pipeline), nálunk a `pipelineCache` erősen eltér.
+
+## 2026-10-29 — Opus — fork-újraszkennelés (`forkscan`, 10-25 óta) és eager write-back
+`list_forks.py` újra: 1299 fork, 1067 aktív, 3298 ág (6 hiba); 10-25 óta 143 repóban 480 ág új vagy változott (`D:\KytyAnalysis\forkscan\forks-1029.json`, `key-heads-1029.txt`). Nem változott: Revi, mionstyle7, NeySlim, ClGratton, AndrewsK30, IDXTRI, Frank. A Senaxx `main` és az Xx-LiDAF `main` most az upstreamet követi, saját commit nélkül.
+- **`todojuegos67-bot` (Wolverine-fork), 10-25–27:** a zöme HWRT-effekt (RT AO/GI/fények/tükröződés), latency/pad-late, RAM-profilok, FSR/DLSS FG. Ránk vonatkozik:
+  - `2edc93be` natív VRSQRTPS: náluk 1–2,4 M trap / 5 s. **Nálunk nincs ilyen trap**: VRSQRTPS-emuláció csak `--amd-cpu`-val, ami ki van kapcsolva. A gép Intel i5-14600KF; az INSERTQ trap, de a naplóban nincs nyoma.
+  - `fe5cd063` `KYTY_REPEAT_READ_WINDOW_KB=256`: újrahibázó lapok kisebb ablaka. Nálunk erre a `KYTY_READBACK_SPARSE_KB=512` + `FAULT_WIDEN_KB` felel.
+  - `21a75345` / `5796018b` / `e52d49ad`: `draw.state` / resource memo / lookup cache. A GPU-szál most nem plafon; később.
+  - **`2363a19f` `KYTY_EAGER_WRITEBACK`** (náluk nem mért): átvéve, lásd lent.
+- chenxiao07 `experiment/perf-40fps`: Demon's Souls/DLSS/Steam Deck, „readback span” a grafikus soron; nem a mi szűk keresztmetszetünk.
+
+**Új (élő, alap 0, shader-fordítást nem érint): `KYTY_EAGER_WRITEBACK=<ms>`** (+ `KYTY_EAGER_WRITEBACK_US`, alap 500)
+- A GPU-szál a beküldések között és üresjáratban, legfeljebb 500 µs-onként végigmegy az elmúlt `<ms>` ms-ban hibázott lapokon (`m_eager_history`, a `BeginWriteReadback` és a `ReadMemoryOnGpu` rögzíti, legfeljebb 16 lap / hiba). Ha egy lap újra GPU-írt, nincs úton letöltés, és az írója (`WriterTick`, lapra) végzett, a lapot előre visszamásolja. Ugyanazt a readback-queue slotot használja, mint a vendég aszinkron visszaolvasása (`BeginQueueReadback` most futamlistát is fogad: egy puffer ≤ 64 futama egy slotban, futamonként külön függő bejegyzés ugyanazzal a tickkel). Legfeljebb a slotok fele mehet erre, a többi a vendéghibáké.
+- A kész másolatot a `LandEagerReadbacks` publikálja (`CompletePendingWriteReadback`), ugyanúgy, mint a vendég `FinishWriteReadback`-je: a lap feloldódik, a vendég hiba nélkül olvas. Ha a vendég előbb hibázik, ugyanarra a másolatra vár (`joined`). A `CompletePendingWriteReadback` egy slot összes futamát egyszerre zárja le, a listát bejáró hívók ezért elölről kezdik.
+- Üresjáratban, ha forró lap vár egy már beküldött íróra vagy másolatra, a GPU-szál 0,5 ms-onként felébred (idle jelzéssel, mint a forrásban).
+- Napló 5 s-onként: `Eager write-back (5 s, KYTY_EAGER_WRITEBACK=N): … passes in X ms, … copies of … pages posted, … landed (… written again meanwhile), … guest faults joined one, … passes waited for a writer, … hot pages`. A `Queue readbacks` sor `posted` értéke az eager másolatokat is számolja.
+- Kockázat: egy menet a GPU-szálnak ~0,1 ms is lehet (~500 forró lap). Ha a GPU-szál drágul, növeld a `KYTY_EAGER_WRITEBACK_US`-t. Hiba esetén `KYTY_EAGER_WRITEBACK=0`.
+- Teszt: harci A/B `KYTY_EAGER_WRITEBACK` 0 / 100; nézd a `readback_wait_ms`-ot, a `guest_faults`-ot és a GPU-szál busy-t.
+
+Ugyanebben a buildben: `757c95c` (írási bitmap: feloldás + zár nélküli olvasás; a 10-25-i build artifactja lejárt, nem volt telepítve) és `KYTY_RANGESET_REUSE`. A program-cache pin marad `5931ea8…` (shader-fordítás nem változott).
