@@ -635,3 +635,20 @@ CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `6
 - **C:** `gpu on e-core %` 4,3 → 0 (A-ban most csak 4,3%, nem 14%), de a GHz 2,93 → 2,26, `spin_lock_ms` 3,8 → 13,4, „unexplained” off-CPU 0,1 → 7,5 ms: a P-magokra kötve a szál többet vár, mint amennyit nyer.
 - **Döntés:** élőben mind a négy 0 (`TRACKER_PRESENT_BITS`, `WRITE_BITMAP_BULK_READ`, `EXPAND_TRUST_HASH`, `GPU_THREAD_CPUS`); a kód marad, A/B-zhető.
 - A GPU-szál (számlálók, ~21 fps, ms / képkocka): `gpu_process_ms` 40, ebből Materialize 9,3, szinkron readback 5,3, submit 4,7, protect 4,5, buildkey 0,8, findbuffers 0,95, record 0,8; ~14 ms a többi rajzolás-/dispatch-előkészítés (~2500 művelet / képkocka). 30 fps-hez ~8–10 ms kell le.
+
+## 2026-10-29 — Opus — az írási bitmap protect-churnje: kódelemzés és terv (még nincs kód)
+**Mérőszámok** (`Write bitmap` sor, harc, 5 s): ~25 ezer finomítás, **~10–12 M lap eldobva nem írtként, ~7 ezer írt** (99,9% nem írt), ~5 TB kötött tartomány (~50 ezer követett kötés). A GPU-szálon `gpu_protect_ms` ~4,5 ms / képkocka; a vendégszálak laphiba-ideje ~50 ms / képkocka (minden szál összesen).
+**Mechanizmus:** `ObtainBufferTracked` → `SynchronizeBuffer(is_written=true)` → a tracker a teljes kötést GPU-módosítottnak jelöli (no-access védés), `MarkGpuWritten` → `m_gpu_modified_ranges`. Vendéghiba → `BeginWriteReadback` / `ReadMemoryOnGpu` → `RefineWithWriteBitmap` → a nem írt lapokat kiveszi és `UnmarkRegionAsGpuModified`-dal feloldja → a következő kötés újra védi. Képkockánként ~80 ezer lap kétszer vált védést.
+**Címkék:** élesben `KYTY_LABELS_AFTER_GPU=1` – a címkét a scheduler completion szála írja (`PublishLabelAtCompletion` → `DeferPriorityOperation` → `WriteBacking`), amint a tick lefut, nem a GPU-szál. A `m_gpu_modified_ranges`-t 27 hely használja, a GPU-szál zár nélkül olvassa (csak ő írja).
+**Terv (`KYTY_WRITE_BITMAP_DEFER`, élő, alap 0):**
+1. Kötéskor (GPU-szál) a feltöltés olvasási szinkronnal megy, a tartomány a mostanihoz hasonlóan bekerül a `m_gpu_modified_ranges`-be és a `m_bitmap_tracked`-be, de a tracker nem védi no-access-re: a tiszta lapok maradnak írásfigyeltek (csak olvasható). A GPU-szál saját olvasásai (SRT, indirekt argumentumok) a `m_gpu_modified_ranges` alapján döntenek, így nem változnak.
+2. A kötés tickjére egy prioritásos művelet (completion szál, ticksorrendben a későbbi címkék előtt): kiolvassa a tartomány bitjeit, és csak a bit=1 lapokat jelöli GPU-módosítottnak (no-access). Ehhez kell: a priority-sor FIFO legyen tickenként, és a tracker szálbiztos jelölése.
+3. Vendég írási hibája (`InvalidateMemory`): ha a tracker nem GPU-módosított, de a lap a `m_gpu_modified_ranges`-ben van (megosztott zár), akkor a readback útra megy (`BeginWriteReadback`: vár a writerre, finomít, csak az írtat tölti le). A `KYTY_FAULT_WIDEN_KB` szélesítése ezeket a lapokat kihagyja.
+4. A finomítás a soha nem jelölt lapoknál csak a `m_gpu_modified_ranges`-ből vesz ki, `UnmarkRegionAsGpuModified` nélkül (különben a tracker watcher-számai elcsúsznak → `FailFast`).
+**Kockázatok:**
+- tracker-invariánsok (watcher-számok, `FailFast`);
+- a címkesorrend: az EOP-megszakításoknak és a flipeknek is a feloldás után kell jönniük;
+- a draw prep scanner `FindConcurrentCleanBacking`-je: ellenőrizni kell, hogy nem tisztának látja-e a halasztott lapokat;
+- a futó írás közbeni vendégolvasás a régi bájtot látja (PS5-ön is verseny).
+
+**Várható nyereség:** a GPU-szálon a protect ~3–4 + a finomítás ~2–3 ms / képkocka; a vendégeknél a nem írt lapokon eső olvasási hibák eltűnnek. Mérés előtte (build nélkül): `KYTY_FAULT_STATS=1` harcban → a `Faults (5 s): … writes, … reads` arány és a hibahelyek ideje.
