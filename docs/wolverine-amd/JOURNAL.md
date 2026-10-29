@@ -627,3 +627,11 @@ A felhasználó nem tudta reprodukálni a mérés utáni `ErrorDeviceLost`-ot �
 
 ## 2026-10-29 — Opus — `63bdc92` csomag
 CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `63bdc92`, tartalék `emulator-2e0af0d`; az `emulator-5931ea8` lomtárba. A pin marad `5931ea8…`. Új élő sorok: `KYTY_TRACKER_PRESENT_BITS=1`, `KYTY_WRITE_BITMAP_BULK_READ=1`, `KYTY_EXPAND_TRUST_HASH=1`, `KYTY_GPU_THREAD_CPUS=0`. Az Async indító mostantól DGC-vel indul. Következő: harci A/B (A: az új három 0 + CPUS 0, B: az új három 1, C: B + `GPU_THREAD_CPUS=1`).
+
+## 2026-10-29 — Opus — harci A/B: a `63bdc92` GPU-szál-kapcsolói (DGC-vel)
+`experiment_2026-10-29_175626` (27 × 10 s, ABC CBA, harc, DGC be). A = új kapcsolók 0; B = `TRACKER_PRESENT_BITS=1`, `WRITE_BITMAP_BULK_READ=1`, `EXPAND_TRUST_HASH=1`; C = B + `GPU_THREAD_CPUS=1`.
+- **FPS:** A 20,9; B 20,2, **−3,2% (±5,2) n.s.**; C 18,0, −7,7% (±12,4) n.s., egy 13,7 s-os megakadással (abban a blokkban a GPU is állt, `Label waits` 663 felfüggesztve, VRAM 13 432 / 14 651 MiB – az ok nem biztosan az affinitás).
+- **B mechanizmus:** `gpu_process_ms` 40,2 → 40,9, `gpu_protect_ms` 4,5 → 5,5, `buildkey_ms` 0,77 → 0,52 – a Tracyben látott megtakarítás (`RebindBuffers` saját 4,8, `Refine` saját 2,2, `Expand` 1,9 ms) a profilozó nélkül nem jelenik meg. **Tanulság:** a sűrű, rövid zónák (pl. `MemoryTracker::Upload` 29 ezer / képkocka, ~80 ns) Tracy-overheadje a szülő saját idejébe kerül; ilyen tételeknél a telemetria-számlálók a mérvadók.
+- **C:** `gpu on e-core %` 4,3 → 0 (A-ban most csak 4,3%, nem 14%), de a GHz 2,93 → 2,26, `spin_lock_ms` 3,8 → 13,4, „unexplained” off-CPU 0,1 → 7,5 ms: a P-magokra kötve a szál többet vár, mint amennyit nyer.
+- **Döntés:** élőben mind a négy 0 (`TRACKER_PRESENT_BITS`, `WRITE_BITMAP_BULK_READ`, `EXPAND_TRUST_HASH`, `GPU_THREAD_CPUS`); a kód marad, A/B-zhető.
+- A GPU-szál (számlálók, ~21 fps, ms / képkocka): `gpu_process_ms` 40, ebből Materialize 9,3, szinkron readback 5,3, submit 4,7, protect 4,5, buildkey 0,8, findbuffers 0,95, record 0,8; ~14 ms a többi rajzolás-/dispatch-előkészítés (~2500 művelet / képkocka). 30 fps-hez ~8–10 ms kell le.
