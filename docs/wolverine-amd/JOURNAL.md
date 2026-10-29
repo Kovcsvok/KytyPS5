@@ -592,3 +592,6 @@ A 10-25-i átnézés óta. Az águnk az upstreammel nincs összefésülve (322 c
 - Teszt: harci A/B `KYTY_EAGER_WRITEBACK` 0 / 100; nézd a `readback_wait_ms`-ot, a `guest_faults`-ot és a GPU-szál busy-t.
 
 Ugyanebben a buildben: `757c95c` (írási bitmap: feloldás + zár nélküli olvasás; a 10-25-i build artifactja lejárt, nem volt telepítve) és `KYTY_RANGESET_REUSE`. A program-cache pin marad `5931ea8…` (shader-fordítás nem változott).
+
+## 2026-10-29 — Opus — `2e0af0d` csomag
+CI zöld elsőre (run 40892035185). `C:\Games\Wolverine-AMD-Async\emulator` = `2e0af0d`, tartalék `emulator-5931ea8`; az `emulator-395e39f` lomtárba. A `Play Wolverine AMD Async.bat` pinje marad `5931ea8…` (a shader-fordítás nem változott). Új élő sorok a `kyty_live.txt` végén: `KYTY_EAGER_WRITEBACK=0`, `KYTY_EAGER_WRITEBACK_US=500`, `KYTY_RANGESET_REUSE=1`, `KYTY_WRITE_BITMAP_UNPROTECT=1`. Következő: harci A/B, A = alap, B = `WRITE_BITMAP=1`, C = `EAGER_WRITEBACK=100`.
