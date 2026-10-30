@@ -689,3 +689,7 @@ CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `6
   1. Rövid harc `KYTY_WRITE_BITMAP_DEFER=1` + `KYTY_FAULT_STATS=1`: grafikai hiba / leállás?
   2. Harci A/B `DEFER` 0 / 1: `Faults (5 s) … reads`, `guest_fault_ms`, `gpu_readmem_ms`, completion-szál ms.
 - **Kockázat:** ha a completion szál munkája sok, a címkék késnek (a ms-szám mutatja). Hiba esetén `KYTY_WRITE_BITMAP_DEFER=0`.
+
+## 2026-10-30 — Opus — `99b9490e` telepítve
+- CI run `41077915702` sikeres. `C:\Games\Wolverine-AMD-Async\emulator` = `99b9490e`, tartalék `emulator-63bdc92`; az `emulator-2e0af0d` és a letöltött artifact a lomtárba került. A `Kyty.ini` és a csomag `.bat`-jai változatlanok, a pin marad `5931ea8…`.
+- `kyty_live.txt`: törölve a kódból kivett kapcsolók sorai (`KYTY_EAGER_WRITEBACK`, `_US`, `KYTY_TRACKER_PRESENT_BITS`, `KYTY_WRITE_BITMAP_BULK_READ`, `KYTY_EXPAND_TRUST_HASH`, `KYTY_GPU_THREAD_CPUS`), új: `KYTY_WRITE_BITMAP_DEFER=0`. A többi sor mind létező kapcsoló.
