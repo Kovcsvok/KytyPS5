@@ -186,10 +186,6 @@ private:
 	// for them chased the writes of each new frame). With KYTY_WRITE_BITMAP_UNPROTECT the dropped
 	// pages lose their protection too; true when the faulting pages were among them.
 	bool RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, uint64_t size);
-	// KYTY_WRITE_BITMAP_DEFER (completion thread, at the tick of a tracked binding [first, last)):
-	// its tracked pages the bitmap shows unwritten become readable before the guest can learn the
-	// writes completed (labels follow in the same queue). They stay GPU-written until refined.
-	void ReleaseUnwrittenPages(uint64_t first, uint64_t last, uint64_t tick);
 	void ReportWriteBitmap();
 	void TouchBuffer(const Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
@@ -447,19 +443,6 @@ private:
 		std::chrono::steady_clock::time_point report      = std::chrono::steady_clock::now();
 	};
 	WriteBitmapStats                                   m_bitmap_stats;
-	// KYTY_WRITE_BITMAP_DEFER: bumped under the lock whenever a refinement clears bits, so a
-	// release that read the bits without the lock can tell; the binding last queued per first
-	// page (GPU thread); the completion thread's counts, reported with the bitmap's.
-	std::atomic<uint64_t>                              m_bitmap_clear_seq {0};
-	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> m_defer_queued;
-	struct DeferStats {
-		std::atomic<uint64_t> queued {0};
-		std::atomic<uint64_t> superseded {0};
-		std::atomic<uint64_t> aborted {0};
-		std::atomic<uint64_t> released {0};
-		std::atomic<uint64_t> us {0};
-	};
-	DeferStats                                         m_defer_stats;
 	uint64_t                                           m_direct_readbacks = 0;
 	MemoryTracker                                      m_memory_tracker;
 	StreamBuffer                                       m_staging_buffer;

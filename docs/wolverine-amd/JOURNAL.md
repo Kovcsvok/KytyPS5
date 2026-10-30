@@ -693,3 +693,12 @@ CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `6
 ## 2026-10-30 — Opus — `99b9490e` telepítve
 - CI run `41077915702` sikeres. `C:\Games\Wolverine-AMD-Async\emulator` = `99b9490e`, tartalék `emulator-63bdc92`; az `emulator-2e0af0d` és a letöltött artifact a lomtárba került. A `Kyty.ini` és a csomag `.bat`-jai változatlanok, a pin marad `5931ea8…`.
 - `kyty_live.txt`: törölve a kódból kivett kapcsolók sorai (`KYTY_EAGER_WRITEBACK`, `_US`, `KYTY_TRACKER_PRESENT_BITS`, `KYTY_WRITE_BITMAP_BULK_READ`, `KYTY_EXPAND_TRUST_HASH`, `KYTY_GPU_THREAD_CPUS`), új: `KYTY_WRITE_BITMAP_DEFER=0`. A többi sor mind létező kapcsoló.
+
+## 2026-10-30 — Opus — `KYTY_WRITE_BITMAP_DEFER` mérés: **nem vált be, kivéve**
+- **Biztonsági kör** (DEFER=1 + `KYTY_FAULT_STATS=1`, `run_2026-10-30_164041.log`, ~40 s): nincs leállás. Az olvasási hibák 5 s-onként ~15 ezerről **1,4–3 ezerre** estek (az írásiak maradtak 45–58 ezer), a finomítások 17 ezerről 3–10 ezerre. A completion szál viszont 5 s-onként **270–970 ms**-ot dolgozott, és 22–79 **millió** lapot engedett el: a követett kötések teljes tartományát (5 s alatt 1,6–4 TB kötés), mert minden kötés újravédi az egészet.
+- **ABBA 3 perc** (`experiment_2026-10-30_164257.json`): B (DEFER) **−14,2% ±6,3** (17,8 → 15,3 fps), p99 118 → 184 ms. Képkockánként (A → B):
+  - `gpu_protect_ms` 4,9 → **7,9**: a következő kötés újravédi, amit a completion szál elengedett.
+  - `readback_wait_ms` 6,8 → 11,3, `gpu_fence_ms` 6,3 → 8,4, `gpu_cond_ms` 12,4 → 15,3: a címkék később jönnek.
+  - `guest_fault_ms` csak 54,6 → 52,5, pedig a hibák száma 888 → 733. A nem írt lapokon eső olvasási hibák tehát olcsók voltak; a ~150 µs-os átlagot a valódi letöltések adták.
+- **Tanulság:** a protect-churn ára a GPU-szálon a kötéskori újravédés (~4,9 ms / képkocka), és arányos azzal, amit előtte feloldottak. Ha még többet oldunk fel, ez nő. Csak az segítene, ha kötéskor eleve kevesebbet védenénk.
+- **Kód kivéve:** a 5 forrásfájl a `d3721f2e` szerinti állapotban, a `kyty_live.txt` sora törölve. A telepített `99b9490e`-ben a kapcsoló alapból 0, így ártalmatlan.

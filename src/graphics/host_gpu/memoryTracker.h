@@ -31,11 +31,6 @@ public:
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UntrackMemory(uint64_t vaddr, uint64_t size);
-	// KYTY_WRITE_BITMAP_DEFER (completion thread): RegionManager::ReleaseGpuPending over the range;
-	// returns the pages that became readable.
-	uint64_t ReleaseGpuPending(uint64_t vaddr, uint64_t size, uint64_t completed_tick);
-	// The latest tick a GPU write marked vaddr's region with (0: none, or no region).
-	[[nodiscard]] uint64_t GpuMarkTick(uint64_t vaddr) const noexcept;
 	// Calls func(address, bytes) for each part of the range, one per tracker region, that may
 	// hold CPU-dirty pages (lock-free summaries: false is exact, true is conservative).
 	template <typename Func>
