@@ -122,6 +122,19 @@ void MemoryTracker::UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
 	});
 }
 
+uint64_t MemoryTracker::CloseOpenPages(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	uint64_t pages = 0;
+	Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		if (!manager->MaybeModified<DirtySource::Gpu>()) {
+			return;
+		}
+		std::scoped_lock lock(manager->lock);
+		pages += manager->CloseOpen(manager->GetCpuAddr() + offset, bytes);
+	});
+	return pages;
+}
+
 void MemoryTracker::UntrackMemory(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	std::vector<RegionManager*> managers;

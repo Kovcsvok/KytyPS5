@@ -953,6 +953,7 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	// Keep restart off in that case; fail if we actually find the value.
 	// Scan before preparing draw resources: readback can restart the command buffer.
 	EXIT_NOT_IMPLEMENTED(source.address == 0);
+	LibKernel::Memory::GuardGpuThreadRead(source.address, source.size);
 	const auto* indices = reinterpret_cast<const uint8_t*>(source.address);
 	for (uint64_t offset = 0; offset < source.size; offset += element_size) {
 		uint32_t index = 0;
@@ -1194,6 +1195,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	auto resolved_emit  = emit;
 	auto resolved_index = index_source;
 	resolved_emit.indirect_args = 0;
+	LibKernel::Memory::GuardGpuThreadRead(emit.indirect_args,
+	                                      sizeof(vk::DrawIndexedIndirectCommand));
 	if (draw.IsIndexed()) {
 		vk::DrawIndexedIndirectCommand args {};
 		std::memcpy(&args, reinterpret_cast<const void*>(emit.indirect_args), sizeof(args));

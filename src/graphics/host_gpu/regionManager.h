@@ -7,7 +7,10 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 
+#include <algorithm>
 #include <atomic>
+#include <bit>
+#include <memory>
 #include <mutex>
 #include <utility>
 
@@ -77,6 +80,79 @@ inline std::atomic<uint64_t> g_cpu_dirty_epoch {1};
 // Bumped by the GPU thread when it starts a guest submission (its first slice).
 inline std::atomic<uint64_t> g_guest_submission_seq {1};
 
+// KYTY_WRITE_PREDICT: the guest pages tracked GPU writes are known to write (or the GPU thread
+// reads itself), one bit per page below LOWER_ADDRESS_SIZE, the write bitmap's reach (32 MiB).
+// Never cleared; any thread notes pages.
+class WriteHistory final {
+public:
+	WriteHistory(): m_bits(std::make_unique<std::atomic<uint64_t>[]>(Words)) {}
+
+	KYTY_CLASS_NO_COPY(WriteHistory);
+
+	void Note(uint64_t vaddr, uint64_t size) noexcept {
+		if (size == 0 || vaddr >= LOWER_ADDRESS_SIZE) {
+			return;
+		}
+		const uint64_t last = (std::min(vaddr + size, LOWER_ADDRESS_SIZE) + TRACKER_PAGE_SIZE - 1) /
+		                      TRACKER_PAGE_SIZE;
+		for (uint64_t page = vaddr / TRACKER_PAGE_SIZE; page < last;) {
+			const uint64_t begin = page % 64;
+			const uint64_t end   = std::min<uint64_t>(64, begin + (last - page));
+			const uint64_t mask  = (end == 64 ? ~uint64_t {0} : (uint64_t {1} << end) - 1) &
+			                      (~uint64_t {0} << begin);
+			const auto old = m_bits[page / 64].fetch_or(mask, std::memory_order_relaxed);
+			m_pages.fetch_add(static_cast<uint64_t>(std::popcount(mask & ~old)),
+			                  std::memory_order_relaxed);
+			page += end - begin;
+		}
+	}
+
+	// The pages of the tracker region at region_base predicted written: all pages of each block of
+	// block_pages (a power of two, at most a region) that holds a noted page.
+	void Guarded(uint64_t region_base, size_t block_pages, RegionBits& out) const noexcept {
+		constexpr size_t RegionWords = TRACKER_REGION_PAGES / 64;
+		out.Clear();
+		if (region_base >= LOWER_ADDRESS_SIZE) {
+			out.Fill();
+			return;
+		}
+		const auto* words = &m_bits[region_base / TRACKER_PAGE_SIZE / 64];
+		if (block_pages >= 64) {
+			const size_t group = std::min(block_pages / 64, RegionWords);
+			for (size_t word = 0; word < RegionWords; word += group) {
+				uint64_t any = 0;
+				for (size_t i = 0; i < group; i++) {
+					any |= words[word + i].load(std::memory_order_relaxed);
+				}
+				if (any != 0) {
+					out.SetRange(word * 64, (word + group) * 64);
+				}
+			}
+			return;
+		}
+		const uint64_t lane_mask = (uint64_t {1} << block_pages) - 1;
+		for (size_t word = 0; word < RegionWords; word++) {
+			const auto bits = words[word].load(std::memory_order_relaxed);
+			if (bits == 0) {
+				continue;
+			}
+			for (size_t lane = 0; lane < 64; lane += block_pages) {
+				if (((bits >> lane) & lane_mask) != 0) {
+					out.SetRange(word * 64 + lane, word * 64 + lane + block_pages);
+				}
+			}
+		}
+	}
+
+	[[nodiscard]] uint64_t Pages() const noexcept { return m_pages.load(std::memory_order_relaxed); }
+
+private:
+	static constexpr uint64_t Words = LOWER_ADDRESS_SIZE / TRACKER_PAGE_SIZE / 64;
+
+	std::unique_ptr<std::atomic<uint64_t>[]> m_bits;
+	std::atomic<uint64_t>                    m_pages {0};
+};
+
 class RegionManager final {
 public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
@@ -132,7 +208,62 @@ public:
 		if constexpr (source == DirtySource::Cpu) {
 			UpdateProtection<!enable, false>();
 		} else {
+			m_gpu_open.UnsetRange(start, end);
+			m_gpu_shadow.UnsetRange(start, end);
 			UpdateProtection<enable, true>();
+		}
+	}
+
+	// KYTY_WRITE_PREDICT: ChangeState<Gpu, true> for a tracked GPU write, except that the pages
+	// readable now outside `guarded` stay readable: open (apply), or only recorded as shadow pages
+	// for the completion check's counts. A readable page here is CPU-clean (just uploaded) and holds
+	// what the GPU's copy holds; a protected one may wait for a download and is never opened (so
+	// this only protects pages, as UpdateProtection<true, true> requires). Shadow pages count as
+	// readable while measuring. Returns the pages left readable (or recorded).
+	size_t MarkGpuPredicted(uint64_t vaddr, uint64_t size, const RegionBits& guarded, bool apply) {
+		const auto [start, end] = GetPageRange(vaddr, size);
+		if (RegionBits(m_cpu_dirty, start, end).Any()) {
+			EXIT("GPU dirty state conflicts with CPU dirty state\n");
+		}
+		RegionBits open(m_readable, start, end);
+		if (!apply) {
+			open |= RegionBits(m_gpu_shadow, start, end);
+		}
+		open &= ~guarded;
+		m_gpu_dirty.SetRange(start, end);
+		SetSummary<DirtySource::Gpu>(true);
+		m_gpu_open.UnsetRange(start, end);
+		m_gpu_shadow.UnsetRange(start, end);
+		if (apply) {
+			m_gpu_open |= open;
+		} else {
+			m_gpu_shadow |= open;
+		}
+		UpdateProtection<true, true>();
+		return open.Count();
+	}
+
+	// KYTY_WRITE_PREDICT: the range's open pages become unreadable GPU-written pages, its shadow
+	// pages plain ones. Returns how many pages were open or shadow.
+	size_t CloseOpen(uint64_t vaddr, uint64_t size) {
+		const auto [start, end] = GetPageRange(vaddr, size);
+		const auto shadow       = RegionBits(m_gpu_shadow, start, end).Count();
+		const auto open         = RegionBits(m_gpu_open, start, end).Count();
+		m_gpu_shadow.UnsetRange(start, end);
+		if (open != 0) {
+			m_gpu_open.UnsetRange(start, end);
+			UpdateProtection<true, true>();
+		}
+		return open + shadow;
+	}
+
+	// KYTY_WRITE_PREDICT: calls func(address, bytes) for each run of open or shadow pages.
+	template <typename Func>
+	void ForEachPredictedRun(uint64_t vaddr, uint64_t size, Func&& func) const {
+		const auto [start, end] = GetPageRange(vaddr, size);
+		const auto mask = RegionBits(m_gpu_open, start, end) | RegionBits(m_gpu_shadow, start, end);
+		for (const auto [first, last]: mask) {
+			func(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
 		}
 	}
 
@@ -152,6 +283,8 @@ public:
 			if constexpr (source == DirtySource::Cpu) {
 				UpdateProtection<true, false>();
 			} else {
+				m_gpu_open.UnsetRange(start, end);
+				m_gpu_shadow.UnsetRange(start, end);
 				UpdateProtection<false, true>();
 			}
 		}
@@ -188,7 +321,8 @@ private:
 
 	template <bool track, bool is_read>
 	void UpdateProtection() {
-		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
+		// Open pages (always GPU-dirty) stay readable.
+		const auto protection = is_read ? ~(m_gpu_dirty ^ m_gpu_open) : m_cpu_dirty;
 		auto&      previous   = is_read ? m_readable : m_writable;
 		auto       mask       = protection ^ previous;
 		if (mask.None()) {
@@ -254,6 +388,10 @@ private:
 	uint64_t               m_cpu_summary_bit  = 0;
 	RegionBits   m_writable;
 	RegionBits   m_readable;
+	// KYTY_WRITE_PREDICT: GPU-dirty pages left readable (open) or that would be (shadow, measure
+	// only); both always within m_gpu_dirty.
+	RegionBits   m_gpu_open;
+	RegionBits   m_gpu_shadow;
 };
 
 } // namespace Libs::Graphics

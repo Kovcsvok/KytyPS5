@@ -115,6 +115,10 @@ int MapAutomaticMemory(uint64_t vaddr, size_t size, int type, int prot);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadGpuCleanBacking(uint64_t vaddr, void* data, uint64_t size);
+// GPU thread, before it reads [vaddr, vaddr + size) of guest memory itself: pages a tracked GPU
+// write left readable become protected, so the read faults and gets the GPU's bytes if that write
+// wrote them after all (KYTY_WRITE_PREDICT, BufferCache::CloseOpenPages). No-op elsewhere.
+void                   GuardGpuThreadRead(uint64_t vaddr, uint64_t size);
 // Any thread, for a read that faulted at fault_vaddr on a page protected because the GPU wrote to
 // it: reads [vaddr, vaddr + size) from the backing store when none of those bytes is GPU-written.
 bool TryReadCleanFaultingBytes(uint64_t fault_vaddr, uint64_t vaddr, void* data, uint64_t size);

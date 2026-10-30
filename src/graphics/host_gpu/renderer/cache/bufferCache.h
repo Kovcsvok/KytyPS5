@@ -135,6 +135,10 @@ public:
 	// protected as GPU-written) or it would be wrong (a download of these bytes is in flight, or
 	// no cached buffer covers them); the caller then writes normally.
 	[[nodiscard]] bool              WriteClean(uint64_t vaddr, const void* data, uint64_t size);
+	// GPU thread, before it reads guest memory itself (KYTY_WRITE_PREDICT): the open pages of the
+	// range become unreadable, so the read faults and gets the GPU's bytes should a tracked write
+	// in flight write them after all. Their pages are never left open again.
+	void                            CloseOpenPages(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] ShaderFaultReport CollectFaults() { return m_fault_manager.CollectFaults(); }
 	[[nodiscard]] uint64_t          UnattributedFaults() const noexcept {
 		return m_fault_manager.UnattributedFaults();
@@ -186,6 +190,14 @@ private:
 	// for them chased the writes of each new frame). With KYTY_WRITE_BITMAP_UNPROTECT the dropped
 	// pages lose their protection too; true when the faulting pages were among them.
 	bool RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// KYTY_WRITE_PREDICT (GPU thread, ObtainBufferTracked): false when off; otherwise fills in how
+	// the tracked write is marked.
+	bool PrepareWritePrediction(uint64_t vaddr, uint64_t size,
+	                            MemoryTracker::WritePrediction& prediction);
+	// KYTY_WRITE_PREDICT (completion thread, once per tick with tracked writes that left pages
+	// readable, before the labels after them): the bitmap's written pages among them are closed and
+	// join the history.
+	void CheckPredictedWrites(uint64_t tick);
 	void ReportWriteBitmap();
 	void TouchBuffer(const Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
@@ -197,7 +209,8 @@ private:
 	void                     ChangeRegister(BufferId id);
 	void                     DeleteBuffer(BufferId id);
 	[[nodiscard]] bool       SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size,
-	                                           bool is_written, bool is_texel_buffer);
+	                                           bool is_written, bool is_texel_buffer,
+	                                           MemoryTracker::WritePrediction* prediction = nullptr);
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
@@ -443,6 +456,24 @@ private:
 		std::chrono::steady_clock::time_point report      = std::chrono::steady_clock::now();
 	};
 	WriteBitmapStats                                   m_bitmap_stats;
+	// KYTY_WRITE_PREDICT: the history (created by the GPU thread at the first predicted write, then
+	// kept) and when it started learning; the tracked ranges of each tick still to check; counts
+	// for ReportWriteBitmap (several threads).
+	std::unique_ptr<WriteHistory>                      m_write_history;
+	std::chrono::steady_clock::time_point              m_write_history_since;
+	std::mutex                                         m_predict_mutex;
+	std::map<uint64_t, RangeSet>                       m_predict_pending;
+	struct PredictStats {
+		std::atomic<uint64_t> writes {0};
+		std::atomic<uint64_t> pages {0};
+		std::atomic<uint64_t> checks {0};
+		std::atomic<uint64_t> checked {0};
+		std::atomic<uint64_t> missed {0};
+		std::atomic<uint64_t> refined {0};
+		std::atomic<uint64_t> guarded {0};
+		std::atomic<uint64_t> us {0};
+	};
+	PredictStats                                       m_predict_stats;
 	uint64_t                                           m_direct_readbacks = 0;
 	MemoryTracker                                      m_memory_tracker;
 	StreamBuffer                                       m_staging_buffer;

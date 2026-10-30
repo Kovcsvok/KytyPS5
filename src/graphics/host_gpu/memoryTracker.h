@@ -31,6 +31,29 @@ public:
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UntrackMemory(uint64_t vaddr, uint64_t size);
+	// KYTY_WRITE_PREDICT: the range's open pages become unreadable (RegionManager::CloseOpen).
+	// Returns how many were open (or shadow, while measuring).
+	uint64_t           CloseOpenPages(uint64_t vaddr, uint64_t size);
+	// KYTY_WRITE_PREDICT: calls func(address, bytes) for the runs of open or shadow pages, under
+	// each region's lock.
+	template <typename Func>
+	void ForEachPredictedRun(uint64_t vaddr, uint64_t size, Func&& func) {
+		Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+			if (!manager->MaybeModified<DirtySource::Gpu>()) {
+				return;
+			}
+			std::scoped_lock lock(manager->lock);
+			manager->ForEachPredictedRun(manager->GetCpuAddr() + offset, bytes, func);
+		});
+	}
+	// KYTY_WRITE_PREDICT: how ForEachUploadRange marks a tracked GPU write (BufferCache::
+	// ObtainBufferTracked, RegionManager::MarkGpuPredicted).
+	struct WritePrediction {
+		const WriteHistory* history     = nullptr;
+		size_t              block_pages = 16;
+		bool                apply       = false;
+		uint64_t            pages       = 0; // out: pages left readable (or recorded)
+	};
 	// Calls func(address, bytes) for each part of the range, one per tracker region, that may
 	// hold CPU-dirty pages (lock-free summaries: false is exact, true is conservative).
 	template <typename Func>
@@ -122,7 +145,7 @@ public:
 
 	template <typename RangeFunc, typename UploadFunc>
 	void ForEachUploadRange(uint64_t vaddr, uint64_t size, bool is_written, RangeFunc&& range_func,
-	                        UploadFunc&& upload_func) {
+	                        UploadFunc&& upload_func, WritePrediction* prediction = nullptr) {
 		static_assert(std::is_nothrow_invocable_v<RangeFunc&, uint64_t, uint64_t>);
 		static_assert(std::is_nothrow_invocable_v<UploadFunc&>);
 		CheckNotInUploadCallback();
@@ -158,9 +181,18 @@ public:
 		}
 		if (is_written) {
 			Iterate<false>(vaddr, size,
-			               [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
-				               manager->template ChangeState<DirtySource::Gpu, true>(
-				                   manager->GetCpuAddr() + offset, bytes);
+			               [prediction](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+				               if (prediction != nullptr) {
+					               RegionBits guarded;
+					               prediction->history->Guarded(manager->GetCpuAddr(),
+					                                            prediction->block_pages, guarded);
+					               prediction->pages += manager->MarkGpuPredicted(
+					                   manager->GetCpuAddr() + offset, bytes, guarded,
+					                   prediction->apply);
+				               } else {
+					               manager->template ChangeState<DirtySource::Gpu, true>(
+					                   manager->GetCpuAddr() + offset, bytes);
+				               }
 				               manager->lock.unlock();
 			               });
 		}

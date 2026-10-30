@@ -577,6 +577,7 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 
 template <typename T>
 T CommandProcessor::ReadLabel(const volatile T* addr) const {
+	LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(addr), sizeof(T));
 	return GuestGpu::LabelsDeferred() ? m_renderer.GetGpu().ReadLabel(addr) : *addr;
 }
 
@@ -1266,6 +1267,8 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 			// One begin/end pair per DB; bit 63 marks each counter ready.
 			constexpr uint64_t ready_bit = 1ull << 63u;
 			const auto* results = reinterpret_cast<const volatile uint64_t*>(address);
+			LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(results),
+			                                      32u * sizeof(uint64_t));
 			for (uint32_t db = 0; db < 16u; db++) {
 				const auto begin = results[db * 2u];
 				const auto end   = results[db * 2u + 1u];
@@ -1298,6 +1301,8 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 				BufferFlushAndWait();
 			}
 			EXIT_NOT_IMPLEMENTED(address == nullptr);
+			LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(address),
+			                                      sizeof(uint64_t));
 			value = *reinterpret_cast<const volatile uint64_t*>(address);
 		} break;
 		default: EXIT("unknown predication op: 0x%08" PRIx32 "\n", op);
@@ -1371,6 +1376,8 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t draw_initiato
 		return;
 	}
 
+	LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(args_addr),
+	                                      sizeof(DrawIndexedIndirectArgs));
 	if (!indexed) {
 		DrawIndirectArgs args {};
 		std::memcpy(&args, args_addr, sizeof(args));
@@ -1427,6 +1434,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 	uint32_t draw_count = max_count_or_count;
 	if (count_addr != nullptr) {
+		LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(count_addr),
+		                                      sizeof(uint32_t));
 		draw_count = *count_addr;
 		if (draw_count > max_count_or_count) {
 			draw_count = max_count_or_count;
@@ -1439,6 +1448,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
 	EXIT_NOT_IMPLEMENTED(stride_in_bytes < args_size);
+	LibKernel::Memory::GuardGpuThreadRead(m_draw_indirect_args_base_addr + data_offset,
+	                                      static_cast<uint64_t>(draw_count) * stride_in_bytes);
 
 	uint64_t index_size = 0;
 	if (indexed) {
@@ -1568,6 +1579,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	// that path for A/B runs.
 	static const bool threads_on_cpu = std::getenv("KYTY_INDIRECT_THREADS_ON_CPU") != nullptr;
 	if (threads_on_cpu && (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
+		LibKernel::Memory::GuardGpuThreadRead(args_addr, sizeof(vk::DispatchIndirectCommand));
 		const auto* args = reinterpret_cast<const vk::DispatchIndirectCommand*>(args_addr);
 		DispatchDirect(args->x, args->y, args->z, mode);
 		return;

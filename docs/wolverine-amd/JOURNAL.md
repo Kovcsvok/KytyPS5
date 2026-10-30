@@ -751,3 +751,29 @@ Ismeretlen olvasási helyen első írásra még maradhat hiba. Ezért jön előb
 3. ABBA `0 / 2`: `gpu_protect_ms`, `gpu_process_ms`, `guest_fault_ms`, `readback_wait_ms`, fps.
 
 Shader-fordítást nem érint, a pin marad `5931ea8…`. A push a DEFER-eltávolítással (`34d2b5ba`) együtt megy.
+
+## 2026-10-30 — Opus — `KYTY_WRITE_PREDICT` (kód) és a fork láthatósága
+**Kód** (élő, alap 0; `=1` csak mér, `=2` 30 s tanulás után éles; `KYTY_WRITE_PREDICT_BLOCK_KB` élő, alap 64). Shader-fordítást nem érint, a pin marad.
+- **`RegionManager`:** `m_gpu_open` (olvasható GPU-írt lapok) és `m_gpu_shadow` (mérő módban „nyitva lenne”). Az olvasásvédelem `~(gpu_dirty ^ open)`. Minden GPU-jelölés / -feloldás törli mindkettőt.
+  - `MarkGpuPredicted`: csak a most olvasható és nem jósolt lapokat hagyja nyitva, így csak védést ad.
+  - `CloseOpen`, `ForEachPredictedRun`.
+- **`WriteHistory`** (`regionManager.h`, 32 MiB, lapra pontos, sosem törlődik):
+  - forrásai a befejezési ellenőrzés, a finomítás írt lapjai, a GPU-szál saját olvasási hibái és a GPU-szál védett olvasásai;
+  - a jóslat blokkra kerekít.
+- **`BufferCache`:**
+  - `ObtainBufferTracked` → `PrepareWritePrediction` → `SynchronizeBuffer(..., prediction)`;
+  - ha maradt nyitott lap: tickenként egy `CheckPredictedWrites` a priority sorba (`m_predict_pending`: tick → tartományok);
+  - az ellenőrzés `MOVNTDQA`-val olvassa a nyitott lapok bitjeit, és az írtakat bezárja és a történetbe veszi;
+  - a finomítás a törölt bitmap-szavakat csak az írt nyitott lapok bezárása után írja vissza.
+- **GPU-szál olvasási helyei** (`LibKernel::Memory::GuardGpuThreadRead` → `BufferCache::CloseOpenPages`): `TryReadGpuCleanBacking` / `FindGpuCleanBacking(Cached)` piszkos ága (SRT), `CommandProcessor::ReadLabel` (`WAIT_REG_MEM`, `COND_EXEC`-ág), `COND_EXEC`, predikáció (occlusion és bool), `DrawIndirectMulti` (count és rekordok), `DrawIndirect` CPU-s tartalék, `DispatchIndirect` CPU-s kutatási út, mesh/quad indirekt argumentum, primitive restart indexvizsgálat.
+- **Napló 5 s-onként** a `Write bitmap` sor után:
+  `Write predict (5 s): mode M, N tracked writes left P pages (… MiB) readable|counted; C checks of K pages: W written after all, R more found by refinements, G closed for GPU-thread reads; history H pages; X ms on the completion thread`.
+- **Teszt:**
+  1. Harc `KYTY_WRITE_PREDICT=1`: W / R / G (téves jóslat), P (nyitva hagyható), X (completion-ms).
+  2. Ha W+R kicsi és P nagy: rövid kör `=2`.
+  3. ABBA `0 / 2`.
+
+**Láthatóság:**
+- Új angol összefoglaló: `docs/wolverine-amd/FINDINGS.md` (mi segített / mi nem, számokkal, módszer, fájlok).
+- A `README.md` elején mutató rá.
+- Push után a GitHubon: a fork alapértelmezett ága a munkaág lesz (eddig a régi `main`; ütemezett workflow nincs, így ez nem indít futást), plusz leírás és topicok.

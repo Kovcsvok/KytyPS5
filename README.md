@@ -1,5 +1,13 @@
 # KytyPS5: Marvel's Wolverine build
 
+> [!IMPORTANT]
+> **Kovcsvok fork, branch `wolverine-v2-amd-hang-markers`: AMD RX 9070 XT (RDNA4) performance
+> work.** Every change is a live switch measured with automatic in-combat A/B runs; what helped
+> (write bitmap +34%, range table edits +35%, SRT page cache +20%, device-generated draws +8%, ...)
+> and what did not is summarised in
+> [`docs/wolverine-amd/FINDINGS.md`](docs/wolverine-amd/FINDINGS.md). The text below is the
+> upstream Wolverine fork's README.
+
 > [!NOTE]
 > **This is a fork of [KytyPS5](https://github.com/KytyPS5/KytyPS5) tuned for Marvel's Wolverine**
 > (PPSA03671, version 01.001.005). It is not the official KytyPS5 repository; for other games

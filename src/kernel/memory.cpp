@@ -1202,11 +1202,22 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+void GuardGpuThreadRead(uint64_t vaddr, uint64_t size) {
+	if (g_gpu_resources != nullptr && size != 0 && IsGpuAddressRange(vaddr, size) &&
+	    Graphics::GuestGpu::IsGpuThread()) {
+		GetGpuResources().GetBufferCache().CloseOpenPages(vaddr, size);
+	}
+}
+
+// On a GPU-dirty answer the GPU thread reads guest memory itself next (GuardGpuThreadRead).
 bool TryReadGpuCleanBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
-		if (!Graphics::GuestGpu::IsGpuThread() ||
-		    GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
+		if (!Graphics::GuestGpu::IsGpuThread()) {
+			return false;
+		}
+		if (GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
 		    GetGpuResources().GetTextureCache().IsRegionGpuModified(vaddr, size)) {
+			GetGpuResources().GetBufferCache().CloseOpenPages(vaddr, size);
 			return false;
 		}
 	}
@@ -1218,9 +1229,12 @@ const uint8_t* FindGpuCleanBacking(uint64_t vaddr, uint64_t size) {
 		return nullptr;
 	}
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
-		if (!Graphics::GuestGpu::IsGpuThread() ||
-		    GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
+		if (!Graphics::GuestGpu::IsGpuThread()) {
+			return nullptr;
+		}
+		if (GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
 		    GetGpuResources().GetTextureCache().IsRegionGpuModified(vaddr, size)) {
+			GetGpuResources().GetBufferCache().CloseOpenPages(vaddr, size);
 			return nullptr;
 		}
 	}
@@ -1242,6 +1256,7 @@ const uint8_t* FindGpuCleanBackingCached(uint64_t vaddr, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size) ||
 		    GetGpuResources().GetTextureCache().IsRegionGpuModifiedOnGpuThread(vaddr, size)) {
+			GetGpuResources().GetBufferCache().CloseOpenPages(vaddr, size);
 			return nullptr;
 		}
 	}

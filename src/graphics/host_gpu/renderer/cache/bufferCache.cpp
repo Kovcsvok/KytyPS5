@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <immintrin.h>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -919,6 +920,10 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
+	}
+	if (!is_write && GuestGpu::IsGpuThread() && m_write_history != nullptr) {
+		// KYTY_WRITE_PREDICT: pages the GPU thread reads itself are never left open.
+		m_write_history->Note(vaddr, size);
 	}
 	auto& gpu = m_scheduler.Context().GetGpu();
 	// KYTY_ASYNC_WRITE_READBACK=1 (a live switch, off by default): a guest write to GPU-written
@@ -2360,7 +2365,8 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,
-                                    bool is_texel_buffer) {
+                                    bool is_texel_buffer,
+                                    MemoryTracker::WritePrediction* prediction) {
 	// KYTY_SYNC_STATS=1 (live): every 5 s, synchronizations and the bytes they walked, split by
 	// read and written ranges (a written range is locked and marked GPU-modified page by page).
 	static auto& stats = Common::LiveSwitches::Get("KYTY_SYNC_STATS", 0);
@@ -2398,7 +2404,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		    copies.emplace_back(total_size, buffer.Offset(address), bytes);
 		    total_size += bytes;
 	    },
-	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
+	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); }, prediction);
 	if (source) {
 		auto& command = m_scheduler.Current();
 		command.EndRendering();
@@ -2546,10 +2552,149 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferTracked(uint64_t vaddr, ui
 	}
 	auto& buffer = m_slot_buffers[id];
 	TouchBuffer(buffer);
-	(void)SynchronizeBuffer(buffer, vaddr, size, true, is_texel_buffer);
+	MemoryTracker::WritePrediction prediction;
+	const bool predict = PrepareWritePrediction(vaddr, size, prediction);
+	(void)SynchronizeBuffer(buffer, vaddr, size, true, is_texel_buffer,
+	                        predict ? &prediction : nullptr);
 	MarkGpuWritten(vaddr, size, true);
-	buffer.last_gpu_write_tick = m_scheduler.CurrentTick();
+	const auto tick = m_scheduler.CurrentTick();
+	if (predict && prediction.pages != 0) {
+		m_predict_stats.writes.fetch_add(1, std::memory_order_relaxed);
+		m_predict_stats.pages.fetch_add(prediction.pages, std::memory_order_relaxed);
+		const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+		const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+		bool       queue = false;
+		{
+			std::scoped_lock lock(m_predict_mutex);
+			auto [ranges, inserted] = m_predict_pending.try_emplace(tick);
+			ranges->second.Add(first, last - first);
+			queue = inserted;
+		}
+		if (queue) {
+			m_scheduler.DeferPriorityOperation([this, tick] { CheckPredictedWrites(tick); });
+		}
+	}
+	buffer.last_gpu_write_tick = tick;
 	return {&buffer, buffer.Offset(vaddr)};
+}
+
+// KYTY_WRITE_PREDICT (live, default 0): a tracked write (a binding the shader may write anywhere
+// in, often a whole heap: ~25k a 5 s in combat, 1.6-4 TB in all) leaves readable the pages it is
+// not predicted to write, instead of protecting the whole binding. Each protection cost ~7.5 us
+// (TLB flush), and a refinement on the next guest read unprotected the pages it did not write
+// (2026-10-29 Tracy, combat: 4.4 ms a frame of protection changes on the GPU thread, 2.2 ms of
+// refinements). Predicted written: a block (KYTY_WRITE_PREDICT_BLOCK_KB, live, default 64) with a
+// page an earlier tracked write wrote or the GPU thread read. CheckPredictedWrites closes the
+// pages the bitmap shows written after all before the guest can learn the write completed.
+// 1 only measures (the pages stay protected and are counted), 2 applies once the history has
+// learned for 30 s.
+bool BufferCache::PrepareWritePrediction(uint64_t vaddr, uint64_t size,
+                                         MemoryTracker::WritePrediction& prediction) {
+	static auto& mode     = Common::LiveSwitches::Get("KYTY_WRITE_PREDICT", 0);
+	static auto& block_kb = Common::LiveSwitches::Get("KYTY_WRITE_PREDICT_BLOCK_KB", 64);
+	const auto   value    = mode.load(std::memory_order_relaxed);
+	if (value <= 0 || m_write_bitmap == nullptr || vaddr + size > WriteBitmapLimit) {
+		return false;
+	}
+	if (m_write_history == nullptr) {
+		m_write_history       = std::make_unique<WriteHistory>();
+		m_write_history_since = std::chrono::steady_clock::now();
+	}
+	const auto kb = std::clamp<int64_t>(block_kb.load(std::memory_order_relaxed), 4,
+	                                    static_cast<int64_t>(TRACKER_REGION_SIZE >> 10u));
+	prediction.history     = m_write_history.get();
+	prediction.block_pages = static_cast<size_t>(std::bit_floor(static_cast<uint64_t>(kb) / 4u));
+	prediction.apply       = value >= 2 && std::chrono::steady_clock::now() - m_write_history_since >=
+	                                     std::chrono::seconds(30);
+	return true;
+}
+
+void BufferCache::CheckPredictedWrites(uint64_t tick) {
+	constexpr uint64_t Page = TRACKER_PAGE_SIZE;
+	RangeSet           ranges;
+	{
+		std::scoped_lock lock(m_predict_mutex);
+		const auto       pending = m_predict_pending.find(tick);
+		if (pending == m_predict_pending.end()) {
+			return;
+		}
+		ranges = std::move(pending->second);
+		m_predict_pending.erase(pending);
+	}
+	if (m_write_bitmap == nullptr || !m_scheduler.IsFree(tick)) {
+		return; // only run inline while the scheduler shuts down
+	}
+	const auto start = std::chrono::steady_clock::now();
+	std::vector<std::pair<uint64_t, uint64_t>> runs;
+	ranges.ForEach([&](uint64_t from, uint64_t to) {
+		m_memory_tracker.ForEachPredictedRun(from, to - from, [&](uint64_t address, uint64_t bytes) {
+			if (!runs.empty() && runs.back().second == address) {
+				runs.back().second = address + bytes;
+			} else {
+				runs.emplace_back(address, address + bytes);
+			}
+		});
+	});
+	// The bits after the tick, in 16-byte streaming loads (uncached host-mapped device memory); a
+	// refinement closes a written page before it clears the page's bit, so a cleared bit here
+	// means the page is closed already. Words of zeros skip 32 pages at once.
+	auto*                                      words = reinterpret_cast<uint32_t*>(m_write_bitmap->Mapped().data());
+	std::vector<uint32_t>                      snapshot;
+	std::vector<std::pair<uint64_t, uint64_t>> written;
+	uint64_t                                   checked = 0;
+	for (const auto& [begin, end]: runs) {
+		checked += (end - begin) / Page;
+		const uint64_t first_word = Common::AlignDown(begin / Page >> 5u, 4u);
+		const uint64_t last_word  = Common::AlignUp(((end - 1) / Page >> 5u) + 1u, 4u);
+		snapshot.resize(last_word - first_word);
+		auto* source = reinterpret_cast<__m128i*>(words + first_word);
+		auto* target = reinterpret_cast<__m128i*>(snapshot.data());
+		for (size_t i = 0; i < snapshot.size() / 4u; i++) {
+			_mm_storeu_si128(target + i, _mm_stream_load_si128(source + i));
+		}
+		for (uint64_t page = begin; page < end;) {
+			const auto index = page / Page;
+			const auto word  = snapshot[(index >> 5u) - first_word];
+			if ((index & 31u) == 0 && page + Page * 32u <= end && word == 0) {
+				page += Page * 32u;
+				continue;
+			}
+			if ((word & (uint32_t {1} << (index & 31u))) != 0) {
+				if (!written.empty() && written.back().second == page) {
+					written.back().second = page + Page;
+				} else {
+					written.emplace_back(page, page + Page);
+				}
+			}
+			page += Page;
+		}
+	}
+	uint64_t missed = 0;
+	for (const auto& [from, to]: written) {
+		(void)m_memory_tracker.CloseOpenPages(from, to - from);
+		m_write_history->Note(from, to - from);
+		missed += (to - from) / Page;
+	}
+	auto& s = m_predict_stats;
+	s.checks.fetch_add(1, std::memory_order_relaxed);
+	s.checked.fetch_add(checked, std::memory_order_relaxed);
+	s.missed.fetch_add(missed, std::memory_order_relaxed);
+	s.us.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+	                                         std::chrono::steady_clock::now() - start)
+	                                         .count()),
+	               std::memory_order_relaxed);
+}
+
+void BufferCache::CloseOpenPages(uint64_t vaddr, uint64_t size) {
+	if (m_write_history == nullptr || !GuestRange {vaddr, size}.Valid()) {
+		return;
+	}
+	const auto begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	if (const auto pages = m_memory_tracker.CloseOpenPages(begin, end - begin); pages != 0) {
+		m_write_history->Note(begin, end - begin);
+		m_predict_stats.guarded.fetch_add(pages, std::memory_order_relaxed);
+	}
 }
 
 uint64_t BufferCache::WriteBitmapMinBytes() {
@@ -2657,13 +2802,16 @@ bool BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, ui
 	};
 	std::vector<std::pair<uint64_t, uint64_t>> unwritten;
 	std::vector<std::pair<uint64_t, uint64_t>> written;
+	// Stored after the scan, once the written pages left open are closed (KYTY_WRITE_PREDICT:
+	// CheckPredictedWrites takes a cleared bit for a closed page).
+	std::vector<std::pair<uint64_t, uint32_t>> cleared;
 	uint64_t cached_index = UINT64_MAX;
 	uint32_t cached_word  = 0;
 	bool     cached_dirty = false;
 	bool     cached_keep  = false;
 	const auto flush_word = [&] {
 		if (cached_dirty && !cached_keep) {
-			words[cached_index] = cached_word;
+			cleared.emplace_back(cached_index, cached_word);
 		}
 		cached_dirty = false;
 	};
@@ -2704,6 +2852,16 @@ bool BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, ui
 		});
 	}
 	flush_word();
+	if (m_write_history != nullptr) {
+		for (const auto& [from, to]: written) {
+			m_predict_stats.refined.fetch_add(m_memory_tracker.CloseOpenPages(from, to - from),
+			                                  std::memory_order_relaxed);
+			m_write_history->Note(from, to - from);
+		}
+	}
+	for (const auto& [index, word]: cleared) {
+		words[index] = word;
+	}
 	const bool unprotect = WriteBitmapUnprotectEnabled();
 	{
 		std::unique_lock lock(m_dirty_ranges_mutex, std::defer_lock);
@@ -2757,6 +2915,27 @@ void BufferCache::ReportWriteBitmap() {
 	         " MiB tracked, %zu writes in flight\n",
 	         s.bindings, s.bytes >> 20u, s.refinements, s.dropped, s.written, s.in_flight,
 	         s.unprotected, tracked >> 20u, m_bitmap_inflight.size());
+	if (m_write_history != nullptr) {
+		static auto& mode    = Common::LiveSwitches::Get("KYTY_WRITE_PREDICT", 0);
+		auto&        p       = m_predict_stats;
+		const bool   warming = mode.load(std::memory_order_relaxed) >= 2 &&
+		                     now - m_write_history_since < std::chrono::seconds(30);
+		const auto   pages   = p.pages.exchange(0, std::memory_order_relaxed);
+		::printf("Write predict (5 s): mode %d%s, %" PRIu64 " tracked writes left %" PRIu64
+		         " pages (%" PRIu64 " MiB) %s; %" PRIu64 " checks of %" PRIu64
+		         " pages: %" PRIu64 " written after all, %" PRIu64 " more found by refinements, %" PRIu64
+		         " closed for GPU-thread reads; history %" PRIu64 " pages; %.1f ms on the "
+		         "completion thread\n",
+		         static_cast<int>(mode.load(std::memory_order_relaxed)), warming ? " (learning)" : "",
+		         p.writes.exchange(0, std::memory_order_relaxed), pages, (pages * TRACKER_PAGE_SIZE) >> 20u,
+		         mode.load(std::memory_order_relaxed) >= 2 && !warming ? "readable" : "counted",
+		         p.checks.exchange(0, std::memory_order_relaxed),
+		         p.checked.exchange(0, std::memory_order_relaxed),
+		         p.missed.exchange(0, std::memory_order_relaxed),
+		         p.refined.exchange(0, std::memory_order_relaxed),
+		         p.guarded.exchange(0, std::memory_order_relaxed), m_write_history->Pages(),
+		         static_cast<double>(p.us.exchange(0, std::memory_order_relaxed)) / 1000.0);
+	}
 	std::fflush(stdout);
 	s = {.report = now};
 }
