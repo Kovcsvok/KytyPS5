@@ -38,11 +38,9 @@ public:
 	ShaderFunctionExpander(const ShaderFunctionExpander&)            = delete;
 	ShaderFunctionExpander& operator=(const ShaderFunctionExpander&) = delete;
 
-	// code_hash, when not 0, is the hash the code was registered with: the same address, size and
-	// hash as last time stand for the same code, which is then not compared word by word.
 	bool Expand(std::span<const uint32_t> code, uint64_t base, std::span<const uint32_t> user_data,
 	            const ShaderCodeReader& read, std::vector<uint32_t>& expanded, std::string& reason,
-	            uint32_t wave_size, uint64_t code_hash = 0);
+	            uint32_t wave_size);
 
 private:
 	struct Impl;

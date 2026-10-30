@@ -654,8 +654,7 @@ struct ShaderFunctionExpander::Impl {
 	};
 	struct Shader {
 		ShaderAnalysis         analysis;
-		uint64_t               code_hash = 0; // as registered, 0 if not given
-		std::vector<Expansion> expansions;    // most recent last
+		std::vector<Expansion> expansions; // most recent last
 	};
 	static constexpr size_t MaxExpansions = 8;
 
@@ -681,22 +680,19 @@ ShaderFunctionExpander::~ShaderFunctionExpander() = default;
 bool ShaderFunctionExpander::Expand(std::span<const uint32_t> code, uint64_t base,
                                     std::span<const uint32_t> user_data,
                                     const ShaderCodeReader& read, std::vector<uint32_t>& expanded,
-                                    std::string& reason, uint32_t wave_size, uint64_t code_hash) {
+                                    std::string& reason, uint32_t wave_size) {
 	expanded.clear();
 	reason.clear();
 	if (wave_size != 32u && wave_size != 64u) {
 		reason = "shader calls require a known wave size";
 		return false;
 	}
-	auto&      shader = m_impl->shaders[reinterpret_cast<uint64_t>(code.data())];
-	const bool known  = code_hash != 0 && shader.code_hash == code_hash &&
-	                   shader.analysis.code.size() == code.size();
-	if (!known && (shader.analysis.code.size() != code.size() ||
-	               !std::equal(code.begin(), code.end(), shader.analysis.code.begin()))) {
+	auto& shader = m_impl->shaders[reinterpret_cast<uint64_t>(code.data())];
+	if (shader.analysis.code.size() != code.size() ||
+	    !std::equal(code.begin(), code.end(), shader.analysis.code.begin())) {
 		shader = {};
 		AnalyzeShader(code, shader.analysis);
 	}
-	shader.code_hash = code_hash;
 	const auto& analysis = shader.analysis;
 	if (!analysis.has_calls) return true;
 	if (analysis.has_setpc) {

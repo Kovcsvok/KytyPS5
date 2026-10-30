@@ -2132,18 +2132,13 @@ struct PipelineCache::ProgramCache {
 	                           uint32_t wave_size, std::vector<uint32_t>& expanded,
 	                           ShaderReadChunks* read_chunks) {
 		KYTY_PROFILER_BLOCK("ProgramCache::ExpandShaderFunctions");
-		// KYTY_EXPAND_TRUST_HASH (live, default 1): the registered code hash stands for the code,
-		// as it does for the program lookup, instead of comparing the code at every dispatch
-		// (~550 a frame, 1.9 ms of the GPU thread, combat 2026-10-29).
-		static auto& trust_hash = Common::LiveSwitches::Get("KYTY_EXPAND_TRUST_HASH", 1);
-		const auto   code_hash  = trust_hash.load(std::memory_order_relaxed) != 0 ? params.hash : 0;
-		std::string  reason;
+		std::string reason;
 		if (!function_expander.Expand(
 		        params.code, params.Base(), user_data,
 		        [read_chunks](uint64_t address, std::span<uint32_t> words) {
 			        return ReadShaderGuestMemoryRaw(read_chunks, address, words);
 		        },
-		        expanded, reason, wave_size, code_hash)) {
+		        expanded, reason, wave_size)) {
 			static std::atomic<uint32_t> reports {0};
 			if (reports.fetch_add(1) < 16) {
 				::printf("Shader function expansion hash=%016" PRIx64 ": %s\n", params.hash,

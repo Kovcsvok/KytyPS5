@@ -652,3 +652,12 @@ CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `6
 - a futó írás közbeni vendégolvasás a régi bájtot látja (PS5-ön is verseny).
 
 **Várható nyereség:** a GPU-szálon a protect ~3–4 + a finomítás ~2–3 ms / képkocka; a vendégeknél a nem írt lapokon eső olvasási hibák eltűnnek. Mérés előtte (build nélkül): `KYTY_FAULT_STATS=1` harcban → a `Faults (5 s): … writes, … reads` arány és a hibahelyek ideje.
+
+## 2026-10-30 — Opus — takarítás (felhasználó kérésére, lomtárba)
+- **Fájlok (~62 GB, 137 elem):**
+  - D:: `KytyAnalysis\tracy-csv` (régi Tracy-CSV-k, ~50 GB), a `tracy5\all.csv` export (10,4 GB) és köztes fájljai, `artifacts\63bdc92`.
+  - C:: `C:\KytyDiagnostics\tracy` (régi felvételek, 1,5 GB), `C:\Games\Wolverine-AMD-T3*.zip`.
+  - A csomagból: az elavult kísérleti `.bat`-ok (DGC Draws, Exp 0, Flip Wait Suspend, Measure Readbacks, Play/Profile … DGC, Readback A/B/C, SRT Page Cache 0, Sparse Readback, Tracy 40s), a régi `kyty_live.before-*` mentések (a `before-dgc` marad), a 10-24–28-i logok.
+  - Maradt: a 10-29-i Tracy és az eredményei (`D:\KytyAnalysis\tracy`), a forkscan, az eszközök (RDTS, Vulkan SDK, rgd), a `shader-dumps`, a tartalék `emulator-2e0af0d`. Más emulátor-buildekhez és játékokhoz nem nyúltam.
+- **Tracy-felvételek ezentúl D:-re:** `Tracy 30s.bat` és `experiment.py` → `D:\KytyAnalysis\tracy`; `tracy_self_thread.py` törölve (a `tracy_parents.py` kiváltja).
+- **Kód:** kivéve a be nem vált kísérletek: `KYTY_EAGER_WRITEBACK` (+`_US`, a `BeginQueueReadback` futamlistás változata és a GPU-szál üresjárati ébresztése), `KYTY_TRACKER_PRESENT_BITS`, `KYTY_WRITE_BITMAP_BULK_READ`, `KYTY_EXPAND_TRUST_HASH`, `KYTY_GPU_THREAD_CPUS`. Az érintett fájlok a `757c95c` szerinti állapotban vannak; a `KYTY_RANGESET_REUSE` (`rangeSet.h`) marad. A `kyty_live.txt` soraikat a következő csomag telepítésekor kell törölni (a `63bdc92`-ben három alapértéke 1).

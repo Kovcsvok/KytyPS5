@@ -23,7 +23,7 @@ import time
 
 DEFAULT_LIVE = r"C:\Games\Wolverine-AMD-Async\userdata\kyty_live.txt"
 TRACY_CAPTURE = r"C:\Games\tracy-0.14.1\tracy-capture.exe"
-TRACY_DIR = r"C:\KytyDiagnostics\tracy"
+TRACY_DIR = r"D:\KytyAnalysis\tracy"
 
 
 def read_lines(path):

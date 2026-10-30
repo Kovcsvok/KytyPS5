@@ -776,13 +776,6 @@ void GuestGpu::ThreadRun(void* data) {
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
 
-	// KYTY_EAGER_WRITEBACK (bufferCache.cpp): between submissions, and every ~0.5 ms while hot
-	// GPU-written pages wait for their writer or their copy, Thread_Gpu publishes them before the
-	// guest faults on them.
-	static auto& eager_writeback = Common::LiveSwitches::Get("KYTY_EAGER_WRITEBACK", 0);
-	auto&        buffer_cache    = gpu->m_renderer.GetBufferCache();
-	bool         eager_pending   = false;
-
 	for (;;) {
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
@@ -790,11 +783,7 @@ void GuestGpu::ThreadRun(void* data) {
 		bool                         should_stop    = false;
 		// Commands a gated slice left unsubmitted go to the GPU before this thread waits.
 		bool flush_pending = false;
-		bool eager_poll    = false;
 		Common::Thread::ApplyGpuThreadPriority();
-		if (eager_pending || eager_writeback.load(std::memory_order_relaxed) > 0) {
-			eager_pending = buffer_cache.EagerWriteback();
-		}
 		{
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
@@ -802,30 +791,13 @@ void GuestGpu::ThreadRun(void* data) {
 					flush_pending = true;
 					break;
 				}
-				if (eager_pending) {
-					gpu->m_processing = false;
-					gpu->m_idle.Signal();
-					{
-						Common::Telemetry::ScopedTime idle(Common::Telemetry::Counter::GpuIdle);
-						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 500);
-					}
-					if (gpu->m_commands.empty() && gpu->m_submission_count == 0 &&
-					    !gpu->m_stopping && !gpu->m_slice_flush_pending) {
-						eager_poll        = true;
-						gpu->m_processing = true;
-						break;
-					}
-					continue;
-				}
 				KYTY_PROFILER_BLOCK("GuestGpu::WaitForWork");
 				Common::Telemetry::ScopedTime idle(Common::Telemetry::Counter::GpuIdle);
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
-			if (eager_poll) {
-				// Nothing else to do: the eager write-back pass below.
-			} else if (flush_pending) {
+			if (flush_pending) {
 				gpu->m_processing = true;
 			} else if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
 				gpu->m_processing = false;
@@ -885,15 +857,6 @@ void GuestGpu::ThreadRun(void* data) {
 			g_gpu_state  = nullptr;
 			g_gpu_thread = false;
 			return;
-		}
-		if (eager_poll) {
-			eager_pending = buffer_cache.EagerWriteback();
-			Common::LockGuard lock(gpu->m_queue_mutex);
-			gpu->m_processing = false;
-			if (gpu->m_commands.empty() && gpu->m_submission_count == 0) {
-				gpu->m_idle.SignalAll();
-			}
-			continue;
 		}
 
 		if (command) {
