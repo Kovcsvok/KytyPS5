@@ -702,3 +702,52 @@ CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `6
   - `guest_fault_ms` csak 54,6 → 52,5, pedig a hibák száma 888 → 733. A nem írt lapokon eső olvasási hibák tehát olcsók voltak; a ~150 µs-os átlagot a valódi letöltések adták.
 - **Tanulság:** a protect-churn ára a GPU-szálon a kötéskori újravédés (~4,9 ms / képkocka), és arányos azzal, amit előtte feloldottak. Ha még többet oldunk fel, ez nő. Csak az segítene, ha kötéskor eleve kevesebbet védenénk.
 - **Kód kivéve:** a 5 forrásfájl a `d3721f2e` szerinti állapotban, a `kyty_live.txt` sora törölve. A telepített `99b9490e`-ben a kapcsoló alapból 0, így ártalmatlan.
+
+## 2026-10-30 — Opus — upstream átnézése (`5e837a9b` → `4919fdb6`, 29 commit)
+A Frank fork 10-21 óta nem változott. Egyik commit sem a mi szűk keresztmetszetünk (GPU-szál: védés, visszaolvasás, Materialize).
+- **Más játékok / helyesség:** NGS2-hangjavítások (9 commit), BVH/raytracing shader-utasítások, getpc long jump, csomagolt egész vertexbemenetek típusa, mélységkép színformátumon át, mipmapelt DCC fast clear, float HDR video-out, PSN-emuláció, launcher.
+- **`651ef73a` „Pro mód” + lineáris PSSR** (kísérleti): a játék PS5 Pro hardvert lát, többet renderel. Nekünk nem gyorsítás.
+- **`eb3cb472`** (rajzolásonkénti scalar-read átfedés-ellenőrzés törlése): ez a kód nálunk nincs meg, nincs teendő.
+- **`0c2546e8`** (egész hullámos OR-scan → subgroup redukció): GPU-oldali shadergyorsítás, a mi `ReadLaneElimination`-ünkbe kicsiben átvehető, de shader-fordítást érint (cache újraépül, pin csere), és most nem a GPU a plafon. Félretéve.
+- **`6ff6e755`** (VMA: képek `WITHIN_BUDGET` + `AUTO_PREFER_DEVICE`): VRAM-szűkösségnél segít, 16 GB-on nem. **`216bd28b`, `4919fdb6`, `ae67e2db`:** csak a shader-fordítás idejére / kulcsára hat.
+
+## 2026-10-30 — Opus — terv: jósolt védés (`KYTY_WRITE_PREDICT`, még nincs kód)
+**Honnan jön a nyereség** (10-29-i Tracy, harc, GPU-szál, ms / képkocka): `PageManager::Protect` 4,4 (640 hívás, ~7,5 µs / hívás, a TLB-flush miatt), ebből a kötéseknél 2,5 (a CPU-feltöltés utáni írásvédés és a nem írt lapok újravédése együtt), a finomításban 1,0. A `RefineWithWriteBitmap` saját ideje 2,2 (nem gyorsítótárazott bitmap-olvasás, ~194 finomítás / képkocka). Elérhető kb. **3–5 ms** a ~41 ms-ból; a DEFER A/B szerint az fps erre nagyjából arányosan reagál.
+
+**Elv:** kötéskor csak azokat a lapokat védjük, amelyeket egy követett írás valaha írt. A többi olvasható marad, de GPU-írtnak számít („nyitott” lap). Ha a GPU mégis írt egy nyitott lapra (téves jóslat), a lap még a címkék előtt védetté válik.
+
+**Kód:**
+1. **`RegionManager`:** új `m_gpu_open` bitkészlet (mindig a `m_gpu_dirty` része), olvasásvédelem `~(gpu_dirty & ~open)` (a DEFER-féle, már kipróbált mechanika). Minden nem jósolt GPU-jelölés (másolás, kitöltés, nem követett kötés) és minden feloldás törli.
+2. **Kötés** (`ObtainBufferTracked` → `ForEachUploadRange` jósolt változata): a régió zárja alatt csak a *jelenleg olvasható* lapok maradhatnak nyitva, és csak ha a blokkjuk nincs a történetben. Védett lapot sosem nyit ki, mert annak tartalma egy korábbi írásból letöltésre várhat.
+3. **Történet** (gazdagépen, lapra pontos, 32 MiB / 1 TiB): a „valaha írt” lapok. A jóslat blokkra kerekít (`KYTY_WRITE_PREDICT_BLOCK_KB`, élő, alap 64), mert a gyűrűpufferek a szomszéd lapokra lépnek tovább. A GPU-szál saját olvasási hibáinak lapjai is bekerülnek (azokat sosem nyitjuk ki).
+4. **Befejezési ellenőrzés** (completion szál, `DeferPriorityOperation`, tickenként egy, az adott tick követett tartományaira):
+   - a nyitott lapok bitjei 16 bájtos `MOVNTDQA`-val (100 MiB = ~3 KiB);
+   - bit=1 → a lap bezárása (no-access) és a történetbe vétele.
+   A FIFO miatt ez a tick címkéi előtt fut. A nem írt lapokkal nem csinál semmit, így nincs nagy védésváltás a completion szálon (a DEFER-t ez ölte meg).
+5. **Finomítás:** ha egy írt lap nyitott, előbb bezárja, és csak utána írja vissza a törölt bitmap-szót. Így az ellenőrzés vagy látja a bitet, vagy a lap már zárva van.
+6. **Mód:**
+   - `KYTY_WRITE_PREDICT=1`: csak mér, a védést nem változtatja;
+   - `=2`: éles.
+   Napló 5 s-onként: kötött / nyitva hagyott lapok, téves jóslatok (ellenőrzésnél / finomításnál), a történet mérete, a completion szál ms-ja.
+
+**Helyesség:**
+- **Vendégírás** nyitott lapra: írásvédett, mert CPU-tiszta → a tracker szerint GPU-módosított → letöltés, mint eddig.
+- **Vendégolvasás** futó írás alatt: a régi bájtot látja. Ez PS5-ön is verseny.
+- **Befejezés után:**
+  - nem írt lap → a tartalom helyes;
+  - írt lap → a címke előtt bezárva, így az olvasás hibázik és letölt.
+
+**Kockázat – a GPU-szál saját, közvetlen olvasásai** (SRT lassú út, CPU-s indirekt argumentum-tartalék, `WAIT_REG_MEM`, `COND_EXEC`, DMA-forrás, lekérdezés-eredmények): ezek eddig a laphibára építettek. Egy *téves jóslatú* lapot a kötés és az ellenőrzés között régi tartalommal olvasnának. Ilyenkor rossz argumentum vagy leíró, a `WAIT_REG_MEM`-nél akár várakozás. Enyhítés:
+- az ismert olvasási helyek (~8) előbb bezárják a tartomány nyitott lapjait (olcsó bitteszt, ha nincs nyitott);
+- a 64 KiB-os blokk-jóslat;
+- a GPU-szál hibáinak tanulása.
+Ismeretlen olvasási helyen első írásra még maradhat hiba. Ezért jön előbb az `=1` mérés: ha ott a téves jóslat ~0 a harcban, a `=2` kockázata kicsi.
+
+**Másik kockázat – a történet telítődése:** ha idővel minden blokk „írt” lesz, a nyereség elfogy. A naplóból percek alatt kiderül.
+
+**Teszt:**
+1. Harc `=1`: téves jóslat / perc, nyitva hagyható arány, completion-ms.
+2. Ha jó: biztonsági kör `=2`.
+3. ABBA `0 / 2`: `gpu_protect_ms`, `gpu_process_ms`, `guest_fault_ms`, `readback_wait_ms`, fps.
+
+Shader-fordítást nem érint, a pin marad `5931ea8…`. A push a DEFER-eltávolítással (`34d2b5ba`) együtt megy.
