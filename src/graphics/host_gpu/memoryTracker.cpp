@@ -122,6 +122,22 @@ void MemoryTracker::UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
 	});
 }
 
+uint64_t MemoryTracker::ReleaseGpuPending(uint64_t vaddr, uint64_t size, uint64_t completed_tick) {
+	uint64_t pages = 0;
+	Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		std::scoped_lock lock(manager->lock);
+		pages += manager->ReleaseGpuPending(manager->GetCpuAddr() + offset, bytes, completed_tick);
+	});
+	return pages;
+}
+
+uint64_t MemoryTracker::GpuMarkTick(uint64_t vaddr) const noexcept {
+	const auto* manager = vaddr < TRACKER_ADDRESS_SIZE
+	                          ? m_regions[vaddr / TRACKER_REGION_SIZE].load(std::memory_order_acquire)
+	                          : nullptr;
+	return manager != nullptr ? manager->GpuMarkTick() : 0;
+}
+
 void MemoryTracker::UntrackMemory(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	std::vector<RegionManager*> managers;

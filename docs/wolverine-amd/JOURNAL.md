@@ -667,3 +667,25 @@ CI zöld elsőre (run 40906697464). `C:\Games\Wolverine-AMD-Async\emulator` = `6
 - **Bitmap ugyanekkor:** ~17 ezer finomítás, ~7,3 M nem írt lap eldobva, **~5,6 ezer írt** → az olvasási hibák legalább ~60%-a olyan lapon esik, amelyet a GPU nem írt (a churn), ezeket a halasztott védés megszüntetné. A legtöbbet hibázó olvasott lapok (`0x12618fb000`, `0x1261dac000`, `0x1261fc6000`) minden képkockában újra hibáznak.
 - **Az írási hibák** zöme a CPU-dirty figyelés (64 KiB-onként egy lap, `0x11f0d…0000`, minden képkockában); a bitmaptól független.
 - **Továbbgondolva a terv:** a `RegionManager` `InvalidateRegion`-je a lapot CPU-dirtyvé teszi, ha a tracker szerint nem GPU-módosított. A `FAULT_WIDEN_KB` is így szélesít. Ezért a halasztott lapokhoz tracker-szintű „GPU-függő” állapot kell (különben egy futó írás alatti CPU-írás és a GPU írása ütközik). A címkesorrendhez a scheduler priority-sora megfelel: egyetlen FIFO, egy szál, ticksorrendben; a pending műveletek előtte `WaitPriorityOperations`-t hívnak. Az `on_flush` a régiózár elengedése után fut (nincs holtpont a priority-szállal).
+
+## 2026-10-30 — Opus — `KYTY_WRITE_BITMAP_DEFER` (kód)
+Új (élő, alap 0, shader-fordítást nem érint, pin marad `5931ea8…`). A terv módosult: a GPU-szál saját olvasásai (SRT, indirekt argumentumok, DMA) laphibára építenek, ezért kötéskor a no-access védés marad. A változás az, hogy a nem írt lapok a writer befejezésekor válnak olvashatóvá, nem a vendég következő hibájánál.
+- **`RegionManager`:** új `m_gpu_pending` (GPU-írt, de olvasható lapok, mindig a `m_gpu_dirty` része; az olvasásvédelem `~(gpu_dirty ^ pending)`) és régiónként `m_gpu_mark_tick` (a legutóbbi GPU-jelölés tickje, a `g_gpu_mark_tick`-ből, amelyet a `SynchronizeBuffer(is_written)` állít). Minden GPU-jelölés és -feloldás törli a pendinget (a lap újra no-access, ill. tiszta). `ReleaseGpuPending(range, tick)`: ha a régiót nem jelölte `tick` utáni GPU-írás, a GPU-írt lapok olvashatók lesznek.
+- **`BufferCache::MarkGpuWritten`** (követett kötés): a kötés tickjére prioritásos műveletet tesz a completion szál sorába (tickenként és első laponként egyszer). A sor egyetlen FIFO, így a műveletek a későbbi címkék előtt futnak.
+- **`ReleaseUnwrittenPages`** (completion szál):
+  1. Ha minden régiót későbbi írás jelölt: kihagyja („superseded”).
+  2. Megosztott zárral a követett lapfutamok és a `m_bitmap_clear_seq`.
+  3. Zár nélkül a bitek 16 bájtos `MOVNTDQA`-val; a csupa nulla szó 32 lapot egyszerre enged.
+  4. Megosztott zárral: ha a sorszám változott (egy finomítás közben törölt biteket), lemond róla („retried”); a letöltés alatti futamokat kihagyja.
+  5. Zár nélkül `MemoryTracker::ReleaseGpuPending`.
+- **`RefineWithWriteBitmap`:** a törölt bitmap-szavakat mostantól a kizárólagos zár alatt írja vissza, a követett halmazból kivett írt lapokkal együtt, és lépteti a `m_bitmap_clear_seq`-et.
+- **Helyesség:**
+  - Vendégírás egy olvasható, de GPU-írt lapra továbbra is hibázik (CPU-tiszta → írásvédett), a tracker szerint GPU-módosított → letöltés/finomítás, mint eddig.
+  - A `FAULT_WIDEN_KB` nem szélesít rájuk.
+  - A draw prep scanner és a `FindConcurrentCleanBacking` a `m_gpu_modified_ranges` alapján dönt, ott nincs változás.
+  - Egy lap csak akkor lesz olvasható, ha a writer lefutott, a bitje 0, és azóta nem jelölte újabb írás; a GPU-puffer tartalma ilyenkor azonos a vendégmemóriáéval.
+- **Napló 5 s-onként** (a `Write bitmap` sor után): `Write bitmap defer (5 s): … completions queued, … superseded by a later write, … retried after a refinement, … pages left readable, … ms on the completion thread`.
+- **Teszt:**
+  1. Rövid harc `KYTY_WRITE_BITMAP_DEFER=1` + `KYTY_FAULT_STATS=1`: grafikai hiba / leállás?
+  2. Harci A/B `DEFER` 0 / 1: `Faults (5 s) … reads`, `guest_fault_ms`, `gpu_readmem_ms`, completion-szál ms.
+- **Kockázat:** ha a completion szál munkája sok, a címkék késnek (a ms-szám mutatja). Hiba esetén `KYTY_WRITE_BITMAP_DEFER=0`.

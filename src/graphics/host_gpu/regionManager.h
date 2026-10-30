@@ -77,6 +77,10 @@ inline std::atomic<uint64_t> g_cpu_dirty_epoch {1};
 // Bumped by the GPU thread when it starts a guest submission (its first slice).
 inline std::atomic<uint64_t> g_guest_submission_seq {1};
 
+// The scheduler tick of the GPU writes the GPU thread is marking (BufferCache::SynchronizeBuffer);
+// each region keeps the latest it was marked with (KYTY_WRITE_BITMAP_DEFER).
+inline std::atomic<uint64_t> g_gpu_mark_tick {0};
+
 class RegionManager final {
 public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
@@ -129,6 +133,16 @@ public:
 				SetSummary<source>(false);
 			}
 		}
+		if constexpr (source == DirtySource::Gpu) {
+			// A new GPU write may change these pages again: unreadable until its own completion.
+			m_gpu_pending.UnsetRange(start, end);
+			if constexpr (enable) {
+				const auto tick = g_gpu_mark_tick.load(std::memory_order_relaxed);
+				if (tick > m_gpu_mark_tick.load(std::memory_order_relaxed)) {
+					m_gpu_mark_tick.store(tick, std::memory_order_release);
+				}
+			}
+		}
 		if constexpr (source == DirtySource::Cpu) {
 			UpdateProtection<!enable, false>();
 		} else {
@@ -152,6 +166,7 @@ public:
 			if constexpr (source == DirtySource::Cpu) {
 				UpdateProtection<true, false>();
 			} else {
+				m_gpu_pending.UnsetRange(start, end);
 				UpdateProtection<false, true>();
 			}
 		}
@@ -167,6 +182,34 @@ public:
 		m_cpu_summary_word = word;
 		m_cpu_summary_bit  = bit;
 		SetSummary<DirtySource::Cpu>(m_cpu_maybe_dirty.load(std::memory_order_relaxed));
+	}
+
+	// KYTY_WRITE_BITMAP_DEFER (completion thread, under the lock): the GPU-written pages of the
+	// range become readable again, unless a GPU write marked this region after completed_tick.
+	// They stay GPU-written: a guest write still faults and downloads first, and a new GPU write
+	// makes them unreadable (ChangeState). Returns the pages that became readable.
+	uint64_t ReleaseGpuPending(uint64_t vaddr, uint64_t size, uint64_t completed_tick) {
+		if (m_gpu_mark_tick.load(std::memory_order_relaxed) > completed_tick) {
+			return 0;
+		}
+		const auto [start, end] = GetPageRange(vaddr, size);
+		// The pending pages are GPU-written ones: those of the range not pending yet.
+		const RegionBits fresh = RegionBits(m_gpu_dirty, start, end) ^
+		                         RegionBits(m_gpu_pending, start, end);
+		uint64_t pages = 0;
+		for (const auto [first, last]: fresh) {
+			m_gpu_pending.SetRange(first, last);
+			pages += last - first;
+		}
+		if (pages != 0) {
+			UpdateProtection<false, true>();
+		}
+		return pages;
+	}
+
+	// The latest tick a GPU write marked this region with (0: none yet).
+	[[nodiscard]] uint64_t GpuMarkTick() const noexcept {
+		return m_gpu_mark_tick.load(std::memory_order_acquire);
 	}
 
 	TrackingSpinLock lock;
@@ -188,7 +231,8 @@ private:
 
 	template <bool track, bool is_read>
 	void UpdateProtection() {
-		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
+		// Pending pages (a subset of the GPU-written ones) stay readable.
+		const auto protection = is_read ? ~(m_gpu_dirty ^ m_gpu_pending) : m_cpu_dirty;
 		auto&      previous   = is_read ? m_readable : m_writable;
 		auto       mask       = protection ^ previous;
 		if (mask.None()) {
@@ -254,6 +298,9 @@ private:
 	uint64_t               m_cpu_summary_bit  = 0;
 	RegionBits   m_writable;
 	RegionBits   m_readable;
+	// GPU-written pages left readable (KYTY_WRITE_BITMAP_DEFER), always within m_gpu_dirty.
+	RegionBits            m_gpu_pending;
+	std::atomic<uint64_t> m_gpu_mark_tick {0};
 };
 
 } // namespace Libs::Graphics
