@@ -988,3 +988,35 @@ B-ben továbbra is ~83 leképezéses olvasás/s maradt, ~51 késői szó/s melle
 1. `late-verify` (3 perc, 2-es mód). Kapu: `srt_late_checked` > 0 és `srt_late_mismatches` = 0.
 2. Csak ha átment: `late-words` ABBA 0 / 1 (6 perc).
 
+## 2026-11-06 — Opus — kampány a `b186523b`-on: `KYTY_SRT_LATE_WORDS=1` **+6,7% (±1,9)**, helyes
+`D:\KytyAnalysis\campaigns\2026-11-06_172954`, napló: `run_2026-11-06_172741.log`.
+
+**`late-verify`** (3 perc, 2-es mód): **17 884 ellenőrzött GPU-másolat, 0 eltérés.** A másolat minden esetben azt az értéket adta, amit a pontos CPU-olvasás. Összeomlás nem volt. A 88e06cd3-as összeomlás oka így nem igazolódott; a másolás helyessége mellett szól ez a mérés.
+
+**`late-words`** ABBA 0 / 1 (6 perc, 18 pár): **+6,7% (±1,9)** – szignifikáns, győztes, a live fájlban `KYTY_SRT_LATE_WORDS=1`.
+- 22,6 → 24,1 fps; p50 37,2 → 33,8 ms; p99 és 1% low változatlan.
+- **GPU-szál, képkockánként:**
+
+| Számláló | A | B |
+|---|---|---|
+| `materialize_ms` | 9,18 | 7,09 |
+| `gpu_readmem_ms` | 4,91 | 2,96 |
+| `gpu_fault_ms` | 4,80 | 2,84 |
+| `gpu_submit_ms` | 4,37 | 2,75 |
+| `gpu_copyqueue_ms` | 4,22 | 2,55 |
+| `gpu_process_ms` | 38,1 | 36,6 |
+
+- **Vendégszálak:** `guest_fault_ms` 46,1 → 39,5, de `readback_wait_ms` 5,0 → 7,9.
+- Összeomlás nem volt.
+
+**Bontás (`Materialize`, 1-es mód):**
+- Leképezéses olvasás ~101/s → ~51–64/s; ebből a szigorú olvasóé 34–43/s. **0 volt 20 µs alatt**, vagyis minden megmaradt leképezéses olvasás valóban a GPU-ra vár: az utolsó író még nem végzett (GPT kérdése).
+- Az `0xe5c3f328a12958b1` és a `0xc6f8be7be2fe2b58` eltűnt a listáról. A várakozás viszont **átvándorolt** az `0xfb5ee753d43f3f0b`-ra: 2,5 → 54–56 ms/s, ~20/s, olvasásonként ~2,7 ms. A GPU-munkát az első pontos olvasás várja meg.
+
+**Következő:**
+1. Kideríteni, mit olvas az `0xfb5ee753d43f3f0b` (szigorú, tehát elágazás vagy specializáció?), és hogy kikerülhető-e.
+2. carbonimax kötegelés (`3a154025` + `fd13335327` a `PROTECT_COALESCE`-szel), a GPT feltételeivel és számlálóival.
+3. PGO.
+
+A `KYTY_SRT_LATE_WORDS` alapértéke a kódban 0 marad; a live fájl kapcsolja be.
+

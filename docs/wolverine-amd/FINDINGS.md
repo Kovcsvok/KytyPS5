@@ -42,6 +42,7 @@ cache.
 
 | Switch (live unless noted) | Change | Why it works |
 |---|---|---|
+| `KYTY_SRT_LATE_WORDS=1` (port of joshweible `ac8ee370` + `fcbb019b`) | **+6.7%** (+/-1.9, 22.6 -> 24.1 fps) | A flat SRT slot that is itself a raw read of a word a GPU buffer write owns stays zero and a GPU copy fills it just before the draw or dispatch, instead of the GPU thread faulting and waiting for the GPU. Operands, descriptors, conditions and the strict reader still read true values. Mode 2 checked 17,884 copies against the true values: 0 mismatches. Materialize 9.2 -> 7.1 ms, GPU-thread faults 4.8 -> 2.8 ms a frame. Measuring first mattered: of ~911 slow SRT reads a second only ~124 really waited for the GPU, all in four shaders. |
 | `KYTY_WRITE_BITMAP=1` + `KYTY_WRITE_BITMAP_UNPROTECT=1` | **+34.3%** (17.1 -> 22.3 fps) | Shaders writing through unbounded bindings set one bit per 4 KiB page; a guest read fault downloads only pages the GPU really wrote (from Senaxx `df053d75`, mionstyle7 `270bba48`/`0b55d9b1`/`3524eff9`). Without UNPROTECT it was -10.9% (dropped pages kept faulting). |
 | `KYTY_RANGE_EDIT=1` | **+34.9%** | Edits the virtual range table in place instead of rebuilding it. |
 | `KYTY_SRT_PAGE_CACHE=1` | **+19.6%** | Per-page backing lookups for the GPU thread's SRT reads without two hot locks. |
@@ -70,19 +71,11 @@ cache.
 
 ## In progress
 
-`KYTY_SRT_LATE_WORDS=1` (port of joshweible `ac8ee370` + `fcbb019b`): a flat SRT slot that is
-itself a raw read of a word a GPU buffer write owns stays zero and is filled by a GPU copy right
-before the draw or dispatch; operands, descriptors, conditions and the strict reader still read
-true values (a failed read is never memoized). Split measurement first: of ~911 slow SRT reads a
-second only ~124 really wait for the GPU (~0.7 ms each, ~85 ms/s), concentrated in four shaders.
-First A/B: **+4.8% (+/-4.0)**, Materialize 9.9 -> 7.9 ms, GPU-thread faults 5.3 -> 3.3 ms a frame;
-but the game crashed once with it on (a guest audio thread wrote through a bad pointer), so it
-stays off until `KYTY_SRT_LATE_WORDS=2` (copies checked against the true values) shows no
-mismatch.
+Find out what shader `0xfb5ee753d43f3f0b` reads strictly: with late words on, the remaining GPU
+wait (~20 reads/s, ~2.7 ms each) moved to it (see JOURNAL 2026-11-06).
 
 ## Next
 
-1. Finish `KYTY_SRT_LATE_WORDS` (above).
 2. Batch upload re-protections and copies (carbonimax `3a154025` + `fd13335327`, on their
    `KYTY_PROTECT_COALESCE`).
 3. PGO with an own Wolverine combat profile (pengui07 `KytyPS5-nhl` `KYTY_PGO=generate|use`).
