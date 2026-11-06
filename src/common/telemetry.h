@@ -64,10 +64,6 @@ enum class Counter : uint32_t {
 	RangesEvent,    // any thread: RecordRangeEvent, the range history with a stack trace
 	GuestReadFault, // any thread: the read faults among GuestFault
 	GuestReadFaults, // count
-	PredictOpen,    // count: pages tracked writes left readable (KYTY_WRITE_PREDICT, or would)
-	PredictMissed,  // count: of those, written after all (completion checks and refinements)
-	PredictGuarded, // count: open pages closed before a GPU-thread read
-	PredictCheck,   // completion thread: KYTY_WRITE_PREDICT checks
 	Count
 };
 

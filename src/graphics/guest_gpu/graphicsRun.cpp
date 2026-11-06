@@ -577,7 +577,6 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 
 template <typename T>
 T CommandProcessor::ReadLabel(const volatile T* addr) const {
-	LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(addr), sizeof(T));
 	return GuestGpu::LabelsDeferred() ? m_renderer.GetGpu().ReadLabel(addr) : *addr;
 }
 
@@ -654,7 +653,6 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	// Labels often share a page with bytes the GPU wrote. A plain write then faults and downloads
 	// the page, draining the GPU; WriteClean writes both copies instead.
 	auto& cache = m_renderer.GetBufferCache();
-	cache.CloseBeforeDirectWrite();
 	if (write_one_address) {
 		if (cache.WriteClean(reinterpret_cast<uint64_t>(dst), &src[dw_num - 1], sizeof(uint32_t))) {
 			return;
@@ -678,7 +676,6 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 		     num_bytes);
 	}
 	const auto value = Sync::ReadReferenceClock();
-	m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
 	if (clock_log_count.fetch_add(1) < 64) {
@@ -1269,8 +1266,6 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 			// One begin/end pair per DB; bit 63 marks each counter ready.
 			constexpr uint64_t ready_bit = 1ull << 63u;
 			const auto* results = reinterpret_cast<const volatile uint64_t*>(address);
-			LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(results),
-			                                      32u * sizeof(uint64_t));
 			for (uint32_t db = 0; db < 16u; db++) {
 				const auto begin = results[db * 2u];
 				const auto end   = results[db * 2u + 1u];
@@ -1303,8 +1298,6 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 				BufferFlushAndWait();
 			}
 			EXIT_NOT_IMPLEMENTED(address == nullptr);
-			LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(address),
-			                                      sizeof(uint64_t));
 			value = *reinterpret_cast<const volatile uint64_t*>(address);
 		} break;
 		default: EXIT("unknown predication op: 0x%08" PRIx32 "\n", op);
@@ -1378,8 +1371,6 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t draw_initiato
 		return;
 	}
 
-	LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(args_addr),
-	                                      sizeof(DrawIndexedIndirectArgs));
 	if (!indexed) {
 		DrawIndirectArgs args {};
 		std::memcpy(&args, args_addr, sizeof(args));
@@ -1436,8 +1427,6 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 	uint32_t draw_count = max_count_or_count;
 	if (count_addr != nullptr) {
-		LibKernel::Memory::GuardGpuThreadRead(reinterpret_cast<uint64_t>(count_addr),
-		                                      sizeof(uint32_t));
 		draw_count = *count_addr;
 		if (draw_count > max_count_or_count) {
 			draw_count = max_count_or_count;
@@ -1450,8 +1439,6 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
 	EXIT_NOT_IMPLEMENTED(stride_in_bytes < args_size);
-	LibKernel::Memory::GuardGpuThreadRead(m_draw_indirect_args_base_addr + data_offset,
-	                                      static_cast<uint64_t>(draw_count) * stride_in_bytes);
 
 	uint64_t index_size = 0;
 	if (indexed) {
@@ -1581,7 +1568,6 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	// that path for A/B runs.
 	static const bool threads_on_cpu = std::getenv("KYTY_INDIRECT_THREADS_ON_CPU") != nullptr;
 	if (threads_on_cpu && (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
-		LibKernel::Memory::GuardGpuThreadRead(args_addr, sizeof(vk::DispatchIndirectCommand));
 		const auto* args = reinterpret_cast<const vk::DispatchIndirectCommand*>(args_addr);
 		DispatchDirect(args->x, args->y, args->z, mode);
 		return;
@@ -1718,7 +1704,6 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			m_renderer.GetGpu().DeferLabelWrite(reinterpret_cast<uint64_t>(dst), data,
 			                                    sizeof(data));
 		} else {
-			m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 			std::memcpy(dst, &data, sizeof(data));
 		}
 
@@ -1748,7 +1733,6 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 				if (eop_event_type == 0x2f && cache_action == 0x00 && event_index == 0x06) {
 					auto* dst = static_cast<uint32_t*>(dst_gpu_addr);
 					SynchronizeGpu();
-					m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 					Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, value & 0xffffu,
 					              value >> 16u);
 					Sync::WriteAtEndOfPipeGds32(m_submit_id, command, dst, value & 0xffffu,
@@ -1787,7 +1771,6 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 						m_renderer.GetGpu().DeferLabelWrite(reinterpret_cast<uint64_t>(dst),
 						                                    value, sizeof(value));
 					} else {
-						m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 						std::memcpy(dst, &value, sizeof(value));
 					}
 
@@ -2044,7 +2027,6 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	if (LabelsAfterGpu()) {
 		PublishLabelAtCompletion(dst_gpu_addr, value, sizeof(value), false);
 	} else {
-		m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 		std::memcpy(dst_gpu_addr, &value, sizeof(value));
 	}
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
@@ -2074,7 +2056,6 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	if (LabelsAfterGpu()) {
 		PublishLabelAtCompletion(dst_gpu_addr, value, sizeof(value), false);
 	} else {
-		m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 		std::memcpy(dst_gpu_addr, &value, sizeof(value));
 	}
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,

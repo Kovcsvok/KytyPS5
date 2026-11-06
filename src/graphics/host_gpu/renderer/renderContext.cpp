@@ -213,7 +213,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	Common::Telemetry::ScopedTime telemetry(Common::Telemetry::Counter::GuestFault);
 	Common::Telemetry::Add(Common::Telemetry::Counter::GuestFaults, 1);
 	Common::Telemetry::ScopedGpuTime gpu_fault(Common::Telemetry::Counter::GpuFault);
-	// The read faults alone (KYTY_WRITE_PREDICT A/B): their own time and count.
+	// The read faults alone (refinements of GPU-written pages): their own time and count.
 	std::optional<Common::Telemetry::ScopedTime> read_fault;
 	if (access == PageFaultAccess::Read) {
 		read_fault.emplace(Common::Telemetry::Counter::GuestReadFault);

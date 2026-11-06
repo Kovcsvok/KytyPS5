@@ -1,7 +1,6 @@
 #include "kernel/semaphore.h"
 
 #include "common/assert.h"
-#include "common/liveSwitches.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -51,26 +50,13 @@ public:
 private:
 	enum class Status { Set, Deleted };
 
-	// KYTY_SEMA_WAKE_ONE (live, default 0; upstream a0268f1d): a waiter that starts waiting with it
-	// on sleeps on its own condition variable, so a signal wakes only the waiters it gives counts
-	// to instead of every waiter of the semaphore.
 	struct WaitingThread {
-		int             id         = 0;
-		int             priority   = 700;
-		int             need_count = 0;
-		Result          result     = Result::TimedOut;
-		bool            ready      = false;
-		bool            own        = false;
-		Common::CondVar cond_var;
+		int    id         = 0;
+		int    priority   = 700;
+		int    need_count = 0;
+		Result result     = Result::TimedOut;
+		bool   ready      = false;
 	};
-
-	static void Ready(WaitingThread* waiter, Result result) {
-		waiter->result = result;
-		waiter->ready  = true;
-		if (waiter->own) {
-			waiter->cond_var.Signal();
-		}
-	}
 
 	void AddWaiter(WaitingThread* waiter);
 	void RemoveWaiter(WaitingThread* waiter);
@@ -100,7 +86,8 @@ KernelSemaPrivate::~KernelSemaPrivate() {
 
 	for (auto* waiter: m_waiting_threads) {
 		if (!waiter->ready) {
-			Ready(waiter, Result::Deleted);
+			waiter->result = Result::Deleted;
+			waiter->ready  = true;
 		}
 	}
 
@@ -134,7 +121,8 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 
 	for (auto* waiter: m_waiting_threads) {
 		if (!waiter->ready) {
-			Ready(waiter, Result::Canceled);
+			waiter->result = Result::Canceled;
+			waiter->ready  = true;
 		}
 	}
 
@@ -187,7 +175,8 @@ void KernelSemaPrivate::WakeWaiters() {
 	for (auto* waiter: m_waiting_threads) {
 		if (!waiter->ready && waiter->need_count <= m_count) {
 			m_count -= waiter->need_count;
-			Ready(waiter, Result::Ok);
+			waiter->result = Result::Ok;
+			waiter->ready  = true;
 		}
 	}
 }
@@ -232,9 +221,6 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 	waiter.id         = id;
 	waiter.priority   = (m_fifo_order ? 0 : Libs::LibKernel::PthreadGetCurrentPriorityForKernel());
 	waiter.need_count = need_count;
-	static auto& wake_one = Common::LiveSwitches::Get("KYTY_SEMA_WAKE_ONE", 0);
-	waiter.own            = wake_one.load(std::memory_order_relaxed) != 0;
-	auto& cond_var        = waiter.own ? waiter.cond_var : m_cond_var;
 	AddWaiter(&waiter);
 
 	while (!waiter.ready) {
@@ -245,9 +231,9 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 		}
 
 		if (infinitely) {
-			cond_var.WaitFor(&m_mutex, SIGNAL_APC_POLL_MICROS);
+			m_cond_var.WaitFor(&m_mutex, SIGNAL_APC_POLL_MICROS);
 		} else {
-			cond_var.WaitFor(&m_mutex, micros - elapsed);
+			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
 		}
 
 		m_mutex.Unlock();
