@@ -1593,6 +1593,7 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 	stats.shader            = program.shader_hash;
 	g_indirect_failure_line = 0;
 	snapshot.late_words.clear();
+	snapshot.late_verify = false;
 	snapshot.bindless_heaps.clear();
 	snapshot.bindless_sampler_heaps.clear();
 	if (!program.resource_tracking_complete ||
@@ -1614,8 +1615,11 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 	SrtWalker walker(program, observed, program.clean_flat_slots, &clean);
 	lap(stats.setup_ns);
 	// Captured reads must list every word (specialization), so no late words then.
+	const auto late_mode = allow_late && !capture_reads ? SrtLateWordsMode() : 0;
+	snapshot.late_verify = late_mode == 2;
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt,
-	                              allow_late && !capture_reads ? &snapshot.late_words : nullptr)) {
+	                              late_mode != 0 ? &snapshot.late_words : nullptr,
+	                              late_mode == 2)) {
 		return FailIndirect(__LINE__);
 	}
 	if (timed) {
@@ -1846,14 +1850,17 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 // stays zero and is listed; RebindBuffers copies it from the cache buffer just before the draw or
 // dispatch, so the shader sees it in GPU order. Descriptors, conditions and whatever locates a word
 // still read true values; a walk that a late read would leave wrong runs again with true values.
-bool SrtLateWordsEnabled() {
-	static auto& enabled = Common::LiveSwitches::Get("KYTY_SRT_LATE_WORDS", 0);
-	return enabled.load(std::memory_order_relaxed) != 0;
+// 2 verifies: the slots keep their true values (read as before) and RebindBuffers copies the late
+// words aside and compares them at completion (telemetry srt_late_checked, srt_late_mismatches;
+// mismatches are printed).
+int SrtLateWordsMode() {
+	static auto& mode = Common::LiveSwitches::Get("KYTY_SRT_LATE_WORDS", 0);
+	return static_cast<int>(std::clamp<int64_t>(mode.load(std::memory_order_relaxed), 0, 2));
 }
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
-	const bool late = SrtLateWordsEnabled();
+	const bool late = SrtLateWordsMode() != 0;
 	if (MaterializeOnce(program, runtime, snapshot, specialization, late)) {
 		return true;
 	}

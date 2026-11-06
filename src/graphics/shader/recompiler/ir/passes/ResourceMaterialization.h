@@ -83,8 +83,8 @@ struct MaterializeStats {
 	uint64_t shader        = 0;
 };
 bool              MaterializeStatsEnabled();
-// KYTY_SRT_LATE_WORDS (live, default 0): see MaterializeResources.
-[[nodiscard]] bool SrtLateWordsEnabled();
+// KYTY_SRT_LATE_WORDS (live, default 0): see MaterializeResources. 0, 1 or 2 (verify).
+[[nodiscard]] int SrtLateWordsMode();
 MaterializeStats& ThreadMaterializeStats();
 
 // Applies an already-derived specialization to native IR before layout and emission.

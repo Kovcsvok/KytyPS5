@@ -88,8 +88,10 @@ public:
 	// Refreshes reachable scalar reads and active descriptor sources in one walk. With late, a
 	// non-clean slot that is a raw read of a word a GPU buffer write owns stays zero and is listed
 	// (flat index, guest address) for a GPU copy instead of waiting for the GPU.
+	// late_verify: the slot still gets its true value (the copy is only checked against it).
 	bool RefreshFlatBuffer(std::vector<uint32_t>&                    flat,
-	                       std::vector<std::pair<uint32_t, uint64_t>>* late = nullptr);
+	                       std::vector<std::pair<uint32_t, uint64_t>>* late        = nullptr,
+	                       bool                                        late_verify = false);
 
 private:
 	friend struct SrtNativeHelpers;

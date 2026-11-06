@@ -200,6 +200,10 @@ struct SrtReadStats {
 	uint64_t mapped_reads  = 0;
 	uint64_t mapped_ns     = 0;
 	uint64_t late_reads    = 0;
+	// Of the reads through the mapping: the strict reader's (specialization, branches; never
+	// late), and those done within 20 us (no GPU wait).
+	uint64_t mapped_strict = 0;
+	uint64_t mapped_quick  = 0;
 	// Reads through the mapping by program: count and time.
 	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> mapped_by_shader;
 	uint64_t pages         = 0;
@@ -270,8 +274,8 @@ void ReportMaterializeStats() {
 	         "ms: walk %.1f (set-up %.1f, flat SRT %.1f, fill %.1f), buffers %.1f, images %.1f, "
 	         "samplers %.1f, specialization %.1f; %.0f SRT reads (%.0f fast, sampled %.0f ns each), "
 	         "%.0f new pages (%.0f refused) %.1f ms, %.0f slow reads %.1f ms (%.0f from the "
-	         "backing %.1f ms, %.0f through the mapping %.1f ms, %.0f left to the GPU; %.0f late "
-	         "words)%s\n",
+	         "backing %.1f ms, %.0f through the mapping %.1f ms [%.0f strict, %.0f within 20 us], %.0f "
+	         "left to the GPU; %.0f late words)%s\n",
 	         per_s(m.calls), each(m.buffers), each(m.images), each(m.samplers),
 	         ms_per_s(m.setup_ns + m.flat_ns + m.fill_ns), ms_per_s(m.setup_ns),
 	         ms_per_s(m.flat_ns), ms_per_s(m.fill_ns), ms_per_s(m.buffers_ns),
@@ -279,7 +283,7 @@ void ReportMaterializeStats() {
 	         per_s(r.reads + r.fast_reads), per_s(r.fast_reads), sampled_ns, per_s(r.pages),
 	         per_s(r.refused_pages), ms_per_s(r.page_ns), per_s(r.slow_reads), ms_per_s(r.slow_ns),
 	         per_s(r.clean_reads), ms_per_s(r.clean_ns), per_s(r.mapped_reads), ms_per_s(r.mapped_ns),
-	         per_s(r.late_reads), per_s(m.late_words), MappedReadLeaders(r, seconds).c_str());
+	         per_s(r.mapped_strict), per_s(r.mapped_quick), per_s(r.late_reads), per_s(m.late_words), MappedReadLeaders(r, seconds).c_str());
 	std::fflush(stdout);
 	m = {};
 	r = {};
@@ -514,6 +518,8 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 		case Path::Mapping: {
 			r.mapped_reads++;
 			r.mapped_ns += ns;
+			r.mapped_strict += t_ordinary_read ? 0u : 1u;
+			r.mapped_quick += ns < 20000u ? 1u : 0u;
 			auto& shader = r.mapped_by_shader[ShaderRecompiler::IR::ThreadMaterializeStats().shader];
 			shader.first++;
 			shader.second += ns;

@@ -35,6 +35,7 @@ constexpr const char* CounterNames[] = {
     "ranges_hold_ms",  "ranges_changes",    "clamp_locked",     "clamp_ring_saved",
     "ranges_edit_ms",  "ranges_edits",      "ranges_size",      "ranges_event_ms",
     "guest_read_fault_ms", "guest_read_faults", "srt_fault_reads", "srt_late_words",
+    "srt_late_checked", "srt_late_mismatches",
 };
 static_assert(std::size(CounterNames) == static_cast<size_t>(Counter::Count));
 
@@ -58,7 +59,9 @@ bool IsCount(size_t index) {
 		case Counter::RangesSize:
 		case Counter::GuestReadFaults:
 		case Counter::SrtFaultReads:
-		case Counter::SrtLateWords: return true;
+		case Counter::SrtLateWords:
+		case Counter::SrtLateChecked:
+		case Counter::SrtLateMismatches: return true;
 		default: return false;
 	}
 }

@@ -1415,7 +1415,8 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 // walk of the resource control flow (upstream 6409be28), with our evaluators (native tables,
 // compiled plans) and the replay of the last walk when its conditions give the same outcomes.
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>&                    flat,
-                                  std::vector<std::pair<uint32_t, uint64_t>>* late) {
+                                  std::vector<std::pair<uint32_t, uint64_t>>* late,
+                                  bool                                        late_verify) {
 	// A failure skips the draw or dispatch; say which SRT read failed (capped).
 	static std::atomic<uint32_t> reported {0};
 	const auto report = [&](const char* reason, size_t index, uint32_t flat_offset, bool clean) {
@@ -1493,9 +1494,11 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>&                    flat
 			uint64_t address = 0;
 			uint64_t base    = 0;
 			if (evaluator.RawReadTarget(*raw, address, base) == 1 && address == probe.address) {
-				flat[read.flat_offset] = 0;
 				late->emplace_back(read.flat_offset, address);
-				return true;
+				if (!late_verify) {
+					flat[read.flat_offset] = 0;
+					return true;
+				}
 			}
 			// An operand's read was the late one: it locates the word, so read everything.
 			ok = evaluate();

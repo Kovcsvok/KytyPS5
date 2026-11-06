@@ -76,6 +76,8 @@ struct ResourceSnapshot {
 	// KYTY_SRT_LATE_WORDS: flat SRT words a GPU buffer write still owned, by flat index and guest
 	// address. Their flat value is zero; a GPU copy recorded before the draw or dispatch fills them.
 	std::vector<std::pair<uint32_t, uint64_t>> late_words;
+	// KYTY_SRT_LATE_WORDS=2: the flat words hold true values and the copies only check them.
+	bool                                       late_verify = false;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
 };

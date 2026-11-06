@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <unordered_map>
 #include <atomic>
 #include <bit>
@@ -1393,6 +1394,91 @@ void RenderExecutor::FindBuffers(PreparedBindings& prepared) {
 	}
 }
 
+// KYTY_SRT_LATE_WORDS: a run of flat SRT words the walk left to a GPU copy.
+struct LateRun {
+	uint32_t index   = 0;
+	uint64_t address = 0;
+	uint32_t words   = 0;
+};
+
+// KYTY_SRT_LATE_WORDS=2: the late words are copied into the download buffer instead, and the
+// completion thread compares them with the true values the walk put in the flat SRT. A mismatch
+// means a copy saw another value than the CPU read at record time.
+static void VerifyLateWords(RenderContext& context, uint64_t shader,
+                            const ShaderRecompiler::IR::ResourceSnapshot& snapshot,
+                            std::span<const LateRun>                      runs) {
+	struct Expected {
+		uint64_t address = 0;
+		uint32_t value   = 0;
+	};
+	std::vector<Expected>                           expected;
+	std::vector<std::pair<vk::Buffer, vk::BufferCopy>> copies;
+	for (const auto& run: runs) {
+		const auto bytes            = uint64_t {run.words} * sizeof(uint32_t);
+		const auto [source, offset] = context.GetBufferCache().ObtainBuffer(run.address, bytes, false);
+		vk::BufferCopy copy {};
+		copy.srcOffset = offset;
+		copy.dstOffset = expected.size() * sizeof(uint32_t);
+		copy.size      = bytes;
+		copies.emplace_back(source->Handle(), copy);
+		for (uint32_t w = 0; w < run.words; w++) {
+			const auto index = run.index + w;
+			expected.push_back({run.address + uint64_t {w} * sizeof(uint32_t),
+			                    index < snapshot.flattened_srt.size() ? snapshot.flattened_srt[index]
+			                                                          : 0u});
+		}
+	}
+	auto&      download   = context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Download);
+	const auto total      = expected.size() * sizeof(uint32_t);
+	auto [mapped, offset] = download.Map(total, 64);
+	if (mapped == nullptr) {
+		return;
+	}
+	download.Commit();
+	auto& command = context.GetCommandScheduler().Current();
+	command.EndRendering();
+	const auto        native = command.Recorder();
+	vk::MemoryBarrier before {};
+	before.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+	before.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                       vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0,
+	                       nullptr);
+	for (auto& [source, copy]: copies) {
+		copy.dstOffset += offset;
+		native.copyBuffer(source, download.Handle(), 1, &copy);
+	}
+	vk::MemoryBarrier after {};
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eHostRead;
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                       vk::PipelineStageFlagBits::eHost | vk::PipelineStageFlagBits::eAllCommands,
+	                       {}, 1, &after, 0, nullptr, 0, nullptr);
+	context.GetCommandScheduler().DeferPriorityOperation(
+	    [buffer = &download, mapped, offset, total, shader, expected = std::move(expected)] {
+		    buffer->Invalidate(offset, total);
+		    static std::atomic<uint32_t> printed {0};
+		    uint64_t                     mismatches = 0;
+		    for (size_t i = 0; i < expected.size(); i++) {
+			    uint32_t copied = 0;
+			    std::memcpy(&copied, mapped + i * sizeof(uint32_t), sizeof(copied));
+			    if (copied != expected[i].value) {
+				    mismatches++;
+				    if (printed.fetch_add(1, std::memory_order_relaxed) < 64) {
+					    ::printf("SRT late word mismatch: shader 0x%016" PRIx64 " address 0x%016" PRIx64
+					             ": read 0x%08x at record time, copied 0x%08x\n",
+					             shader, expected[i].address, expected[i].value, copied);
+					    std::fflush(stdout);
+				    }
+			    }
+		    }
+		    Common::Telemetry::Add(Common::Telemetry::Counter::SrtLateChecked,
+		                           static_cast<int64_t>(expected.size()));
+		    Common::Telemetry::Add(Common::Telemetry::Counter::SrtLateMismatches,
+		                           static_cast<int64_t>(mismatches));
+	    });
+}
+
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
@@ -1403,11 +1489,6 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	// KYTY_SRT_LATE_WORDS: the flat words the walk left to the GPU, as runs of consecutive flat
 	// indices and addresses (joshweible fcbb019b). A word a bindless patch replaces needs no copy.
 	// Obtaining a buffer can merge cache buffers, so it comes before anything is bound.
-	struct LateRun {
-		uint32_t index   = 0;
-		uint64_t address = 0;
-		uint32_t words   = 0;
-	};
 	static thread_local std::vector<std::pair<uint32_t, uint64_t>> late_words;
 	static thread_local std::vector<LateRun>                       late_runs;
 	late_words.assign(snapshot.late_words.begin(), snapshot.late_words.end());
@@ -1496,7 +1577,9 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 			}
 			prepared.flattened_srt = NativeUpload(m_context, m_bindless_srt);
 		}
-		if (!late_runs.empty()) {
+		if (!late_runs.empty() && snapshot.late_verify) {
+			VerifyLateWords(m_context, program.shader_hash, snapshot, late_runs);
+		} else if (!late_runs.empty()) {
 			// The copies follow every earlier GPU write in queue order and precede the shader.
 			auto& command = m_context.GetCommandScheduler().Current();
 			command.EndRendering();

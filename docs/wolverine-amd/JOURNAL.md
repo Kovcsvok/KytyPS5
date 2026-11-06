@@ -941,3 +941,50 @@ A leírónkénti találati arány méréséhez külön számláló kell; ez a `m
 A `campaign.py` kapuja általános lett: `{"min_sum": {"oszlop": érték}}`.
 **Figyelendő:** képhibák (pl. rossz anyag vagy fény); a csendes adathibát az A/B nem mutatja ki.
 
+## 2026-11-06 — Opus — kampány a `88e06cd3`-on: `KYTY_SRT_LATE_WORDS` +4,8%, de összeomlás B-ben
+`D:\KytyAnalysis\campaigns\2026-11-06_164746`, napló: `run_2026-11-06_164656.log`.
+
+**A bontott mérés (`stats-before`, 0-s mód, másodpercenként):** ~911 lassú SRT-olvasás.
+- **~762 a backingből:** összesen ~0,2 ms. Ezek nem várnak.
+- **~124 a leképezésen át:** ~85 ms (olvasásonként ~0,7 ms). Ez a valódi várakozás.
+- **Shaderenként** (`0xe5c3f328a12958b1` 25/s 54 ms, `0xc6f8be7be2fe2b58` 25/s 16 ms, `0x06544f382c6b0850` 49/s 9 ms, `0xfb5ee753d43f3f0b` 25/s 3 ms): a költség pár shaderben összpontosul.
+
+**`late-on` (1 perc, 1-es mód):** `srt_late_words` 9616 a második félben. Összeomlás nem volt.
+
+**`late-words` ABBA 0 / 1:** **+4,8% (±4,0, n=15)**, 20,4 → 21,4 fps; p99 150 → 133 ms; 1% low 6,6 → 7,5. GPU-szál, képkockánként:
+
+| Számláló | A | B |
+|---|---|---|
+| `materialize_ms` | 9,86 | 7,91 |
+| `gpu_readmem_ms` | 5,37 | 3,55 |
+| `gpu_fault_ms` | 5,26 | 3,32 |
+| `gpu_submit_ms` | 4,83 | 3,35 |
+| `gpu_process_ms` | 43,3 | 40,7 |
+
+B-ben továbbra is ~83 leképezéses olvasás/s maradt, ~51 késői szó/s mellett.
+
+**Összeomlás 16:54:48-kor, B-blokk közben** (B 16:54:39-től, a késői szavak összesen ~3,5 percig voltak bekapcsolva):
+- Az `AK::AudioMgr` vendégszál a `[r14]`-ből (`0x13139623a0`) betöltött `0x100000000` címre írt, ott nincs leképezés.
+- Ilyen összeomlás a megőrzött naplókban korábban nem volt. Ok-okozat nem bizonyított. Lehetséges út: egy rossz értékű késői SRT-szó miatt egy shader rossz helyre ír, és felülír vendégmemóriát.
+- A kampány ezt nem vette észre: az A/B a halott emulátorral is lefutott, és a B-t „nyertesként” beírta a live fájlba. A `KYTY_SRT_LATE_WORDS=1` sort kézzel kivettem.
+
+**Ellenőrzött, nem hibás:**
+- A CPU-oldali fogyasztók (`ComputeBufferWriteExtents`, leírók, feltételek) a walkeren át pontosan olvasnak.
+- A rajzolás a `RebindBuffers` után kezdi a renderelést (`BeginRendering`, `renderDraw.cpp`), így az `EndRendering` nem hagy draw-t renderelésen kívül.
+
+**Új (kód):**
+- **`KYTY_SRT_LATE_WORDS=2` (ellenőrző mód):**
+  - a slot a pontos értéket kapja (a shader helyes adatot lát);
+  - a késői futamokat a `VerifyLateWords` a letöltőpufferbe másolja, és a befejező szál összeveti a felvételkor olvasott értékkel;
+  - telemetria: `srt_late_checked`, `srt_late_mismatches`; az első 64 eltérés a naplóba kerül (shader, cím, a két érték).
+  - Ha egy GPU-másolat valaha mást lát, mint a pontos olvasás (sorrend, későbbi CPU-írás a leképezett pufferbe stb.), ez kimutatja.
+  - A mód a snapshotban utazik (`late_verify`), így egy közbeni kapcsolás nem keveri a két viselkedést.
+- **A `Materialize` sor új mezői:** a leképezéses olvasásokból a szigorú olvasóé (`strict`, sosem késői) és a 20 µs alatti (nem várt). Ez az „utolsó író kész-e?” kérdés közelítése.
+- **`campaign.py`:**
+  - ha az emulátor egy A/B alatt meghal vagy végzetes sort ír, a fázis `crashed`; megnevezi, melyik setup alatt (`setup_at`), és semmit sem visz tovább;
+  - kapuk: `min_sum` és `max_sum` az egész fázisra.
+
+**Következő terv:** `plans/2026-11-07b.json`.
+1. `late-verify` (3 perc, 2-es mód). Kapu: `srt_late_checked` > 0 és `srt_late_mismatches` = 0.
+2. Csak ha átment: `late-words` ABBA 0 / 1 (6 perc).
+

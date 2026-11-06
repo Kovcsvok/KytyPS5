@@ -10,8 +10,10 @@ A plan is a list of phases:
 campaign carries. After an A/B: B wins when its paired fps change minus its error is above zero (its
 values are then carried into later phases and written to the live file at the end), loses when
 plus its error is below zero. A phase whose "needs" lost is skipped. "gate" (optional, on a hold
-phase): {"min_sum": {"srt_late_words": 1}} stops phases needing it when a telemetry column's sum
-over the phase's second half is below the value.
+phase): {"min_sum": {"srt_late_checked": 1}, "max_sum": {"srt_late_mismatches": 0}} stops phases
+needing it when a telemetry column's sum over the phase is below / above the value.
+An A/B during which the emulator dies or logs a fatal line is "crashed": the setup active at the
+crash is named and nothing is carried.
 Every phase checks first that the emulator still runs and its log shows no fatal line; otherwise the
 campaign stops. The live file gets the winners at the end, nothing else changes. Summary:
 D:\\KytyAnalysis\\campaigns\\<time>\\summary.txt (the experiment schedules stay in userdata\\logs).
@@ -80,6 +82,21 @@ def telemetry_sums(start_ms, end_ms, names):
     return sums
 
 
+def setup_at(schedule_path, when_ms):
+    """The name of the experiment setup whose block covers when_ms (or the last block's)."""
+    try:
+        with open(schedule_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return "unknown"
+    setups = {str(k): v.get("name", k) for k, v in data.get("setups", {}).items()}
+    blocks = data.get("blocks", [])
+    for start, end, setup in blocks:
+        if start <= when_ms <= end + 2000:
+            return setups.get(str(setup), str(setup))
+    return setups.get(str(blocks[-1][2]), "?") + " (last block)" if blocks else "unknown"
+
+
 def paired_b(report):
     """(mean %, error %) of the second setup's paired change, or None."""
     rows = [l for l in report.splitlines() if re.search(r"[+-][\d.]+% \(\+/-[\d.]+, n=\d+\)", l)]
@@ -145,12 +162,12 @@ def main():
                 outcome[name] = "held"
                 gate = phase.get("gate")
                 if gate:
-                    # Telemetry sums over the second half (a switch has settled by then):
-                    # {"min_sum": {"column": value}} fails when a sum is below its value.
-                    columns = list(gate.get("min_sum", {}))
-                    sums = telemetry_sums((start + end) // 2, end, columns)
-                    say(f"   telemetry (2nd half): {sums}")
-                    if any(sums[c] < v for c, v in gate.get("min_sum", {}).items()):
+                    # Telemetry sums over the phase: {"min_sum": {"column": value}} fails when a
+                    # sum is below its value, {"max_sum": {...}} when one is above.
+                    low, high = gate.get("min_sum", {}), gate.get("max_sum", {})
+                    sums = telemetry_sums(start, end, list(low) + list(high))
+                    say(f"   telemetry: {sums}")
+                    if any(sums[c] < v for c, v in low.items()) or any(sums[c] > v for c, v in high.items()):
                         outcome[name] = "gated"
                         say("   gate failed: phases needing it are skipped")
                 continue
@@ -168,17 +185,30 @@ def main():
                 say("   experiment.py failed:\n" + run.stdout[-800:] + run.stderr[-800:])
                 outcome[name] = "stopped"
                 break
+            # An emulator that died during the A/B: say in which setup, and carry nothing.
+            crashed = not emulator_running() or fatal_lines(log, log_offset)
+            if crashed:
+                crash_ms = os.path.getmtime(log) * 1000 if log else time.time() * 1000
+                say(f"   the emulator died or logged a fatal line during this phase (last log write "
+                    f"{time.strftime('%H:%M:%S', time.localtime(crash_ms / 1000))}, setup "
+                    f"{setup_at(schedule.group(1).strip(), crash_ms)}); nothing is carried")
             report = subprocess.run([sys.executable, os.path.join(HERE, "experiment_report.py"),
                                      schedule.group(1).strip()], capture_output=True, **TEXT).stdout
             with open(os.path.join(out_dir, f"{len(outcome) + 1:02d}_{name}.txt"), "w", encoding="utf-8") as out:
                 out.write(report)
             result = paired_b(report)
             if result is None:
-                outcome[name] = "unclear"
+                outcome[name] = "crashed" if crashed else "unclear"
                 say("   no paired result")
+                if crashed:
+                    break
                 continue
             mean, err = result
             verdict = "won" if mean - err > 0 else "lost" if mean + err < 0 else "unclear"
+            if crashed:
+                say(f"   B {mean:+.1f}% (+/-{err:.1f}) before the crash")
+                outcome[name] = "crashed"
+                break
             outcome[name] = verdict
             say(f"   B {mean:+.1f}% (+/-{err:.1f}): {verdict}")
             if verdict == "won":

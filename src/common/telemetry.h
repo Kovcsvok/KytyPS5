@@ -66,6 +66,8 @@ enum class Counter : uint32_t {
 	GuestReadFaults, // count
 	SrtFaultReads,   // count: GPU-thread SRT reads that went through the guest mapping (may fault)
 	SrtLateWords,    // count: flat SRT words copied on the GPU instead (KYTY_SRT_LATE_WORDS)
+	SrtLateChecked,  // count: KYTY_SRT_LATE_WORDS=2, copied words compared with the true value
+	SrtLateMismatches, // count: of those, different
 	Count
 };
 

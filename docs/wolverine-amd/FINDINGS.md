@@ -68,10 +68,21 @@ cache.
 | `KYTY_SEMA_WAKE_ONE` (upstream `a0268f1d`: a semaphore signal wakes only the waiters it serves) | -5.9% (+/-7.7), n.s. | Removed. |
 | `KYTY_DRAW_PREP` + `KYTY_SRT_FAST_READ` | +20% in one run, +3.5% n.s. in the confirmation | Kept on: the mechanism is real (Materialize 21.6 -> 8.8 ms) but the fps gain was scene noise. |
 
+## In progress
+
+`KYTY_SRT_LATE_WORDS=1` (port of joshweible `ac8ee370` + `fcbb019b`): a flat SRT slot that is
+itself a raw read of a word a GPU buffer write owns stays zero and is filled by a GPU copy right
+before the draw or dispatch; operands, descriptors, conditions and the strict reader still read
+true values (a failed read is never memoized). Split measurement first: of ~911 slow SRT reads a
+second only ~124 really wait for the GPU (~0.7 ms each, ~85 ms/s), concentrated in four shaders.
+First A/B: **+4.8% (+/-4.0)**, Materialize 9.9 -> 7.9 ms, GPU-thread faults 5.3 -> 3.3 ms a frame;
+but the game crashed once with it on (a guest audio thread wrote through a bad pointer), so it
+stays off until `KYTY_SRT_LATE_WORDS=2` (copies checked against the true values) shows no
+mismatch.
+
 ## Next
 
-1. GPU-copy the SRT words the GPU still writes instead of a CPU readback (joshweible `ac8ee370`,
-   runs merged by `fcbb019b`); target the ~8 ms a frame above.
+1. Finish `KYTY_SRT_LATE_WORDS` (above).
 2. Batch upload re-protections and copies (carbonimax `3a154025` + `fd13335327`, on their
    `KYTY_PROTECT_COALESCE`).
 3. PGO with an own Wolverine combat profile (pengui07 `KytyPS5-nhl` `KYTY_PGO=generate|use`).

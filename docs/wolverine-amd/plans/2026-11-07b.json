@@ -1,0 +1,5 @@
+[
+ {"name": "late-verify", "minutes": 3, "hold": {"KYTY_SRT_LATE_WORDS": 2},
+  "gate": {"min_sum": {"srt_late_checked": 1}, "max_sum": {"srt_late_mismatches": 0}}},
+ {"name": "late-words", "minutes": 6, "ab": {"KYTY_SRT_LATE_WORDS": [0, 1]}, "needs": "late-verify"}
+]
