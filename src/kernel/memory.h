@@ -129,6 +129,9 @@ bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t
 // GPU thread: whether a GPU buffer write owns some of these bytes and no image does, so a GPU copy
 // from the buffer cache reads what the guest would (KYTY_SRT_LATE_WORDS).
 [[nodiscard]] bool IsGpuBufferWritten(uint64_t vaddr, uint64_t size);
+// GPU thread, diagnostics: whether the GPU work that last wrote the cached buffer holding vaddr is
+// still running (KYTY_MATERIALIZE_STATS).
+[[nodiscard]] bool IsGpuWriteInFlight(uint64_t vaddr);
 // Any thread (the draw-prep scanner, KYTY_DRAW_PREP): the backing bytes of [vaddr, vaddr + size)
 // when one mapping holds them and the buffer cache has no GPU-written byte among them, else
 // nullptr. The texture cache is not asked, and the answer can be stale by the time the bytes are

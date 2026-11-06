@@ -71,6 +71,19 @@ private:
 	std::atomic_flag& m_lock;
 };
 
+// KYTY_REPROTECT_BATCH: the protections recorded on the GPU thread (see pageManager.h).
+struct DeferredSpan {
+	void*                       impl; // PageManager::Impl
+	uint64_t                    begin;
+	uint64_t                    end;
+	Common::VirtualMemory::Mode mode;
+};
+std::mutex                g_deferred_mutex;
+std::vector<DeferredSpan> g_deferred_spans;
+std::atomic<bool>         g_deferred_active {false};
+thread_local bool         t_deferred_capture  = false;
+thread_local bool         t_deferred_applying = false;
+
 void ValidateRange(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		Fatal("invalid range vaddr=0x%016" PRIx64 ", size=0x%016" PRIx64, vaddr, size);
@@ -190,11 +203,50 @@ struct PageManager::Impl {
 	}
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
+		if (t_deferred_capture && !t_deferred_applying &&
+		    mode != Common::VirtualMemory::Mode::ReadWrite &&
+		    g_deferred_active.load(std::memory_order_relaxed)) [[unlikely]] {
+			std::lock_guard lock(g_deferred_mutex);
+			auto&           spans = g_deferred_spans;
+			if (!spans.empty() && spans.back().impl == this && spans.back().mode == mode &&
+			    spans.back().end == vaddr) {
+				spans.back().end = vaddr + size;
+			} else {
+				spans.push_back({this, vaddr, vaddr + size, mode});
+			}
+			return;
+		}
 		KYTY_PROFILER_BLOCK("PageManager::Protect");
+		Common::Telemetry::Add(Common::Telemetry::Counter::ProtectCalls, 1);
 		Common::Telemetry::ScopedGpuTime telemetry(Common::Telemetry::Counter::GpuProtect);
 		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));
+		}
+	}
+
+	// KYTY_REPROTECT_BATCH: applies `mode` to the pages of [begin, end) whose state asks for it.
+	void ApplyDeferred(uint64_t begin, uint64_t end, Common::VirtualMemory::Mode mode) noexcept {
+		for (auto chunk_begin = begin; chunk_begin < end;) {
+			const auto chunk_end   = std::min(end, Common::AlignUp(chunk_begin + 1, REGION_SIZE));
+			const auto region_base = Common::AlignDown(chunk_begin, REGION_SIZE);
+			auto*      region      = FindRegion(chunk_begin);
+			if (region != nullptr) {
+				const auto first = static_cast<size_t>((chunk_begin - region_base) / PAGE_SIZE);
+				const auto last  = static_cast<size_t>((chunk_end - region_base) / PAGE_SIZE);
+				SpinGuard  lock(region->lock);
+				size_t     run = last;
+				for (size_t page = first; page <= last; page++) {
+					const bool wanted = page < last && region->pages[page].Perms() == mode;
+					if (wanted && run == last) {
+						run = page;
+					} else if (!wanted && run != last) {
+						Protect(region_base + run * PAGE_SIZE, (page - run) * PAGE_SIZE, mode);
+						run = last;
+					}
+				}
+			}
+			chunk_begin = chunk_end;
 		}
 	}
 
@@ -310,6 +362,63 @@ void PageManager::Watchers(uint64_t vaddr, uint32_t& write, uint32_t& access) co
 	const auto& page = region->pages[static_cast<size_t>((vaddr % REGION_SIZE) / PAGE_SIZE)];
 	write            = page.write_watchers;
 	access           = page.access_watchers;
+}
+
+void PageManager::BeginDeferredProtect() noexcept {
+	g_deferred_active.store(true, std::memory_order_relaxed);
+}
+
+PageManager::DeferCapture::DeferCapture() noexcept: m_previous(t_deferred_capture) {
+	t_deferred_capture = true;
+}
+
+PageManager::DeferCapture::~DeferCapture() {
+	t_deferred_capture = m_previous;
+}
+
+bool PageManager::DeferringProtect() noexcept {
+	return g_deferred_active.load(std::memory_order_relaxed);
+}
+
+void PageManager::FlushDeferredProtect() noexcept {
+	constexpr uint64_t                     MaxGap = 16 * PAGE_SIZE;
+	static thread_local std::vector<DeferredSpan> spans;
+	{
+		std::lock_guard lock(g_deferred_mutex);
+		if (g_deferred_spans.empty()) {
+			return;
+		}
+		spans.clear();
+		std::swap(spans, g_deferred_spans);
+	}
+	// Applied at once, even from inside a capture scope.
+	t_deferred_applying = true;
+	std::sort(spans.begin(), spans.end(), [](const DeferredSpan& a, const DeferredSpan& b) {
+		return a.impl != b.impl ? a.impl < b.impl : a.begin < b.begin;
+	});
+	for (size_t i = 0; i < spans.size();) {
+		auto   merged = spans[i];
+		size_t j      = i + 1;
+		for (; j < spans.size(); j++) {
+			const auto& next = spans[j];
+			if (next.impl != merged.impl || next.mode != merged.mode ||
+			    next.begin > merged.end + MaxGap) {
+				break;
+			}
+			merged.end = std::max(merged.end, next.end);
+		}
+		static_cast<Impl*>(merged.impl)->ApplyDeferred(merged.begin, merged.end, merged.mode);
+		i = j;
+	}
+	t_deferred_applying = false;
+	Common::Telemetry::Add(Common::Telemetry::Counter::ProtectDeferredSpans,
+	                       static_cast<int64_t>(spans.size()));
+	spans.clear();
+}
+
+void PageManager::EndDeferredProtect() noexcept {
+	FlushDeferredProtect();
+	g_deferred_active.store(false, std::memory_order_relaxed);
 }
 
 template <bool track, bool is_read>

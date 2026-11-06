@@ -1614,18 +1614,31 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed, program.clean_flat_slots, &clean);
 	lap(stats.setup_ns);
-	// Captured reads must list every word (specialization), so no late words then.
-	const auto late_mode = allow_late && !capture_reads ? SrtLateWordsMode() : 0;
+	auto& context   = ThreadSrtReadContext();
+	context.capture = capture_reads;
+	context.section = SrtReadSection::Flat;
+	// A program that captures its specialization reads lists every word it evaluated on the host
+	// for the renderer's alias proof: its late words join that list (KYTY_SRT_LATE_WIDE), as the
+	// copy, like the host read, happens before the draw or dispatch.
+	const auto late_mode =
+	    allow_late && (!capture_reads || SrtLateWideEnabled()) ? SrtLateWordsMode() : 0;
 	snapshot.late_verify = late_mode == 2;
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt,
 	                              late_mode != 0 ? &snapshot.late_words : nullptr,
-	                              late_mode == 2)) {
+	                              late_mode == 2, late_mode != 0 && SrtLateWideEnabled())) {
+		context.section = SrtReadSection::Other;
 		return FailIndirect(__LINE__);
+	}
+	if (capture_reads) {
+		for (const auto& [index, address]: snapshot.late_words) {
+			reads.emplace_back(address, sizeof(uint32_t));
+		}
 	}
 	if (timed) {
 		stats.late_words += snapshot.late_words.size();
 	}
 	lap(stats.flat_ns);
+	context.section = SrtReadSection::Fill;
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	snapshot.uniform_fill = {};
 	const auto& fill = program.uniform_fill;
@@ -1651,6 +1664,7 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 		return true;
 	};
 	lap(stats.fill_ns);
+	context.section = SrtReadSection::Buffers;
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.clear();
 	specialization.buffers.reserve(program.info.buffers.size());
@@ -1738,13 +1752,15 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 	{
 		// Write extents only size the GPU-written range; their reads do not specialize the
 		// shader, so they stay out of the specialization-read proof.
-		const auto captured = reads.size();
+		const auto                captured = reads.size();
+		const SrtReadSectionScope extents_scope(SrtReadSection::Extents);
 		ComputeBufferWriteExtents(program, observed, walker, snapshot);
 		if (capture_reads) {
 			reads.resize(captured);
 		}
 	}
 	lap(stats.buffers_ns);
+	context.section = SrtReadSection::Images;
 	snapshot.images.resize(program.info.images.size());
 	specialization.images.resize(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
@@ -1784,6 +1800,7 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 		}
 	}
 	lap(stats.images_ns);
+	context.section = SrtReadSection::Samplers;
 	snapshot.samplers.resize(program.info.samplers.size());
 	specialization.samplers.assign(program.info.samplers.size(), {});
 	for (uint32_t i = 0; i < program.info.samplers.size(); ++i) {
@@ -1834,12 +1851,14 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 		}
 	}
 	lap(stats.samplers_ns);
+	context.section = SrtReadSection::Specialize;
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 	if (!BuildResourceSpecialization(program, snapshot, specialization,
 	                                 runtime.float_image_atomics)) {
 		return FailIndirect(__LINE__);
 	}
 	lap(stats.specialize_ns);
+	context.section = SrtReadSection::Other;
 	return true;
 }
 
@@ -1853,6 +1872,14 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 // 2 verifies: the slots keep their true values (read as before) and RebindBuffers copies the late
 // words aside and compares them at completion (telemetry srt_late_checked, srt_late_mismatches;
 // mismatches are printed).
+// KYTY_SRT_LATE_WIDE=1 (live, default 0): late words also in programs that capture their
+// specialization reads (the late addresses join the captured list) and for slots that are uniform
+// buffer reads (LoadBufferU32), not only raw address and constant-buffer reads.
+bool SrtLateWideEnabled() {
+	static auto& wide = Common::LiveSwitches::Get("KYTY_SRT_LATE_WIDE", 0);
+	return wide.load(std::memory_order_relaxed) != 0;
+}
+
 int SrtLateWordsMode() {
 	static auto& mode = Common::LiveSwitches::Get("KYTY_SRT_LATE_WORDS", 0);
 	return static_cast<int>(std::clamp<int64_t>(mode.load(std::memory_order_relaxed), 0, 2));

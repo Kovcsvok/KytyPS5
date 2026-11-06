@@ -1020,3 +1020,38 @@ B-ben továbbra is ~83 leképezéses olvasás/s maradt, ~51 késői szó/s melle
 
 A `KYTY_SRT_LATE_WORDS` alapértéke a kódban 0 marad; a live fájl kapcsolja be.
 
+## 2026-11-06 — Opus — 3. kör: a `0xfb5e` olvasásainak diagnosztikája, `KYTY_SRT_LATE_WIDE`, `KYTY_REPROTECT_BATCH` (kód)
+**GPT-javítások (3. válasz):**
+- A 20 µs-os küszöb nem bizonyítja, hogy az író még fut. A leképezéses olvasásnál most közvetlenül megnézzük, hogy a puffert utoljára író GPU-munka tickje befejeződött-e (`BufferCache::IsGpuWriteInFlight`, `last_gpu_write_tick` + `IsFree`).
+- A `capture_specialization_reads` programoknál a késői szavak eddig ki voltak kapcsolva. Ilyen minden program, amelynek SRT-tervében van vezérlési folyam, vagy amely képolvasást vagy host-kiértékelt olvasást rögzít.
+- A rögzített olvasásokat a renderer alias-bizonyítása használja: a hoston kiértékelt szót az adott rajzolás vagy dispatch nem írhatja. A késői szó másolata, mint a host-olvasás, a rajzolás előtt történik; ezért a címe bekerül a rögzített listába, és a bizonyítás érvényes marad.
+
+**Diagnosztika (`KYTY_MATERIALIZE_STATS=1`):** a `mapped by shader` lista most kulcsonként bontva: program, szakasz (`flat`, `condition`, `fill`, `buffers`, `extents`, `images`, `samplers`, `specialize`), olvasó (`strict` vagy `ordinary`) és `capture`. Mindegyikhez darab/s, ms/s, és hogy közülük hánynál futott még az író. Ebből kiderül, mit olvas a `0xfb5ee753d43f3f0b`, és miért.
+
+**`KYTY_SRT_LATE_WIDE=1` (élő, alap 0):** a `KYTY_SRT_LATE_WORDS` mellett:
+1. a capture-programokban is késleltet, és a késői címeket a rögzített olvasások közé teszi;
+2. a `LoadBufferU32` (uniform buffer read, V#-on át) slotokat is késleltetheti; a cím a `BufferReadTarget` (az `EvaluateBufferRead` címszámítása, kiemelve).
+
+A 2-es ellenőrző mód erre is működik.
+
+**`KYTY_REPROTECT_BATCH=1` (élő, alap 0; carbonimax `9ef01206` + `3a154025`, átírva):**
+- **Mit gyűjt:** a GPU-szál csak-olvasó szinkronizációinak feltöltés utáni újravédését (`ForEachUploadRange`, `defer_protect`) nem alkalmazza azonnal. A `PageManager` rögzíti őket (`DeferCapture`, globális span-lista mutexszel, csak a GPU-szál rögzít), és a feltöltések vendégbájtjait csak ezek után másolja a koherens staging-memóriába.
+- **Kiürítés (`FlushDeferredUploads`):** előbb a spanok rendezve, 16 lapos rések mentén összevonva, a régiózár alatt, és csak ott, ahol a lap állapota még ugyanazt a védést kéri; utána a másolások.
+- **Mikor ürül:**
+  - minden beküldés előtt (`CommandScheduler::SetPreSubmit`);
+  - vendég-szinkronpont csomagnál (`WAIT_REG_MEM`, `WRITE_DATA`, `COPY_DATA`, `EVENT_WRITE_EOP/EOS`, `RELEASE_MEM`, `MEM_SEMAPHORE`, `NOP`/custom);
+  - szelet végén és vendégparancsok előtt.
+- **Ha nincs hely:** ha a staging-gyűrű várakozás nélkül nem ad helyet, előbb ürít, és az azonnali úton megy tovább.
+- **Mit nem gyűjt:** írt feltöltést, képfigyelést és védésfeloldást soha.
+- **Kikapcsoláskor** (élő) ürít, és leállítja a gyűjtést.
+- **Napló:** `Reprotect batch (5 s): flushes at submit/sync packets/slice ends/guest commands, copies, MiB`.
+- **Telemetria:** `protect_calls` (minden védésváltás-syscall), `protect_deferred_spans`, `batch_flushes`.
+- **A GPT feltételei** (DEFER-hiba elkerülése): csak olvasott feltöltés; a védés megelőzi a másolást; ugyanazt a tartományt az összevonás egyszer védi; a parancssorrend nem változik; a köteg beküldés és vendég-szinkron előtt ürül; a GPU-írás védése külön, azonnali úton marad.
+
+A shader-fordítás nem változik.
+
+**Kampány:** `plans/2026-11-07c.json`, ~12 perc.
+1. `wide-verify` (2 perc, `LATE_WORDS=2` + `WIDE=1`). Kapu: van ellenőrzött szó, és 0 eltérés.
+2. `late-wide` ABBA 0 / 1 (5 perc).
+3. `reprotect-batch` ABBA 0 / 1 (5 perc).
+

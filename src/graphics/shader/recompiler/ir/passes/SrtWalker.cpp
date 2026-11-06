@@ -23,7 +23,12 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 namespace {
 thread_local SrtLateProbe t_late_probe;
 thread_local bool         t_late_retry = false;
+thread_local SrtReadContext t_read_context;
 } // namespace
+
+SrtReadContext& ThreadSrtReadContext() {
+	return t_read_context;
+}
 
 SrtLateProbe& ThreadSrtLateProbe() {
 	return t_late_probe;
@@ -962,42 +967,49 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 	return true;
 }
 
-bool SrtWalker::EvaluateBufferRead(const Inst& inst, uint64_t& result) {
-	if (!IsUniformBufferRead(m_program, inst)) return false;
+int SrtWalker::BufferReadTarget(const Inst& inst, uint64_t& address) {
+	if (!IsUniformBufferRead(m_program, inst)) return 0;
 	uint64_t enabled = 0;
-	if (!Arg(inst, 4, enabled)) return false;
-	if (enabled == 0u) {
-		result = 0u;
-		return true;
-	}
+	if (!Arg(inst, 4, enabled)) return 0;
+	if (enabled == 0u) return 2;
 	ShaderBufferResource descriptor;
 	for (uint32_t i = 0; i < 4u; i++) {
 		uint64_t field = 0;
-		if (!HandleArg(inst, 0, i, field)) return false;
+		if (!HandleArg(inst, 0, i, field)) return 0;
 		descriptor.fields[i] = static_cast<uint32_t>(field);
 	}
 	// Lane-indexed and swizzled addressing are not uniform raw linear reads.
 	if (descriptor.Type() != 0u || descriptor.AddTid() || descriptor.SwizzleEnabled() ||
 	    descriptor.OutOfBounds() != 0u || descriptor.Stride() < 4u)
-		return false;
+		return 0;
 	uint64_t index = 0, offset = 0, scalar = 0;
-	if (!Arg(inst, 1, index) || !Arg(inst, 2, offset) || !Arg(inst, 3, scalar)) return false;
+	if (!Arg(inst, 1, index) || !Arg(inst, 2, offset) || !Arg(inst, 3, scalar)) return 0;
 	const auto& memory      = m_program.memory_info[inst.Flags<MemoryFlags>().index];
 	const auto  byte_offset = static_cast<uint32_t>(offset + memory.offset);
 	if (index >= descriptor.NumRecords() || byte_offset >= descriptor.Stride() ||
 	    descriptor.RawFormat() == 0u) {
-		result = 0u;
-		return true;
+		return 2;
 	}
 	const auto relative = static_cast<uint32_t>(index * descriptor.Stride() + byte_offset + scalar);
 	const auto base     = descriptor.Base48();
 	const auto aligned  = relative & ~uint64_t {3};
 	if ((base & 3u) != 0u || aligned > descriptor.GetSize() ||
 	    descriptor.GetSize() - aligned < 4u || aligned > AddressMask - base)
-		return false;
+		return 0;
+	address = base + aligned;
+	return 1;
+}
+
+bool SrtWalker::EvaluateBufferRead(const Inst& inst, uint64_t& result) {
+	uint64_t address = 0;
+	switch (BufferReadTarget(inst, address)) {
+		case 0: return false;
+		case 2: result = 0u; return true;
+		default: break;
+	}
 	uint32_t word = 0;
 	if (m_runtime.read_memory == nullptr ||
-	    !m_runtime.read_memory(m_runtime.userdata, base + aligned, {&word, 1}))
+	    !m_runtime.read_memory(m_runtime.userdata, address, {&word, 1}))
 		return false;
 	result = word;
 	return true;
@@ -1416,7 +1428,7 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 // compiled plans) and the replay of the last walk when its conditions give the same outcomes.
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>&                    flat,
                                   std::vector<std::pair<uint32_t, uint64_t>>* late,
-                                  bool                                        late_verify) {
+                                  bool late_verify, bool late_wide) {
 	// A failure skips the draw or dispatch; say which SRT read failed (capped).
 	static std::atomic<uint32_t> reported {0};
 	const auto report = [&](const char* reason, size_t index, uint32_t flat_offset, bool clean) {
@@ -1473,9 +1485,13 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>&                    flat
 		// whatever locates the word (its operands) is read as before. A failed read is not
 		// memoized, so a descriptor or condition that needs the same word later reads it in full.
 		const auto* raw = late != nullptr && !clean ? read.value.Resolve().TryInstruction() : nullptr;
-		if (raw != nullptr && !((raw->GetOpcode() == ValueOpcode::LoadAddressU32 ||
-		                         raw->GetOpcode() == ValueOpcode::ReadConstBuffer) &&
-		                        IsRawRead(m_program, *raw))) {
+		const bool buffer_read = raw != nullptr && late_wide &&
+		                         raw->GetOpcode() == ValueOpcode::LoadBufferU32 &&
+		                         IsUniformBufferRead(m_program, *raw);
+		if (raw != nullptr && !buffer_read &&
+		    !((raw->GetOpcode() == ValueOpcode::LoadAddressU32 ||
+		       raw->GetOpcode() == ValueOpcode::ReadConstBuffer) &&
+		      IsRawRead(m_program, *raw))) {
 			raw = nullptr;
 		}
 		if (raw == nullptr) {
@@ -1493,7 +1509,9 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>&                    flat
 			}
 			uint64_t address = 0;
 			uint64_t base    = 0;
-			if (evaluator.RawReadTarget(*raw, address, base) == 1 && address == probe.address) {
+			const int target = buffer_read ? evaluator.BufferReadTarget(*raw, address)
+			                               : evaluator.RawReadTarget(*raw, address, base);
+			if (target == 1 && address == probe.address) {
 				late->emplace_back(read.flat_offset, address);
 				if (!late_verify) {
 					flat[read.flat_offset] = 0;
@@ -1519,6 +1537,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>&                    flat
 	auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
 	// 0 false, 1 true, 2 not evaluated (no condition, no strict reader, or unreadable).
 	const auto outcome_of = [&](uint32_t index) -> uint8_t {
+		const SrtReadSectionScope condition_scope(SrtReadSection::Condition);
 		const auto& block = m_program.control_flow[index];
 		if (block.condition.IsEmpty() || m_runtime.read_specialization_memory == nullptr) {
 			return 2u;

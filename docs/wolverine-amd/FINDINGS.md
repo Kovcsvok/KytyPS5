@@ -74,6 +74,12 @@ cache.
 Find out what shader `0xfb5ee753d43f3f0b` reads strictly: with late words on, the remaining GPU
 wait (~20 reads/s, ~2.7 ms each) moved to it (see JOURNAL 2026-11-06).
 
+Being measured next: `KYTY_SRT_LATE_WIDE` (late words also in programs that capture their
+specialization reads, whose late addresses join the captured list for the renderer's alias proof,
+and for uniform buffer reads) and `KYTY_REPROTECT_BATCH` (carbonimax `9ef01206` + `3a154025`:
+upload re-protections of the GPU thread's read-only synchronizations recorded and applied in
+merged runs before every submission and guest sync point, with the bytes copied after them).
+
 ## Next
 
 2. Batch upload re-protections and copies (carbonimax `3a154025` + `fd13335327`, on their

@@ -2392,13 +2392,15 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size = 0;
 	vk::Buffer                  source;
+	const bool                  may_defer = !is_written && PrepareReprotectBatch();
 	m_memory_tracker.ForEachUploadRange(
 	    vaddr, size, is_written,
 	    [&](uint64_t address, uint64_t bytes) noexcept {
 		    copies.emplace_back(total_size, buffer.Offset(address), bytes);
 		    total_size += bytes;
 	    },
-	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
+	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size, may_defer); },
+	    may_defer);
 	if (source) {
 		auto& command = m_scheduler.Current();
 		command.EndRendering();
@@ -2448,9 +2450,27 @@ static void ReadGuestForUpload(uint8_t* destination, uint64_t address, uint64_t 
 }
 
 vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
-                                     uint64_t total_size) {
+                                     uint64_t total_size, bool may_defer) {
 	if (copies.empty()) {
 		return nullptr;
+	}
+	if (may_defer && m_reprotect_batch && PageManager::DeferringProtect()) {
+		// No wait for ring space here (a wait submits): such uploads take the immediate path.
+		const auto [mapped, offset] = m_staging_buffer.Map(total_size, 4, false);
+		if (mapped != nullptr) {
+			{
+				std::lock_guard lock(m_deferred_mutex);
+				for (auto& copy: copies) {
+					m_deferred_copies.push_back(
+					    {buffer.CpuAddress() + copy.dstOffset, mapped + copy.srcOffset, copy.size});
+					copy.srcOffset += offset;
+				}
+			}
+			m_staging_buffer.Commit(); // coherent: the flush fills it before any submission
+			return m_staging_buffer.Handle();
+		}
+		// Immediate path: everything recorded so far is applied first, in order.
+		FlushDeferredUploads(BatchFlush::Submit);
 	}
 
 	auto [mapped, base_offset] = m_staging_buffer.Map(total_size, 4);
@@ -2941,6 +2961,93 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	auto [dst, dst_offset] = dst_memory ? ObtainBuffer(dst_vaddr, size, true, true, dst_id)
 	                                    : std::pair {&m_gds_buffer, dst_vaddr};
 	dst->CopyFrom(command, *src, src_offset, dst_offset, size);
+}
+
+// KYTY_REPROTECT_BATCH=1 (live, default 0; carbonimax 9ef01206 + 3a154025): the GPU thread's
+// read-only buffer synchronizations re-protect the pages they upload one small range at a time,
+// each a protection syscall with a TLB flush (2026-10-29 Tracy, combat: 4.4 ms a frame of
+// protection changes, 2.5 ms of it in RebindBuffers). With the batch on, those re-protections are
+// recorded (PageManager::BeginDeferredProtect) and the guest bytes of the uploads are copied into
+// the coherent staging memory only after them, at a flush: before every submission and at every
+// guest sync point (memory waits, immediate memory writes, labels, flips and the emulator's
+// custom packets, slice ends, guest commands on the GPU thread). A page the guest writes before
+// the flush stays writable meanwhile and its new bytes are in the copy; a write after the flush
+// faults as before. Only read-only uploads defer (not GPU writes, image watches or
+// unprotections), and the command stream order does not change. Off with non-coherent staging.
+bool BufferCache::PrepareReprotectBatch() {
+	static auto& mode = Common::LiveSwitches::Get("KYTY_REPROTECT_BATCH", 0);
+	if (!GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	const bool want = mode.load(std::memory_order_relaxed) != 0 && m_staging_buffer.IsCoherent();
+	if (!want) {
+		if (m_reprotect_batch) {
+			EndReprotectBatch();
+		}
+		return false;
+	}
+	if (!m_reprotect_batch) {
+		m_reprotect_batch = true;
+		PageManager::BeginDeferredProtect();
+		m_scheduler.SetPreSubmit(
+		    [](void* context) {
+			    static_cast<BufferCache*>(context)->FlushDeferredUploads(BatchFlush::Submit);
+		    },
+		    this);
+	}
+	return true;
+}
+
+void BufferCache::EndReprotectBatch() {
+	FlushDeferredUploads(BatchFlush::Command);
+	PageManager::EndDeferredProtect();
+	m_scheduler.SetPreSubmit(nullptr, nullptr);
+	m_reprotect_batch = false;
+}
+
+void BufferCache::FlushBatchedUploads(BatchFlush reason) {
+	if (m_reprotect_batch) {
+		FlushDeferredUploads(reason);
+	}
+}
+
+// Order matters: the recorded protections first, then the bytes. One flush at a time.
+void BufferCache::FlushDeferredUploads(BatchFlush reason) {
+	std::lock_guard lock(m_deferred_mutex);
+	PageManager::FlushDeferredProtect();
+	if (m_deferred_copies.empty()) {
+		return;
+	}
+	auto& stats = m_batch_stats;
+	stats.flushes[static_cast<size_t>(reason)]++;
+	stats.copies += m_deferred_copies.size();
+	for (const auto& copy: m_deferred_copies) {
+		ReadGuestForUpload(copy.destination, copy.address, copy.size);
+		stats.bytes += copy.size;
+	}
+	Common::Telemetry::Add(Common::Telemetry::Counter::BatchFlushes, 1);
+	m_deferred_copies.clear();
+	const auto now = std::chrono::steady_clock::now();
+	if (now - stats.report >= std::chrono::seconds(5)) {
+		::printf("Reprotect batch (5 s): flushes at submit %" PRIu64 ", sync packets %" PRIu64
+		         ", slice ends %" PRIu64 ", guest commands %" PRIu64 "; %" PRIu64
+		         " copies, %.1f MiB\n",
+		         stats.flushes[0], stats.flushes[1], stats.flushes[2], stats.flushes[3], stats.copies,
+		         static_cast<double>(stats.bytes) / 1048576.0);
+		std::fflush(stdout);
+		stats = {.report = now};
+	}
+}
+
+bool BufferCache::IsGpuWriteInFlight(uint64_t vaddr) {
+	const auto candidate = m_buffers.upper_bound(vaddr);
+	if (candidate == m_buffers.begin()) {
+		return false;
+	}
+	const auto& [address, id] = *std::prev(candidate);
+	const auto& buffer        = m_slot_buffers[id];
+	return address + buffer.Size() > vaddr && buffer.last_gpu_write_tick != 0 &&
+	       !m_scheduler.IsFree(buffer.last_gpu_write_tick);
 }
 
 bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {

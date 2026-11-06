@@ -121,6 +121,13 @@ public:
 	                bool src_gds);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
 	[[nodiscard]] bool              IsRegionRegistered(uint64_t vaddr, uint64_t size);
+	// GPU thread, diagnostics: whether the cached buffer holding vaddr was last written by GPU
+	// work that has not completed yet (false without a buffer).
+	[[nodiscard]] bool              IsGpuWriteInFlight(uint64_t vaddr);
+	// KYTY_REPROTECT_BATCH: GPU thread, at a guest sync point. Applies the batched re-protections,
+	// then copies their bytes. No-op when nothing is batched.
+	enum class BatchFlush : uint8_t { Submit, SyncPacket, Slice, Command, Count };
+	void                            FlushBatchedUploads(BatchFlush reason);
 	[[nodiscard]] bool              HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	// Any thread: none of the bytes is GPU-written, or on its way back from the GPU, so guest
 	// memory holds their current value even when their page is protected.
@@ -199,7 +206,7 @@ private:
 	[[nodiscard]] bool       SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size,
 	                                           bool is_written, bool is_texel_buffer);
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
-	                                      uint64_t total_size);
+	                                      uint64_t total_size, bool may_defer = false);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Queues backing publication; callers wait before clearing dirty pages or reusing their data.
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
@@ -444,6 +451,26 @@ private:
 	};
 	WriteBitmapStats                                   m_bitmap_stats;
 	uint64_t                                           m_direct_readbacks = 0;
+	// KYTY_REPROTECT_BATCH (see BufferCache::UploadCopies): the read-only uploads whose
+	// re-protections are deferred, copied into the coherent staging memory by the flush.
+	struct DeferredCopy {
+		uint64_t address;
+		uint8_t* destination;
+		uint64_t size;
+	};
+	[[nodiscard]] bool                                 PrepareReprotectBatch();
+	void                                               FlushDeferredUploads(BatchFlush reason);
+	void                                               EndReprotectBatch();
+	bool                                               m_reprotect_batch = false;
+	std::mutex                                         m_deferred_mutex;
+	std::vector<DeferredCopy>                          m_deferred_copies;
+	struct BatchStats {
+		std::array<uint64_t, static_cast<size_t>(BatchFlush::Count)> flushes {};
+		uint64_t copies = 0;
+		uint64_t bytes  = 0;
+		std::chrono::steady_clock::time_point report = std::chrono::steady_clock::now();
+	};
+	BatchStats                                         m_batch_stats;
 	MemoryTracker                                      m_memory_tracker;
 	StreamBuffer                                       m_staging_buffer;
 	StreamBuffer                                       m_stream_buffer;

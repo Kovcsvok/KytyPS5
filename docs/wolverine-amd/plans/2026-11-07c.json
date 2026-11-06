@@ -1,0 +1,6 @@
+[
+ {"name": "wide-verify", "minutes": 2, "hold": {"KYTY_SRT_LATE_WORDS": 2, "KYTY_SRT_LATE_WIDE": 1},
+  "gate": {"min_sum": {"srt_late_checked": 1}, "max_sum": {"srt_late_mismatches": 0}}},
+ {"name": "late-wide", "minutes": 5, "ab": {"KYTY_SRT_LATE_WIDE": [0, 1]}, "needs": "wide-verify"},
+ {"name": "reprotect-batch", "minutes": 5, "ab": {"KYTY_REPROTECT_BATCH": [0, 1]}}
+]

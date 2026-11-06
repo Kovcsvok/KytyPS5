@@ -204,8 +204,27 @@ struct SrtReadStats {
 	// late), and those done within 20 us (no GPU wait).
 	uint64_t mapped_strict = 0;
 	uint64_t mapped_quick  = 0;
-	// Reads through the mapping by program: count and time.
-	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> mapped_by_shader;
+	// Reads through the mapping by program, section, reader and capture: count, time, and how
+	// many found the last GPU writer of their buffer still running.
+	struct MappedKey {
+		uint64_t shader  = 0;
+		uint8_t  section = 0;
+		bool     strict  = false;
+		bool     capture = false;
+		bool     operator==(const MappedKey&) const = default;
+	};
+	struct MappedKeyHash {
+		size_t operator()(const MappedKey& k) const noexcept {
+			return std::hash<uint64_t> {}(k.shader ^ (uint64_t {k.section} << 56u) ^
+			                               (uint64_t {k.strict} << 62u) ^ (uint64_t {k.capture} << 63u));
+		}
+	};
+	struct MappedStats {
+		uint64_t count   = 0;
+		uint64_t ns      = 0;
+		uint64_t running = 0;
+	};
+	std::unordered_map<MappedKey, MappedStats, MappedKeyHash> mapped_by_shader;
 	uint64_t pages         = 0;
 	uint64_t refused_pages = 0;
 	uint64_t page_ns       = 0;
@@ -240,14 +259,22 @@ uint64_t NanosecondsSince(std::chrono::steady_clock::time_point start) {
 
 // The programs whose SRT reads through the guest mapping took longest, for the report.
 std::string MappedReadLeaders(const SrtReadStats& r, double seconds) {
-	std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> leaders(
+	static constexpr const char* Sections[] = {"other",   "flat",   "condition", "fill",
+	                                           "buffers", "extents", "images",   "samplers",
+	                                           "specialize"};
+	std::vector<std::pair<SrtReadStats::MappedKey, SrtReadStats::MappedStats>> leaders(
 	    r.mapped_by_shader.begin(), r.mapped_by_shader.end());
-	std::ranges::sort(leaders, [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+	std::ranges::sort(leaders, [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
 	std::string text;
-	for (size_t i = 0; i < leaders.size() && i < 5; i++) {
-		text += fmt::format("{}0x{:016x} {:.0f}/s {:.1f} ms", i == 0 ? "; mapped by shader: " : ", ",
-		                    leaders[i].first, static_cast<double>(leaders[i].second.first) / seconds,
-		                    static_cast<double>(leaders[i].second.second) / 1e6 / seconds);
+	for (size_t i = 0; i < leaders.size() && i < 6; i++) {
+		const auto& [key, value] = leaders[i];
+		text += fmt::format("{}0x{:016x} {} {}{} {:.0f}/s {:.1f} ms ({:.0f}/s writer running)",
+		                    i == 0 ? "; mapped by shader: " : ", ", key.shader,
+		                    key.section < std::size(Sections) ? Sections[key.section] : "?",
+		                    key.strict ? "strict" : "ordinary", key.capture ? " capture" : "",
+		                    static_cast<double>(value.count) / seconds,
+		                    static_cast<double>(value.ns) / 1e6 / seconds,
+		                    static_cast<double>(value.running) / seconds);
 	}
 	return text;
 }
@@ -480,6 +507,7 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 		return true;
 	}
 	enum class Path { Failed, Backing, Mapping, Late };
+	bool writer_running = false;
 	const auto slow = [&] {
 		if (Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(),
 		                                                    values.size_bytes())) {
@@ -497,6 +525,9 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 			return Path::Failed;
 		}
 		Common::Telemetry::Add(Common::Telemetry::Counter::SrtFaultReads, 1);
+		if (timed) {
+			writer_running = Libs::LibKernel::Memory::IsGpuWriteInFlight(address);
+		}
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 		return Path::Mapping;
 	};
@@ -520,9 +551,13 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 			r.mapped_ns += ns;
 			r.mapped_strict += t_ordinary_read ? 0u : 1u;
 			r.mapped_quick += ns < 20000u ? 1u : 0u;
-			auto& shader = r.mapped_by_shader[ShaderRecompiler::IR::ThreadMaterializeStats().shader];
-			shader.first++;
-			shader.second += ns;
+			const auto& context = ShaderRecompiler::IR::ThreadSrtReadContext();
+			auto&       shader  = r.mapped_by_shader[{ShaderRecompiler::IR::ThreadMaterializeStats().shader,
+			                                          static_cast<uint8_t>(context.section),
+			                                          !t_ordinary_read, context.capture}];
+			shader.count++;
+			shader.ns += ns;
+			shader.running += writer_running ? 1u : 0u;
 			break;
 		}
 		case Path::Late: r.late_reads++; break;

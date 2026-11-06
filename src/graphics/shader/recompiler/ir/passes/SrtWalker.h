@@ -44,6 +44,26 @@ struct SrtLateProbe {
 	uint64_t address = 0;
 };
 SrtLateProbe& ThreadSrtLateProbe();
+// KYTY_MATERIALIZE_STATS: which part of MaterializeResources is reading guest memory on this
+// thread, and whether its program captures specialization reads, for the SRT read report.
+enum class SrtReadSection : uint8_t { Other, Flat, Condition, Fill, Buffers, Extents, Images, Samplers, Specialize };
+struct SrtReadContext {
+	SrtReadSection section = SrtReadSection::Other;
+	bool           capture = false;
+};
+SrtReadContext& ThreadSrtReadContext();
+// Sets the section for a scope.
+class SrtReadSectionScope {
+public:
+	explicit SrtReadSectionScope(SrtReadSection section)
+	    : m_previous(std::exchange(ThreadSrtReadContext().section, section)) {}
+	~SrtReadSectionScope() { ThreadSrtReadContext().section = m_previous; }
+	SrtReadSectionScope(const SrtReadSectionScope&)            = delete;
+	SrtReadSectionScope& operator=(const SrtReadSectionScope&) = delete;
+
+private:
+	SrtReadSection m_previous;
+};
 // Whether the last flat refresh on this thread failed because a failed late read still gave its
 // slot a value; MaterializeResources then walks again with true values. Clears the flag.
 bool TakeSrtLateRetry();
@@ -89,9 +109,11 @@ public:
 	// non-clean slot that is a raw read of a word a GPU buffer write owns stays zero and is listed
 	// (flat index, guest address) for a GPU copy instead of waiting for the GPU.
 	// late_verify: the slot still gets its true value (the copy is only checked against it).
+	// late_wide: uniform buffer reads (LoadBufferU32) may be late too (KYTY_SRT_LATE_WIDE).
 	bool RefreshFlatBuffer(std::vector<uint32_t>&                    flat,
 	                       std::vector<std::pair<uint32_t, uint64_t>>* late        = nullptr,
-	                       bool                                        late_verify = false);
+	                       bool                                        late_verify = false,
+	                       bool                                        late_wide   = false);
 
 private:
 	friend struct SrtNativeHelpers;
@@ -121,6 +143,8 @@ private:
 	// and the value is zero (past a constant buffer's end), 0 when an operand is unknown.
 	int  RawReadTarget(const Inst& inst, uint64_t& address, uint64_t& base);
 	bool EvaluateRawRead(const Inst& inst, uint64_t& result);
+	// The address EvaluateBufferRead reads, with RawReadTarget's results.
+	int  BufferReadTarget(const Inst& inst, uint64_t& address);
 	bool EvaluateBufferRead(const Inst& inst, uint64_t& result);
 	bool EvaluateInst(const Inst& inst, uint64_t& result);
 

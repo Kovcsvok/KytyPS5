@@ -85,6 +85,8 @@ struct MaterializeStats {
 bool              MaterializeStatsEnabled();
 // KYTY_SRT_LATE_WORDS (live, default 0): see MaterializeResources. 0, 1 or 2 (verify).
 [[nodiscard]] int SrtLateWordsMode();
+// KYTY_SRT_LATE_WIDE (live, default 0): see ResourceMaterialization.cpp.
+[[nodiscard]] bool SrtLateWideEnabled();
 MaterializeStats& ThreadMaterializeStats();
 
 // Applies an already-derived specialization to native IR before layout and emission.

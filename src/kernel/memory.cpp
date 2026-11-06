@@ -1223,6 +1223,11 @@ bool IsGpuBufferWritten(uint64_t vaddr, uint64_t size) {
 	       !resources.GetTextureCache().IsRegionGpuModifiedOnGpuThread(vaddr, size);
 }
 
+bool IsGpuWriteInFlight(uint64_t vaddr) {
+	return g_gpu_resources != nullptr && Graphics::GuestGpu::IsGpuThread() &&
+	       GetGpuResources().GetBufferCache().IsGpuWriteInFlight(vaddr);
+}
+
 const uint8_t* FindGpuCleanBacking(uint64_t vaddr, uint64_t size) {
 	if (g_guest_address_space == nullptr) {
 		return nullptr;

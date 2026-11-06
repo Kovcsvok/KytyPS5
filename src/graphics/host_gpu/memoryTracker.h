@@ -12,6 +12,7 @@
 #include <bit>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -121,8 +122,10 @@ public:
 	}
 
 	template <typename RangeFunc, typename UploadFunc>
+	// defer_protect: the caller is the GPU thread batching read-only re-protections
+	// (KYTY_REPROTECT_BATCH) and copies the bytes after PageManager::FlushDeferredProtect.
 	void ForEachUploadRange(uint64_t vaddr, uint64_t size, bool is_written, RangeFunc&& range_func,
-	                        UploadFunc&& upload_func) {
+	                        UploadFunc&& upload_func, bool defer_protect = false) {
 		static_assert(std::is_nothrow_invocable_v<RangeFunc&, uint64_t, uint64_t>);
 		static_assert(std::is_nothrow_invocable_v<UploadFunc&>);
 		CheckNotInUploadCallback();
@@ -136,6 +139,12 @@ public:
                 manager->lock.unlock();
             }
 		};
+		// KYTY_REPROTECT_BATCH: the re-protections of a read-only synchronization may be deferred
+		// (the caller then copies the bytes after PageManager::FlushDeferredProtect).
+		std::optional<PageManager::DeferCapture> capture;
+		if (defer_protect && !is_written && PageManager::DeferringProtect()) {
+			capture.emplace();
+		}
 		if (!is_written && UseRegionBitmap()) {
 			// Only the regions whose CPU summary is set, found in the bitmap.
 			IterateCpuSummary(vaddr, size, upload_region);
@@ -148,6 +157,7 @@ public:
 				               upload_region(manager, offset, bytes);
 			               });
 		}
+		capture.reset();
 		if (is_written) {
 			// The region locks stay held until the GPU-modified marks below.
 			KYTY_PROFILER_BLOCK("MemoryTracker::UploadHoldingRegionLocks");

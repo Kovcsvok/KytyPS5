@@ -32,6 +32,28 @@ public:
 	// Unlocked, like IsReadWatched: for fault triage.
 	void Watchers(uint64_t vaddr, uint32_t& write, uint32_t& access) const noexcept;
 
+	// KYTY_REPROTECT_BATCH (carbonimax 9ef01206 / 3a154025; BufferCache::FlushDeferredUploads).
+	// While active, the protections the GPU thread would add (read-only / no-access) inside a
+	// DeferCapture scope (the upload re-protections of a read-only synchronization) are recorded
+	// instead of applied; the watcher counts change at once. Flush applies them in merged runs
+	// (gaps of up to 16 pages): under each region's lock, every page whose current state still
+	// asks for that protection, never an older one. Until then the recorded pages stay writable,
+	// so their bytes must be read after Flush. Any thread may flush; only the GPU thread records.
+	static void BeginDeferredProtect() noexcept;
+	static void FlushDeferredProtect() noexcept;
+	static void EndDeferredProtect() noexcept;
+	[[nodiscard]] static bool DeferringProtect() noexcept;
+	class DeferCapture {
+	public:
+		DeferCapture() noexcept;
+		~DeferCapture();
+		DeferCapture(const DeferCapture&)            = delete;
+		DeferCapture& operator=(const DeferCapture&) = delete;
+
+	private:
+		bool m_previous = false;
+	};
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
