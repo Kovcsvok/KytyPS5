@@ -837,3 +837,15 @@ Ránk vonatkozó jelöltek:
   2. `predict` ABBA 0 / 2 (4 perc);
   3. `predict-block` 64 / 16 KiB (3 perc);
   4. `sema-wake-one` 0 / 1 (3 perc).
+  5. `materialize-stats` (1 perc, `KYTY_MATERIALIZE_STATS=1`): a GPU-szálon maradt `MaterializeResources` bontása (felállítás / lapos SRT / kitöltés / pufferek / képek / samplerek) és a lassú, GPU-tulajdonú SRT-olvasások ms-a.
+
+## 2026-11-06 — Opus — GPT-javaslatok ellenőrzése (kód nem változott)
+- **Részleges erőforrás-cache (leírónként):** a teljes memo (`KYTY_RESOURCE_MEMO`) harcban 18–22% találatot adott, és lassított. A `DRAW_PREP` óta a bejárások ~80%-a a scanner szálon fut; a GPU-szálon `materialize_ms` 21,8 → 9,7. Előbb a fenti 5. fázis mutassa meg, mi maradt a 9,7 ms-ban; csak utána érdemes leírónkénti cache-t írni.
+- **SRT-adat a GPU-n (joshweible `ac8ee370`):** egyetért a mi tervünkkel. A célt az 5. fázis `slow reads` értéke méri (10-24-én ~2,8 ms / képkocka).
+- **PGO:** van kész, bevált minta: pengui07 `KytyPS5-nhl` (`KYTY_PGO=generate|use` CMake, 30 s-onkénti profilírás, `tools/pgo/*.profdata` ~4 MB; náluk 45,6 → 49,8 fps). Más forkokban is van: Xx-LiDAF-xX, chenxiao07, ArtyomZabroda (`__llvm_profile_write_file` a `quick_exit` előtt), duy64. Feltételei:
+  - rögzített LLVM-verzió a CI-ban (a profil csak az őt készítő clanggal megy);
+  - egy játékmenet lassabb, instrumentált builddel;
+  - buildek közti A/B újraindítással (élő kapcsolóval nem váltható).
+- **Hullámszintű bitmap-jelölés a shaderben:** CPU-limitnél kis haszon, nem most.
+- **`KYTY_WRITE_PREDICT` helyessége:** a téves jóslat arány nem helyességi bizonyíték, de a módszer nem is erre épít. Az írt lapokat a befejező szál a tick címkéi előtt lezárja, a GPU-szál olvasásai előtt pedig a `GuardGpuThreadRead` zár. A címke előtti vendégolvasás valódi hardveren is versenyhelyzet. Marad a kampányban.
+
