@@ -22,13 +22,21 @@ GPU thread, page protection, write bitmap, readback, device-generated commands, 
 - Builds come from GitHub Actions (`.github/workflows/wolverine-hang-markers.yml`, Windows x64,
   `KYTY_HOST_ARCH=x86-64-v3`); artifacts are kept 3 days.
 
-## Where the time goes now (combat, ~18-21 fps, per frame)
+## Where the time goes now (combat, ~17-20 fps, per frame; campaign 2026-11-06)
 
-The GPU thread (the emulated command processor) is the ceiling: ~75% busy, ~41 ms of work a frame.
-Biggest parts: resource materialization (SRT walks) ~9.5 ms, synchronous readbacks of its own page
-faults ~5 ms, guest page-protection changes ~4.4-4.9 ms (640 VirtualProtect calls a frame, ~7.5 us
-each because of the TLB flush), command buffer submission ~4.5 ms, write-bitmap refinements
-~2.2 ms. Guest threads spend ~50 ms a frame (summed over threads) in page faults.
+The GPU thread (the emulated command processor) is the ceiling: ~82% busy, ~42-48 ms of work a
+frame; the emulator uses ~3.6 of 20 CPU cores. Per frame on the GPU thread: resource
+materialization (SRT walks) 9-10.5 ms, its own synchronous readbacks 4.8-6.1 ms, command buffer
+submission 4.3-5.5 ms, guest page-protection changes 4.2-5.2 ms, its page faults 4.5-6.2 ms, copy
+queue waits 4.1-5.4 ms. Guest threads spend ~44 ms a frame (summed over threads) in page faults,
+~16-24 ms of it in read faults on GPU-written pages.
+
+`KYTY_MATERIALIZE_STATS=1` (GPU-thread walks only; the draw-prep scanner thread walks ~80% of the
+draws ahead): ~16k walks/s, ~200 ms/s of walk time, almost all in the flat SRT pass. **~800 SRT
+reads/s hit bytes the GPU still owns and take ~190 us each (~150 ms/s, roughly 8 ms a frame).**
+Buffer, image and sampler descriptor work together is only ~22 ms/s (~1.3 ms a frame). So the
+SRT words the GPU writes are the target (joshweible `ac8ee370` + `fcbb019b`), not a descriptor
+cache.
 
 ## What helped (combat ABBA, paired fps change)
 
@@ -55,22 +63,20 @@ each because of the TLB flush), command buffer submission ~4.5 ms, write-bitmap 
 | Tracker present bits, bulk bitmap reads, expander hash trust | ~0 | Tracy had overstated those zones; removed. |
 | Pinning the GPU thread to P-cores (`KYTY_GPU_THREAD_CPUS`) | -7.7% (n.s.), more spinning | Removed. |
 | `KYTY_DIRECT_READBACK`, `KYTY_READBACK_STALE_ALL`, `KYTY_DISPATCH_BARRIERS=0` | slower or glitches | Left off. |
+| `KYTY_WRITE_PREDICT=2` (leave pages readable that a tracked write is predicted not to write; check the write bitmap at completion) | +2.1% (+/-5.0), n.s. | Predictions were almost always right (209 misses in 2.4M checked pages), but protection time did not fall (4.2 -> 4.5 ms): to be correct, the GPU thread's direct guest writes (WRITE_DATA etc., which can reach the guest before the completion check) had to close every still-open page first, ~10M pages per 5 s. One 14 s stall with an 11 s region-lock wait happened in mode 2 only. Removed. |
+| `KYTY_WRITE_PREDICT_BLOCK_KB` 16 vs 64 | -2.7% (+/-8.1), n.s. | Removed with the above. |
+| `KYTY_SEMA_WAKE_ONE` (upstream `a0268f1d`: a semaphore signal wakes only the waiters it serves) | -5.9% (+/-7.7), n.s. | Removed. |
 | `KYTY_DRAW_PREP` + `KYTY_SRT_FAST_READ` | +20% in one run, +3.5% n.s. in the confirmation | Kept on: the mechanism is real (Materialize 21.6 -> 8.8 ms) but the fps gain was scene noise. |
 
-## In progress
+## Next
 
-`KYTY_WRITE_PREDICT` (live, default 0; 1 measures only, 2 applies after 30 s of learning): a
-tracked write protects only the pages it is predicted to write (64 KiB blocks an earlier tracked
-write wrote or the GPU thread read, `KYTY_WRITE_PREDICT_BLOCK_KB`). The completion thread checks
-the bitmap before the labels of that tick are published and protects pages written after all.
-Target: most of the ~4.4 ms of protection changes and ~2.2 ms of refinements on the GPU thread.
-Results will be added here.
-Correctness: labels, flips and EOP interrupts are published by the completion thread after the
-check of their tick. The GPU thread's own direct guest writes (WRITE_DATA, reference-clock copies,
-the GDS EOP read-back, immediate labels) can reach the guest earlier, after a forwarded label wait
-or a partial flush, so `CloseBeforeDirectWrite` closes every page still open for a pending check
-(and waits for a running check) before them. Treat mode 2 as experimental until it has run
-without visual differences for a while.
+1. GPU-copy the SRT words the GPU still writes instead of a CPU readback (joshweible `ac8ee370`,
+   runs merged by `fcbb019b`); target the ~8 ms a frame above.
+2. Batch upload re-protections and copies (carbonimax `3a154025` + `fd13335327`, on their
+   `KYTY_PROTECT_COALESCE`).
+3. PGO with an own Wolverine combat profile (pengui07 `KytyPS5-nhl` `KYTY_PGO=generate|use`).
+4. Later: an upload thread (inFAMOUS shadPS4 fork pattern); a descriptor cache only if the
+   descriptor share grows.
 
 ## Related work in other forks (scan 2026-11-06)
 
@@ -81,10 +87,13 @@ bottlenecks, not yet ported unless noted:
   still writing with a GPU copy instead of a CPU wait (their GPU-thread read waits 25 -> 7 ms);
   `99082835` parses PM4 packets on a front thread; `7eb33b86`/`1609f5e6` read clean SRT bytes
   without the fault (we already do this through `TryReadGpuCleanBacking`).
-- carbonimax `3a154025` `KYTY_REPROTECT_BATCH` (+8.5% in their game): batches the write
-  re-protections after uploads until guest sync points.
-- Upstream `a0268f1d` (a semaphore signal wakes only the waiters it hands counts to): ported here
-  as `KYTY_SEMA_WAKE_ONE` (live, default 0, to be measured).
+- carbonimax `3a154025` `KYTY_REPROTECT_BATCH` (+8.5% in one game, +1.4% in another): batches the
+  re-protections after uploads until guest sync points; `fd13335327` records one copy per
+  destination between shared barriers.
+- Upstream `a0268f1d` (a semaphore signal wakes only the waiters it hands counts to): ported as
+  `KYTY_SEMA_WAKE_ONE`, no gain here (see above), removed.
+- PGO: pengui07 `KytyPS5-nhl` (clang-cl, `KYTY_PGO`, 45.6 -> 49.8 fps in NHL), also Xx-LiDAF-xX,
+  chenxiao07, ArtyomZabroda (`__llvm_profile_write_file` before `quick_exit`), duy64.
 - Xx-LiDAF-xX: ReleaseMem/submit batching and write-invalidation clustering (we have
   `KYTY_SLICE_FLUSH_US` and `KYTY_FAULT_WIDEN_KB`); MrBigBritches: batched hot readbacks, submit
   cadence; JOmega321: `KYTY_SERVE_IN_WAITS` (needs an async upload worker).

@@ -884,3 +884,27 @@ A shader-fordítás nem változik, a `KYTY_PROGRAM_CACHE_GIT_REVISION` maradhat.
 **Sorrend a GPT-vel egyeztetve:** kampány → SRT késői szavak (`ac8ee370` + `fcbb019b`) → feltöltés/újravédés kötegelés (carbonimax, a `PROTECT_COALESCE`-szel) → PGO saját Wolverine-profillal (pengui07 CMake) → feltöltőszál → részleges cache.
 A leírónkénti találati arány méréséhez külön számláló kell; ez a `materialize-stats` fázisból még nem jön ki.
 
+## 2026-11-06 — Opus — kampány a `fc8b1816`-on (harc, ~12,5 perc)
+`D:\KytyAnalysis\campaigns\2026-11-06_154303` (`summary.txt` + fázisonkénti riportok). Az első indítás a magyar `tasklist`-kimenet (0xff ezres elválasztó) dekódolásán elhasalt; a `campaign.py` most bájtként olvas, a gyerekszkriptek `PYTHONUTF8=1`-gyel futnak.
+
+1. **`predict-learn`** (=1, 1,5 perc): 2,4 M ellenőrzött lapból 209 téves; missed/open ~0,0000. A kapu átment.
+2. **`predict`** ABBA 0 / 2 (4 perc): **+2,1% (±5,0) – bizonytalan.**
+   - `gpu_protect_ms` 4,16 → 4,48, `guest_read_fault_ms` 23,8 → 26,1. Egyik sem csökkent.
+   - Ok: a `CloseBeforeDirectWrite` 5 s-onként ~10 M lapot zárt vissza (a nyitottak ~40%-át), mert függő ellenőrzés mellett szinte mindig jön `WRITE_DATA`. A 4,6 ezer követett írásból 5 s alatt csak ~50 ellenőrzés jutott el a befejező szálig, a többit a zárás söpörte el.
+3. **`predict-block`** 64 / 16 KiB, mindkettő 2-es mód: −2,7% (±8,1).
+   - **Egy 13,9 s-os képkocka (15:51:16–29):** a GPU-szál semmit sem dolgozott, utána `spin_lock_ms=11016`, vagyis valaki 11 s-ig várt egy régiózárra (`TrackingSpinLock`, `regionManager.h`).
+   - Csak 2-es módban fordult elő. Valószínű ok: a `CloseBeforeDirectWrite` várja a futó ellenőrzést, az ellenőrzés régiózárat kér, a zárat pedig egy vendégszál tartja, amely a GPU-szálra vár. Nem bizonyított.
+4. **`sema-wake-one`** 0 / 1: −5,9% (±7,7) – bizonytalan, mechanizmusbeli nyereség sem látszik.
+5. **`materialize-stats`** (1 perc, 17,3 fps; csak a GPU-szál bejárásai):
+   - ~16 ezer bejárás/s, walk ~200 ms/s, ebből lapos SRT ~198.
+   - **~800 lassú (GPU-tulajdonú) SRT-olvasás/s, egyenként ~190 µs, ~150 ms/s ≈ 8,7 ms / képkocka** (10-24-én 800/s × ~50 µs volt).
+   - Pufferek, képek és samplerek együtt ~22 ms/s (~1,3 ms / képkocka).
+   - Telemetria ugyanebben a percben: `materialize_ms` 10,5, `gpu_readmem_ms` 6,1, `gpu_process_ms` 48,5 / képkocka.
+
+**Döntés:**
+- **Kivéve:** `KYTY_WRITE_PREDICT` (és `_BLOCK_KB`) a `CloseBeforeDirectWrite`-tal és a `GuardGpuThreadRead`-del együtt, valamint `KYTY_SEMA_WAKE_ONE`. A forrásfájlokat a `30bdd378^` állapotára állítottam vissza; a `predict_*` telemetria-oszlopok is mennek.
+- **Maradnak:** a `guest_read_fault_ms` / `guest_read_faults` oszlopok.
+- A kivétel csak helyi commit; a következő kódcsomaggal megy fel (CI-takarékosság).
+- **Tanulság:** a lapvédés-csökkentés (DEFER, PREDICT) kétszer bukott el ugyanott. A helyességhez szükséges visszazárások elviszik a nyereséget. Védési költséget csak kötegeléssel (carbonimax) vagy kevesebb követett kötéssel érdemes csökkenteni.
+- **A következő fő irány az adatok alapján:** az SRT késői szavak GPU-másolása (`ac8ee370` + `fcbb019b`); célpont ~6–9 ms / képkocka. A leírónkénti cache legfeljebb ~1,3 ms-ot nyerhetne, hátrébb kerül.
+

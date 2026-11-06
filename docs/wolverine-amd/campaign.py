@@ -30,6 +30,8 @@ PACKAGE = r"C:\Games\Wolverine-AMD-Async"
 LIVE = os.path.join(PACKAGE, "userdata", "kyty_live.txt")
 LOGS = os.path.join(PACKAGE, "userdata", "logs")
 OUT_ROOT = r"D:\KytyAnalysis\campaigns"
+# Child scripts print UTF-8 (PYTHONUTF8), read leniently.
+TEXT = {"text": True, "encoding": "utf-8", "errors": "replace", "env": {**os.environ, "PYTHONUTF8": "1"}}
 FATAL = re.compile(r"device.?lost|VK_ERROR_DEVICE_LOST|EXIT |unhandled exception|access violation", re.I)
 
 sys.path.insert(0, HERE)
@@ -37,8 +39,9 @@ import experiment  # noqa: E402  (read_lines, write_atomic, with_values)
 
 
 def emulator_running():
+    # The console code page (Hungarian Windows: a 0xff thousands separator) is not UTF-8.
     out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq kyty_emulator.exe", "/NH"],
-                         capture_output=True, text=True).stdout
+                         capture_output=True).stdout.decode("ascii", "replace")
     return "kyty_emulator.exe" in out
 
 
@@ -159,14 +162,14 @@ def main():
             experiment.write_atomic(LIVE, experiment.with_values(original, carried))
             say(f"\n== {name}: A/B {a} vs {b}, {minutes} min (carried {carried})")
             run = subprocess.run([sys.executable, os.path.join(HERE, "experiment.py"), "--minutes", str(minutes),
-                                  fmt("A", a), fmt("B", b)], capture_output=True, text=True)
+                                  fmt("A", a), fmt("B", b)], capture_output=True, **TEXT)
             schedule = re.search(r"schedule: (.+)", run.stdout)
             if schedule is None:
                 say("   experiment.py failed:\n" + run.stdout[-800:] + run.stderr[-800:])
                 outcome[name] = "stopped"
                 break
             report = subprocess.run([sys.executable, os.path.join(HERE, "experiment_report.py"),
-                                     schedule.group(1).strip()], capture_output=True, text=True).stdout
+                                     schedule.group(1).strip()], capture_output=True, **TEXT).stdout
             with open(os.path.join(out_dir, f"{len(outcome) + 1:02d}_{name}.txt"), "w", encoding="utf-8") as out:
                 out.write(report)
             result = paired_b(report)
