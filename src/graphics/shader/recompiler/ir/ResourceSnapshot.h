@@ -73,6 +73,9 @@ struct ResourceSnapshot {
 	std::vector<DescriptorValue> samplers;
 	std::vector<uint32_t>        flattened_srt;
 	std::vector<uint32_t>        user_data;
+	// KYTY_SRT_LATE_WORDS: flat SRT words a GPU buffer write still owned, by flat index and guest
+	// address. Their flat value is zero; a GPU copy recorded before the draw or dispatch fills them.
+	std::vector<std::pair<uint32_t, uint64_t>> late_words;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
 };

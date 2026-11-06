@@ -10,8 +10,8 @@ A plan is a list of phases:
 campaign carries. After an A/B: B wins when its paired fps change minus its error is above zero (its
 values are then carried into later phases and written to the live file at the end), loses when
 plus its error is below zero. A phase whose "needs" lost is skipped. "gate" (optional, on a hold
-phase): {"max_missed_ratio": 0.05} stops phases needing it when predict_missed / predict_open of
-its telemetry is above that.
+phase): {"min_sum": {"srt_late_words": 1}} stops phases needing it when a telemetry column's sum
+over the phase's second half is below the value.
 Every phase checks first that the emulator still runs and its log shows no fatal line; otherwise the
 campaign stops. The live file gets the winners at the end, nothing else changes. Summary:
 D:\\KytyAnalysis\\campaigns\\<time>\\summary.txt (the experiment schedules stay in userdata\\logs).
@@ -145,12 +145,12 @@ def main():
                 outcome[name] = "held"
                 gate = phase.get("gate")
                 if gate:
-                    # The second half: the history has learned by then.
-                    sums = telemetry_sums((start + end) // 2, end, ["predict_open", "predict_missed",
-                                                                      "predict_guarded"])
-                    ratio = sums["predict_missed"] / sums["predict_open"] if sums["predict_open"] else 0.0
-                    say(f"   telemetry (2nd half): {sums}, missed/open {ratio:.4f}")
-                    if ratio > gate.get("max_missed_ratio", 1.0):
+                    # Telemetry sums over the second half (a switch has settled by then):
+                    # {"min_sum": {"column": value}} fails when a sum is below its value.
+                    columns = list(gate.get("min_sum", {}))
+                    sums = telemetry_sums((start + end) // 2, end, columns)
+                    say(f"   telemetry (2nd half): {sums}")
+                    if any(sums[c] < v for c, v in gate.get("min_sum", {}).items()):
                         outcome[name] = "gated"
                         say("   gate failed: phases needing it are skipped")
                 continue

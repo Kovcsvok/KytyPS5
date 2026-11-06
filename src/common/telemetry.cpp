@@ -34,7 +34,7 @@ constexpr const char* CounterNames[] = {
     "gpu_on_pcore",    "gpu_on_ecore",      "gpu_memory_lock_ms", "gpu_ranges_lock_ms",
     "ranges_hold_ms",  "ranges_changes",    "clamp_locked",     "clamp_ring_saved",
     "ranges_edit_ms",  "ranges_edits",      "ranges_size",      "ranges_event_ms",
-    "guest_read_fault_ms", "guest_read_faults",
+    "guest_read_fault_ms", "guest_read_faults", "srt_fault_reads", "srt_late_words",
 };
 static_assert(std::size(CounterNames) == static_cast<size_t>(Counter::Count));
 
@@ -56,7 +56,9 @@ bool IsCount(size_t index) {
 		case Counter::ClampRingSaved:
 		case Counter::RangesEdits:
 		case Counter::RangesSize:
-		case Counter::GuestReadFaults: return true;
+		case Counter::GuestReadFaults:
+		case Counter::SrtFaultReads:
+		case Counter::SrtLateWords: return true;
 		default: return false;
 	}
 }

@@ -1400,6 +1400,38 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	const auto& snapshot  = *prepared.runtime->resources;
 	const auto& layout    = program.bindings;
 	EXIT_IF(prepared.buffer_sources.size() != layout.memory_offset_count);
+	// KYTY_SRT_LATE_WORDS: the flat words the walk left to the GPU, as runs of consecutive flat
+	// indices and addresses (joshweible fcbb019b). A word a bindless patch replaces needs no copy.
+	// Obtaining a buffer can merge cache buffers, so it comes before anything is bound.
+	struct LateRun {
+		uint32_t index   = 0;
+		uint64_t address = 0;
+		uint32_t words   = 0;
+	};
+	static thread_local std::vector<std::pair<uint32_t, uint64_t>> late_words;
+	static thread_local std::vector<LateRun>                       late_runs;
+	late_words.assign(snapshot.late_words.begin(), snapshot.late_words.end());
+	std::ranges::sort(late_words);
+	late_runs.clear();
+	for (const auto& [index, address]: late_words) {
+		const bool patched = std::ranges::any_of(prepared.bindless_patches, [&](const auto& patch) {
+			const auto offset = std::get<0>(patch);
+			return index == offset || index == offset + 1u;
+		});
+		if (patched) {
+			continue;
+		}
+		if (!late_runs.empty() && late_runs.back().index + late_runs.back().words == index &&
+		    late_runs.back().address + uint64_t {late_runs.back().words} * sizeof(uint32_t) == address) {
+			late_runs.back().words++;
+		} else {
+			late_runs.push_back({index, address, 1u});
+		}
+	}
+	for (const auto& run: late_runs) {
+		(void)m_context.GetBufferCache().ObtainBuffer(run.address,
+		                                              uint64_t {run.words} * sizeof(uint32_t), false);
+	}
 	// Diagnostics name this shader as the writer of the buffers bound below (KYTY_WATCH_GPU_WRITE,
 	// KYTY_READBACK_STATS); the shader looked up last can be another stage's or dispatch's.
 	DiagShaderScope diag(program.shader_hash);
@@ -1463,6 +1495,38 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 				}
 			}
 			prepared.flattened_srt = NativeUpload(m_context, m_bindless_srt);
+		}
+		if (!late_runs.empty()) {
+			// The copies follow every earlier GPU write in queue order and precede the shader.
+			auto& command = m_context.GetCommandScheduler().Current();
+			command.EndRendering();
+			const auto        native = command.Recorder();
+			vk::MemoryBarrier before {};
+			before.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+			before.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+			native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+			                       vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr,
+			                       0, nullptr);
+			uint64_t words = 0;
+			for (const auto& run: late_runs) {
+				const auto bytes            = uint64_t {run.words} * sizeof(uint32_t);
+				const auto [source, offset] = m_context.GetBufferCache().ObtainBuffer(run.address,
+				                                                                      bytes, false);
+				vk::BufferCopy copy {};
+				copy.srcOffset = offset;
+				copy.dstOffset = prepared.flattened_srt.offset + uint64_t {run.index} * sizeof(uint32_t);
+				copy.size      = bytes;
+				native.copyBuffer(source->Handle(), prepared.flattened_srt.buffer, 1, &copy);
+				words += run.words;
+			}
+			vk::MemoryBarrier after {};
+			after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			after.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eUniformRead;
+			native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+			                       vk::PipelineStageFlagBits::eAllCommands, {}, 1, &after, 0, nullptr,
+			                       0, nullptr);
+			Common::Telemetry::Add(Common::Telemetry::Counter::SrtLateWords,
+			                       static_cast<int64_t>(words));
 		}
 	}
 	if (ShaderRecompiler::IR::FindBinding(

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <span>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -33,6 +34,19 @@ struct SrtRuntime {
 };
 
 enum class RuntimeValueType { Any, Integer };
+
+// KYTY_SRT_LATE_WORDS (ResourceMaterialization.cpp): armed while RefreshFlatBuffer evaluates a
+// flat slot that is a raw guest read. The GPU thread's ordinary SRT reader then does not wait for
+// a word a GPU buffer write owns: it fails that read and notes its address here (first one only).
+struct SrtLateProbe {
+	bool     armed   = false;
+	bool     hit     = false;
+	uint64_t address = 0;
+};
+SrtLateProbe& ThreadSrtLateProbe();
+// Whether the last flat refresh on this thread failed because a failed late read still gave its
+// slot a value; MaterializeResources then walks again with true values. Clears the flag.
+bool TakeSrtLateRetry();
 
 // A ResourcePlan compiled for evaluation (KYTY_SRT_COMPILED): every value its roots reach,
 // resolved once (identity chains, invariant phis, ReadConst's SRT read), with arguments as node
@@ -71,8 +85,11 @@ public:
 
 	bool Evaluate(Value value, uint32_t& result);
 	bool EvaluateDescriptor(uint32_t source, DescriptorValue& result);
-	// Refreshes reachable scalar reads and active descriptor sources in one walk.
-	bool RefreshFlatBuffer(std::vector<uint32_t>& flat);
+	// Refreshes reachable scalar reads and active descriptor sources in one walk. With late, a
+	// non-clean slot that is a raw read of a word a GPU buffer write owns stays zero and is listed
+	// (flat index, guest address) for a GPU copy instead of waiting for the GPU.
+	bool RefreshFlatBuffer(std::vector<uint32_t>&                    flat,
+	                       std::vector<std::pair<uint32_t, uint64_t>>* late = nullptr);
 
 private:
 	friend struct SrtNativeHelpers;
@@ -98,6 +115,9 @@ private:
 	[[nodiscard]] int32_t CurrentNodeArg(const Inst& inst, size_t index) const;
 	bool EvaluatePhi(const Inst& inst, uint64_t& result);
 	bool EvaluateExtract(const Inst& inst, uint64_t& result);
+	// The address EvaluateRawRead reads: 1 with address (and its base), 2 when it reads nothing
+	// and the value is zero (past a constant buffer's end), 0 when an operand is unknown.
+	int  RawReadTarget(const Inst& inst, uint64_t& address, uint64_t& base);
 	bool EvaluateRawRead(const Inst& inst, uint64_t& result);
 	bool EvaluateBufferRead(const Inst& inst, uint64_t& result);
 	bool EvaluateInst(const Inst& inst, uint64_t& result);

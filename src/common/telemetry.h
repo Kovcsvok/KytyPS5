@@ -64,6 +64,8 @@ enum class Counter : uint32_t {
 	RangesEvent,    // any thread: RecordRangeEvent, the range history with a stack trace
 	GuestReadFault, // any thread: the read faults among GuestFault
 	GuestReadFaults, // count
+	SrtFaultReads,   // count: GPU-thread SRT reads that went through the guest mapping (may fault)
+	SrtLateWords,    // count: flat SRT words copied on the GPU instead (KYTY_SRT_LATE_WORDS)
 	Count
 };
 

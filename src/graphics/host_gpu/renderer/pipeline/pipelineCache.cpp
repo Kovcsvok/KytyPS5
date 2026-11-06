@@ -193,11 +193,22 @@ struct SrtReadStats {
 	uint64_t sampled_ns    = 0;
 	uint64_t slow_reads    = 0;
 	uint64_t slow_ns       = 0;
+	// The slow reads by outcome: from the backing store (no GPU-written byte), through the guest
+	// mapping (a GPU-written page faults and downloads), left to a GPU copy (KYTY_SRT_LATE_WORDS).
+	uint64_t clean_reads   = 0;
+	uint64_t clean_ns      = 0;
+	uint64_t mapped_reads  = 0;
+	uint64_t mapped_ns     = 0;
+	uint64_t late_reads    = 0;
+	// Reads through the mapping by program: count and time.
+	std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> mapped_by_shader;
 	uint64_t pages         = 0;
 	uint64_t refused_pages = 0;
 	uint64_t page_ns       = 0;
 };
 thread_local SrtReadStats t_srt_read_stats;
+// Set while ReadShaderGuestMemoryRaw (the walker's ordinary reader) runs.
+thread_local bool t_ordinary_read = false;
 
 // KYTY_SRT_PAGE_CACHE=1 (live, default 0): a walker page's backing comes from
 // FindGpuCleanBackingCached (memory.cpp), which keeps the backing lookup per page until a mapping
@@ -223,6 +234,20 @@ uint64_t NanosecondsSince(std::chrono::steady_clock::time_point start) {
 	                                 .count());
 }
 
+// The programs whose SRT reads through the guest mapping took longest, for the report.
+std::string MappedReadLeaders(const SrtReadStats& r, double seconds) {
+	std::vector<std::pair<uint64_t, std::pair<uint64_t, uint64_t>>> leaders(
+	    r.mapped_by_shader.begin(), r.mapped_by_shader.end());
+	std::ranges::sort(leaders, [](const auto& a, const auto& b) { return a.second.second > b.second.second; });
+	std::string text;
+	for (size_t i = 0; i < leaders.size() && i < 5; i++) {
+		text += fmt::format("{}0x{:016x} {:.0f}/s {:.1f} ms", i == 0 ? "; mapped by shader: " : ", ",
+		                    leaders[i].first, static_cast<double>(leaders[i].second.first) / seconds,
+		                    static_cast<double>(leaders[i].second.second) / 1e6 / seconds);
+	}
+	return text;
+}
+
 // GPU thread, every 5 s while KYTY_MATERIALIZE_STATS=1.
 void ReportMaterializeStats() {
 	static auto report = std::chrono::steady_clock::now();
@@ -244,13 +269,17 @@ void ReportMaterializeStats() {
 	::printf("Materialize (per second): %.0f walks (%.1f buffers, %.1f images, %.1f samplers each), "
 	         "ms: walk %.1f (set-up %.1f, flat SRT %.1f, fill %.1f), buffers %.1f, images %.1f, "
 	         "samplers %.1f, specialization %.1f; %.0f SRT reads (%.0f fast, sampled %.0f ns each), "
-	         "%.0f new pages (%.0f refused) %.1f ms, %.0f slow reads %.1f ms\n",
+	         "%.0f new pages (%.0f refused) %.1f ms, %.0f slow reads %.1f ms (%.0f from the "
+	         "backing %.1f ms, %.0f through the mapping %.1f ms, %.0f left to the GPU; %.0f late "
+	         "words)%s\n",
 	         per_s(m.calls), each(m.buffers), each(m.images), each(m.samplers),
 	         ms_per_s(m.setup_ns + m.flat_ns + m.fill_ns), ms_per_s(m.setup_ns),
 	         ms_per_s(m.flat_ns), ms_per_s(m.fill_ns), ms_per_s(m.buffers_ns),
 	         ms_per_s(m.images_ns), ms_per_s(m.samplers_ns), ms_per_s(m.specialize_ns),
 	         per_s(r.reads + r.fast_reads), per_s(r.fast_reads), sampled_ns, per_s(r.pages),
-	         per_s(r.refused_pages), ms_per_s(r.page_ns), per_s(r.slow_reads), ms_per_s(r.slow_ns));
+	         per_s(r.refused_pages), ms_per_s(r.page_ns), per_s(r.slow_reads), ms_per_s(r.slow_ns),
+	         per_s(r.clean_reads), ms_per_s(r.clean_ns), per_s(r.mapped_reads), ms_per_s(r.mapped_ns),
+	         per_s(r.late_reads), per_s(m.late_words), MappedReadLeaders(r, seconds).c_str());
 	std::fflush(stdout);
 	m = {};
 	r = {};
@@ -446,25 +475,54 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 	if (chunks != nullptr && chunks->Read(address, values)) {
 		return true;
 	}
+	enum class Path { Failed, Backing, Mapping, Late };
 	const auto slow = [&] {
 		if (Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(),
 		                                                    values.size_bytes())) {
-			return true;
+			return Path::Backing;
+		}
+		// KYTY_SRT_LATE_WORDS: the flat slot being refreshed is this word; leave it to a GPU copy.
+		auto& probe = ShaderRecompiler::IR::ThreadSrtLateProbe();
+		if (probe.armed && !probe.hit && t_ordinary_read && values.size() == 1u &&
+		    Libs::LibKernel::Memory::IsGpuBufferWritten(address, sizeof(uint32_t))) {
+			probe.hit     = true;
+			probe.address = address;
+			return Path::Late;
 		}
 		if (!Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes())) {
-			return false;
+			return Path::Failed;
 		}
+		Common::Telemetry::Add(Common::Telemetry::Counter::SrtFaultReads, 1);
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
-		return true;
+		return Path::Mapping;
 	};
 	if (!timed) {
-		return slow();
+		const auto path = slow();
+		return path == Path::Backing || path == Path::Mapping;
 	}
 	const auto start = std::chrono::steady_clock::now();
-	const bool ok    = slow();
-	t_srt_read_stats.slow_reads++;
-	t_srt_read_stats.slow_ns += NanosecondsSince(start);
-	return ok;
+	const auto path  = slow();
+	const auto ns    = NanosecondsSince(start);
+	auto&      r     = t_srt_read_stats;
+	r.slow_reads++;
+	r.slow_ns += ns;
+	switch (path) {
+		case Path::Backing:
+			r.clean_reads++;
+			r.clean_ns += ns;
+			break;
+		case Path::Mapping: {
+			r.mapped_reads++;
+			r.mapped_ns += ns;
+			auto& shader = r.mapped_by_shader[ShaderRecompiler::IR::ThreadMaterializeStats().shader];
+			shader.first++;
+			shader.second += ns;
+			break;
+		}
+		case Path::Late: r.late_reads++; break;
+		case Path::Failed: break;
+	}
+	return path == Path::Backing || path == Path::Mapping;
 }
 
 bool ReadShaderGuestMemoryProfiled(ShaderReadChunks* chunks, uint64_t address,
@@ -503,7 +561,12 @@ bool ReadShaderGuestMemoryEntry(void* userdata, uint64_t address, std::span<uint
 }
 
 bool ReadShaderGuestMemoryRaw(void* userdata, uint64_t address, std::span<uint32_t> values) {
-	return ReadShaderGuestMemoryEntry(userdata, address, values);
+	// The ordinary reader: only its reads may be left to a GPU copy (KYTY_SRT_LATE_WORDS), not
+	// the strict reader's, which decide specialization and branches.
+	t_ordinary_read = true;
+	const bool ok   = ReadShaderGuestMemoryEntry(userdata, address, values);
+	t_ordinary_read = false;
+	return ok;
 }
 
 // Research: a subroutine's code for inlining, in 1 KiB steps while the guest has it committed.

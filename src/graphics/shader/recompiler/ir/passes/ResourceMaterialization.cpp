@@ -1568,8 +1568,9 @@ MaterializeStats& ThreadMaterializeStats() {
 	return stats;
 }
 
-bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runtime,
+                            ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                            bool allow_late) {
 	// KYTY_MATERIALIZE_STATS: `lap` adds the time since the previous lap to one section.
 	using Clock      = std::chrono::steady_clock;
 	const bool timed = MaterializeStatsEnabled();
@@ -1589,7 +1590,9 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		stats.images += program.info.images.size();
 		stats.samplers += program.info.samplers.size();
 	}
+	stats.shader            = program.shader_hash;
 	g_indirect_failure_line = 0;
+	snapshot.late_words.clear();
 	snapshot.bindless_heaps.clear();
 	snapshot.bindless_sampler_heaps.clear();
 	if (!program.resource_tracking_complete ||
@@ -1610,8 +1613,13 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed, program.clean_flat_slots, &clean);
 	lap(stats.setup_ns);
-	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
+	// Captured reads must list every word (specialization), so no late words then.
+	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt,
+	                              allow_late && !capture_reads ? &snapshot.late_words : nullptr)) {
 		return FailIndirect(__LINE__);
+	}
+	if (timed) {
+		stats.late_words += snapshot.late_words.size();
 	}
 	lap(stats.flat_ns);
 	const auto active = std::span<const uint8_t>(program.active_sources);
@@ -1829,6 +1837,28 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	}
 	lap(stats.specialize_ns);
 	return true;
+}
+
+// KYTY_SRT_LATE_WORDS=1 (live, default 0; joshweible ac8ee370 + fcbb019b): the flat SRT is built
+// on the GPU thread at record time, so a word a GPU buffer write still owned made it wait for the
+// GPU (a fault, then a download). Wolverine combat 2026-11-06 (KYTY_MATERIALIZE_STATS): ~800 such
+// reads a second at ~190 us each, ~8 ms a frame. A flat slot that is a raw read of such a word now
+// stays zero and is listed; RebindBuffers copies it from the cache buffer just before the draw or
+// dispatch, so the shader sees it in GPU order. Descriptors, conditions and whatever locates a word
+// still read true values; a walk that a late read would leave wrong runs again with true values.
+bool SrtLateWordsEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_SRT_LATE_WORDS", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
+bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	const bool late = SrtLateWordsEnabled();
+	if (MaterializeOnce(program, runtime, snapshot, specialization, late)) {
+		return true;
+	}
+	return late && TakeSrtLateRetry() &&
+	       MaterializeOnce(program, runtime, snapshot, specialization, false);
 }
 
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {

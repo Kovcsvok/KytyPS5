@@ -126,6 +126,9 @@ bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t
 // The same answer with the backing lookup kept per page until a mapping changes and the texture
 // lock only for a page holding an image (KYTY_SRT_PAGE_CACHE, see memory.cpp).
 [[nodiscard]] const uint8_t* FindGpuCleanBackingCached(uint64_t vaddr, uint64_t size);
+// GPU thread: whether a GPU buffer write owns some of these bytes and no image does, so a GPU copy
+// from the buffer cache reads what the guest would (KYTY_SRT_LATE_WORDS).
+[[nodiscard]] bool IsGpuBufferWritten(uint64_t vaddr, uint64_t size);
 // Any thread (the draw-prep scanner, KYTY_DRAW_PREP): the backing bytes of [vaddr, vaddr + size)
 // when one mapping holds them and the buffer cache has no GPU-written byte among them, else
 // nullptr. The texture cache is not asked, and the answer can be stale by the time the bytes are

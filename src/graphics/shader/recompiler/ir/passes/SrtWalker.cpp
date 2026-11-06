@@ -20,6 +20,19 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
+namespace {
+thread_local SrtLateProbe t_late_probe;
+thread_local bool         t_late_retry = false;
+} // namespace
+
+SrtLateProbe& ThreadSrtLateProbe() {
+	return t_late_probe;
+}
+
+bool TakeSrtLateRetry() {
+	return std::exchange(t_late_retry, false);
+}
+
 SrtRuntime CleanRuntime(SrtRuntime runtime) {
 	runtime.read_memory = runtime.read_specialization_memory != nullptr
 	                          ? runtime.read_specialization_memory
@@ -867,34 +880,34 @@ bool SrtWalker::EvaluateExtract(const Inst& inst, uint64_t& result) {
 	return false;
 }
 
-bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
+int SrtWalker::RawReadTarget(const Inst& inst, uint64_t& address, uint64_t& base) {
 	const auto flags = inst.Flags<MemoryFlags>();
 	if (flags.index >= m_program.memory_info.size()) {
-		return false;
+		return 0;
 	}
 	const auto& mem    = m_program.memory_info[flags.index];
 	const auto* handle = inst.Arg(0).ResolveInstruction();
 	if (handle == nullptr) {
-		return false;
+		return 0;
 	}
 	uint64_t low    = 0;
 	uint64_t high   = 0;
 	uint64_t offset = 0;
 	if (!HandleArg(inst, 0, 0, low) || !HandleArg(inst, 0, 1, high) || !Arg(inst, 1, offset)) {
-		return false;
+		return 0;
 	}
-	const auto base      = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
+	base                 = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
 	const auto immediate = static_cast<int64_t>(static_cast<int32_t>(mem.offset));
-	uint64_t   address   = 0;
+	address              = 0;
 	if (inst.GetOpcode() == ValueOpcode::ReadConstBuffer) {
 		uint64_t records = 0;
 		uint64_t word3   = 0;
 		if (handle->NumArgs() != 4u || !HandleArg(inst, 0, 2, records) ||
 		    !HandleArg(inst, 0, 3, word3)) {
-			return false;
+			return 0;
 		}
 		if (immediate < 0) {
-			return false;
+			return 0;
 		}
 		const auto byte_offset =
 		    (static_cast<uint64_t>(immediate) & ~uint64_t {3}) + (static_cast<uint32_t>(offset) & ~3u);
@@ -905,16 +918,26 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		if (byte_offset > size || size - byte_offset < sizeof(uint32_t)) {
 			// A scalar buffer read past the end returns zero (PS5 ISA, scalar buffer addressing),
 			// as the shader's own load does (EmitReadConstBuffer). Failing skipped the draw.
-			result = 0;
-			return true;
+			return 2;
 		}
 		address = (base & ~uint64_t {3}) + byte_offset;
 	} else {
 		const auto relative =
 		    (immediate & ~int64_t {3}) + static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
 		if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
-			return false;
+			return 0;
 		}
+	}
+	return 1;
+}
+
+bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
+	uint64_t address = 0;
+	uint64_t base    = 0;
+	switch (RawReadTarget(inst, address, base)) {
+		case 0: return false;
+		case 2: result = 0; return true;
+		default: break;
 	}
 	uint32_t word = 0;
 	if (m_runtime.read_memory != nullptr) {
@@ -1391,7 +1414,8 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 // Refreshes the flat buffer's reachable scalar reads and the active descriptor sources in one
 // walk of the resource control flow (upstream 6409be28), with our evaluators (native tables,
 // compiled plans) and the replay of the last walk when its conditions give the same outcomes.
-bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
+bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>&                    flat,
+                                  std::vector<std::pair<uint32_t, uint64_t>>* late) {
 	// A failure skips the draw or dispatch; say which SRT read failed (capped).
 	static std::atomic<uint32_t> reported {0};
 	const auto report = [&](const char* reason, size_t index, uint32_t flat_offset, bool clean) {
@@ -1430,21 +1454,53 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		if (read.flat_offset >= flat.size()) {
 			return report("value unreadable", index, read.flat_offset, clean);
 		}
-		if (evaluator.UseNativeTables()) {
-			uint64_t wide = 0;
-			if (!evaluator.EvaluateNative(evaluator.m_native->FlatReads()[index], wide)) {
-				return report("value unreadable", index, read.flat_offset, clean);
+		const auto evaluate = [&] {
+			if (evaluator.UseNativeTables()) {
+				uint64_t wide = 0;
+				if (!evaluator.EvaluateNative(evaluator.m_native->FlatReads()[index], wide)) {
+					return false;
+				}
+				flat[read.flat_offset] = static_cast<uint32_t>(wide);
+				return true;
 			}
-			flat[read.flat_offset] = static_cast<uint32_t>(wide);
-			return true;
+			return evaluator.m_compiled != nullptr
+			           ? evaluator.EvaluateRoot(evaluator.m_compiled->srt_reads[index], read.value,
+			                                    flat[read.flat_offset])
+			           : evaluator.Evaluate(read.value, flat[read.flat_offset]);
+		};
+		// KYTY_SRT_LATE_WORDS: only a slot that is itself a raw read can arrive by a GPU copy;
+		// whatever locates the word (its operands) is read as before. A failed read is not
+		// memoized, so a descriptor or condition that needs the same word later reads it in full.
+		const auto* raw = late != nullptr && !clean ? read.value.Resolve().TryInstruction() : nullptr;
+		if (raw != nullptr && !((raw->GetOpcode() == ValueOpcode::LoadAddressU32 ||
+		                         raw->GetOpcode() == ValueOpcode::ReadConstBuffer) &&
+		                        IsRawRead(m_program, *raw))) {
+			raw = nullptr;
 		}
-		if (!(evaluator.m_compiled != nullptr
-		          ? evaluator.EvaluateRoot(evaluator.m_compiled->srt_reads[index], read.value,
-		                                   flat[read.flat_offset])
-		          : evaluator.Evaluate(read.value, flat[read.flat_offset]))) {
-			return report("value unreadable", index, read.flat_offset, clean);
+		if (raw == nullptr) {
+			return evaluate() || report("value unreadable", index, read.flat_offset, clean);
 		}
-		return true;
+		auto& probe = t_late_probe;
+		probe       = {.armed = true};
+		bool ok     = evaluate();
+		probe.armed = false;
+		if (probe.hit) {
+			if (ok) {
+				// A failed read still gave the slot a value: walk again with true values.
+				t_late_retry = true;
+				return false;
+			}
+			uint64_t address = 0;
+			uint64_t base    = 0;
+			if (evaluator.RawReadTarget(*raw, address, base) == 1 && address == probe.address) {
+				flat[read.flat_offset] = 0;
+				late->emplace_back(read.flat_offset, address);
+				return true;
+			}
+			// An operand's read was the late one: it locates the word, so read everything.
+			ok = evaluate();
+		}
+		return ok || report("value unreadable", index, read.flat_offset, clean);
 	};
 	auto& active = m_program.active_sources;
 	if (m_program.control_flow.empty()) {

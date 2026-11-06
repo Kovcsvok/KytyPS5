@@ -1,0 +1,6 @@
+[
+ {"name": "stats-before", "minutes": 1, "hold": {"KYTY_MATERIALIZE_STATS": 1, "KYTY_SRT_LATE_WORDS": 0}},
+ {"name": "late-on", "minutes": 1, "hold": {"KYTY_MATERIALIZE_STATS": 1, "KYTY_SRT_LATE_WORDS": 1},
+  "gate": {"min_sum": {"srt_late_words": 1}}},
+ {"name": "late-words", "minutes": 6, "ab": {"KYTY_SRT_LATE_WORDS": [0, 1]}, "needs": "late-on"}
+]

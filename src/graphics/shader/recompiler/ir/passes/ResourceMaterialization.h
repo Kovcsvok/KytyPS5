@@ -77,8 +77,14 @@ struct MaterializeStats {
 	uint64_t images_ns     = 0;
 	uint64_t samplers_ns   = 0;
 	uint64_t specialize_ns = 0;
+	// The flat SRT words left to a GPU copy (KYTY_SRT_LATE_WORDS).
+	uint64_t late_words    = 0;
+	// The program being materialized, for the SRT read report (set on every call).
+	uint64_t shader        = 0;
 };
 bool              MaterializeStatsEnabled();
+// KYTY_SRT_LATE_WORDS (live, default 0): see MaterializeResources.
+[[nodiscard]] bool SrtLateWordsEnabled();
 MaterializeStats& ThreadMaterializeStats();
 
 // Applies an already-derived specialization to native IR before layout and emission.

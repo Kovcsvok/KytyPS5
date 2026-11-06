@@ -1213,6 +1213,16 @@ bool TryReadGpuCleanBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return TryReadBacking(vaddr, data, size);
 }
 
+bool IsGpuBufferWritten(uint64_t vaddr, uint64_t size) {
+	if (g_gpu_resources == nullptr || !Graphics::GuestGpu::IsGpuThread() ||
+	    !IsGpuAddressRange(vaddr, size)) {
+		return false;
+	}
+	auto& resources = GetGpuResources();
+	return resources.GetBufferCache().HasGpuDirtyBytes(vaddr, size) &&
+	       !resources.GetTextureCache().IsRegionGpuModifiedOnGpuThread(vaddr, size);
+}
+
 const uint8_t* FindGpuCleanBacking(uint64_t vaddr, uint64_t size) {
 	if (g_guest_address_space == nullptr) {
 		return nullptr;

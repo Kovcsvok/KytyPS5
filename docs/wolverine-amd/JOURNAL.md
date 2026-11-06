@@ -908,3 +908,36 @@ A leírónkénti találati arány méréséhez külön számláló kell; ez a `m
 - **Tanulság:** a lapvédés-csökkentés (DEFER, PREDICT) kétszer bukott el ugyanott. A helyességhez szükséges visszazárások elviszik a nyereséget. Védési költséget csak kötegeléssel (carbonimax) vagy kevesebb követett kötéssel érdemes csökkenteni.
 - **A következő fő irány az adatok alapján:** az SRT késői szavak GPU-másolása (`ac8ee370` + `fcbb019b`); célpont ~6–9 ms / képkocka. A leírónkénti cache legfeljebb ~1,3 ms-ot nyerhetne, hátrébb kerül.
 
+## 2026-11-06 — Opus — `KYTY_SRT_LATE_WORDS` (joshweible `ac8ee370` + `fcbb019b` port) + bontott SRT-olvasásmérés (kód)
+**GPT észrevétele igaz volt:** a `slow reads` a tiszta backingből kiszolgált olvasásokat is számolta (`TryReadGpuCleanBacking`), nem csak a laphibásakat. A ~190 µs / 8,7 ms tehát célpontjelző, nem tiszta GPU-várás.
+
+**Mérés (`KYTY_MATERIALIZE_STATS=1`, ez a live fájlban állandóan be van kapcsolva):** a `Materialize` sor új része: `(N from the backing X ms, M through the mapping Y ms, L left to the GPU; K late words); mapped by shader: <hash> n/s ms, …`.
+- A „through the mapping” a valódi laphibás/letöltős út, programonként is bontva, az 5 legdrágább shaderrel.
+- Új telemetria-oszlopok: `srt_fault_reads` (mindig számol) és `srt_late_words`.
+- Az „utolsó író kész-e” bontás még hiányzik.
+
+**`KYTY_SRT_LATE_WORDS=1` (élő, alap 0):**
+- **Mit késleltet:** csak a GPU-szálon, csak a nem-clean lapos SRT-slotot, és csak ha maga a slot értéke egy nyers olvasás (`LoadAddressU32` / `ReadConstBuffer`, `IsRawRead`).
+- **Mikor:** ha az olvasott szót GPU-pufferírás birtokolja (`HasGpuDirtyBytes`), és kép nem (`IsGpuBufferWritten`). Ilyenkor a rendes olvasó nem vár: kudarcot jelez egy szálszintű próbán (`SrtLateProbe`), a slot 0 lesz, és listára kerül.
+- **A függőségkövetés, amit a GPT kért:**
+  - A szót lokalizáló operandusok mindig pontos olvasással mennek. Ha a késői olvasás egy operandusé volt (a próba címe nem egyezik a slot `RawReadTarget` címével), a slot újra, pontosan értékelődik.
+  - A sikertelen olvasást sem az IR-, sem a natív bejáró nem memoizálja. Így ha ugyanaz a szó kell egy leíróhoz vagy feltételhez, azt a bejáró újra, pontosan olvassa.
+  - Ha egy kudarcos olvasás ellenére a slot mégis értéket kapna, az egész anyagösszeállítás újrafut pontos értékekkel (`TakeSrtLateRetry`).
+  - A szigorú olvasó (specializáció, elágazás) sosem késleltet: a `t_ordinary_read` csak a `ReadShaderGuestMemoryRaw` alatt igaz.
+  - Read-capture-ös programoknál a késleltetés ki van kapcsolva.
+- **GPU-másolás (`RebindBuffers`):**
+  - Futamok összevonva (`fcbb019b`); a bindless patch által felülírt szavak kimaradnak.
+  - `ObtainBuffer` minden más kötés előtt (buffer-merge miatt), majd `EndRendering`.
+  - Barrier: `MemoryWrite → TransferRead`, utána `copyBuffer` a lapos SRT stream-puffer helyére, végül `TransferWrite → ShaderRead|UniformRead`, `AllCommands`.
+  - Minden rajzolás és dispatch újra feltölti a lapos SRT-t, így a másolat sosem marad el egy korábbi időpontból.
+- **Ellenőrizve:** a draw-prep scanner szál nem késleltet (nem GPU-szál), a `DrawPrep verify` és a `RESOURCE_MEMO` alapból ki van kapcsolva.
+- A shader-fordítás nem változik.
+
+**Kampány:** `plans/2026-11-07.json`.
+1. `stats-before` (1 perc, 0).
+2. `late-on` (1 perc, 1). Kapu: `srt_late_words` > 0 a második félben.
+3. `late-words` ABBA 0 / 1 (6 perc).
+
+A `campaign.py` kapuja általános lett: `{"min_sum": {"oszlop": érték}}`.
+**Figyelendő:** képhibák (pl. rossz anyag vagy fény); a csendes adathibát az A/B nem mutatja ki.
+
