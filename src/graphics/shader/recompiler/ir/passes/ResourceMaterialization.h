@@ -83,10 +83,18 @@ struct MaterializeStats {
 	uint64_t shader        = 0;
 };
 bool              MaterializeStatsEnabled();
+// KYTY_MATERIALIZE_STATS: why a flat slot is read by the strict evaluator (bits): it feeds an
+// indirect image's material or table source, a bindless sampler, a written buffer's descriptor or
+// a written image's descriptor (those need exact addresses for the alias proof). 0: none.
+enum CleanReason : uint8_t {
+	CleanReasonIndirectImage = 1,
+	CleanReasonSampler       = 2,
+	CleanReasonWrittenBuffer = 4,
+	CleanReasonWrittenImage  = 8,
+};
+[[nodiscard]] uint8_t CleanSlotReason(const ResourcePlan& plan, uint32_t slot);
 // KYTY_SRT_LATE_WORDS (live, default 0): see MaterializeResources. 0, 1 or 2 (verify).
 [[nodiscard]] int SrtLateWordsMode();
-// KYTY_SRT_LATE_WIDE (live, default 0): see ResourceMaterialization.cpp.
-[[nodiscard]] bool SrtLateWideEnabled();
 MaterializeStats& ThreadMaterializeStats();
 
 // Applies an already-derived specialization to native IR before layout and emission.

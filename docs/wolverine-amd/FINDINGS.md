@@ -78,8 +78,15 @@ The remaining GPU wait in Materialize is shader `0xfb5ee753d43f3f0b`: 16-24 stri
 second in combat, ~2.5-3.5 ms each (37-70 ms/s), almost all with the writing GPU work still
 running. The plan marks a flat slot clean (exact) when it feeds a written buffer's or image's
 descriptor (the alias proof needs the exact address), an indirect image's material or table
-source, or a bindless sampler. Next: log which of these it is and whether the value changes
-between reads.
+source, or a bindless sampler. Being logged now: which of these it is, whether the value changes
+between reads, and whether the read bytes' own writer (range tick) is still running or only the
+buffer's (writer tracking too coarse). GPT's advice: speculating on the old value is unsafe
+unless the GPU checks it before the first side effect; look at the writer tracking and the
+producer first.
+
+**Stall:** three ~13-14 s frames (2026-10-29, 2026-11-06 twice) were the GPU thread waiting ~11 s
+on a `TrackingSpinLock` (region or texture-cache lock) with the GPU idle, also before the
+experimental switches: an emulator bug. A wait over 1 s now prints the owner's thread and stack.
 
 ## Next
 

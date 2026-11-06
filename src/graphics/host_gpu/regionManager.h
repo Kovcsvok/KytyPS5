@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/regionDefinitions.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <utility>
 
@@ -37,7 +38,7 @@ public:
 			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
 			KYTY_PROFILER_BLOCK("LockWait(spin)", profiler::colors::RedA100);
 			const auto start = Common::Telemetry::Enabled() ? Common::Telemetry::NowNs() : 0;
-			Common::SpinAcquire(m_lock);
+			AcquireContended();
 			if (start != 0) {
 				Common::Telemetry::AddWait(Common::Telemetry::Counter::SpinLockWait,
 				                           Common::Telemetry::NowNs() - start);
@@ -52,6 +53,45 @@ public:
 	}
 
 private:
+	// Common::SpinAcquire, except that a wait of over a second is reported with the owner's thread
+	// and both stacks (Common::ReportLongLockWait), and its end too. Wolverine combat had ~11 s
+	// waits of the GPU thread on a tracking lock, with the GPU idle (2026-10-29 17:59, 2026-11-06
+	// 15:51 and 18:18; telemetry spin_lock_ms ~11,000 in one interval).
+	void AcquireContended() noexcept {
+		const auto          start      = std::chrono::steady_clock::now();
+		const bool          backoff_on = Common::SpinBackoffEnabled();
+		Common::SpinBackoff backoff;
+		uint32_t            spins    = 0;
+		bool                reported = false;
+		bool                printed  = false;
+		do {
+			while (m_lock.test(std::memory_order_relaxed)) {
+				if (backoff_on) {
+					backoff.Wait();
+				} else {
+					Common::CpuRelax();
+				}
+				if ((++spins & 0x3ffu) == 0u && !reported) {
+					const auto waited = std::chrono::steady_clock::now() - start;
+					if (waited > std::chrono::seconds(1)) {
+						reported = true;
+						printed  = Common::ReportLongLockWait(
+						    this, m_owner.load(std::memory_order_relaxed), false,
+						    static_cast<uint64_t>(
+						        std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count()));
+					}
+				}
+			}
+		} while (m_lock.test_and_set(std::memory_order_acquire));
+		if (printed) {
+			Common::ReportLongLockWait(
+			    this, 0, true,
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                              std::chrono::steady_clock::now() - start)
+			                              .count()));
+		}
+	}
+
 	static uint32_t CurrentThread() noexcept {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		return GetCurrentThreadId();

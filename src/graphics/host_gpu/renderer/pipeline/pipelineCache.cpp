@@ -211,25 +211,51 @@ struct SrtReadStats {
 		uint8_t  section = 0;
 		bool     strict  = false;
 		bool     capture = false;
+		uint8_t  reason  = 0; // strict flat slots: CleanReason bits
 		bool     operator==(const MappedKey&) const = default;
 	};
 	struct MappedKeyHash {
 		size_t operator()(const MappedKey& k) const noexcept {
 			return std::hash<uint64_t> {}(k.shader ^ (uint64_t {k.section} << 56u) ^
+			                               (uint64_t {k.reason} << 48u) ^
 			                               (uint64_t {k.strict} << 62u) ^ (uint64_t {k.capture} << 63u));
 		}
 	};
+	// running: the buffer's last GPU writer had not finished when the read began; range_running:
+	// the last writer of the read bytes themselves (KYTY_READBACK_RANGE_TICK ranges). Flat slots:
+	// the value read against the last one this thread read for the same program, slot and address
+	// (same, changed) or none yet (fresh).
 	struct MappedStats {
-		uint64_t count   = 0;
-		uint64_t ns      = 0;
-		uint64_t running = 0;
+		uint64_t count         = 0;
+		uint64_t ns            = 0;
+		uint64_t running       = 0;
+		uint64_t range_running = 0;
+		uint64_t same          = 0;
+		uint64_t changed       = 0;
+		uint64_t fresh         = 0;
 	};
 	std::unordered_map<MappedKey, MappedStats, MappedKeyHash> mapped_by_shader;
+	// A few strict flat reads through the mapping per report, in full.
+	std::vector<std::string> samples;
 	uint64_t pages         = 0;
 	uint64_t refused_pages = 0;
 	uint64_t page_ns       = 0;
 };
 thread_local SrtReadStats t_srt_read_stats;
+// KYTY_MATERIALIZE_STATS: the last value read through the mapping per program, flat slot and
+// address (a hash of the bytes), kept across reports.
+struct LastValueKey {
+	uint64_t shader  = 0;
+	uint64_t address = 0;
+	uint32_t slot    = 0;
+	bool     operator==(const LastValueKey&) const = default;
+};
+struct LastValueKeyHash {
+	size_t operator()(const LastValueKey& k) const noexcept {
+		return std::hash<uint64_t> {}(k.shader ^ (k.address * 0x9e3779b97f4a7c15ull) ^ k.slot);
+	}
+};
+thread_local std::unordered_map<LastValueKey, uint64_t, LastValueKeyHash> t_last_values;
 // Set while ReadShaderGuestMemoryRaw (the walker's ordinary reader) runs.
 thread_local bool t_ordinary_read = false;
 
@@ -257,6 +283,26 @@ uint64_t NanosecondsSince(std::chrono::steady_clock::time_point start) {
 	                                 .count());
 }
 
+// " [written buffer]" etc. for a strict flat slot's CleanReason bits.
+std::string CleanReasonText(uint8_t reason) {
+	using namespace ShaderRecompiler::IR;
+	if (reason == 0u) {
+		return {};
+	}
+	std::string text;
+	const auto add = [&](uint8_t bit, const char* name) {
+		if ((reason & bit) != 0u) {
+			text += text.empty() ? " [" : "+";
+			text += name;
+		}
+	};
+	add(CleanReasonIndirectImage, "indirect image");
+	add(CleanReasonSampler, "sampler");
+	add(CleanReasonWrittenBuffer, "written buffer");
+	add(CleanReasonWrittenImage, "written image");
+	return text + "]";
+}
+
 // The programs whose SRT reads through the guest mapping took longest, for the report.
 std::string MappedReadLeaders(const SrtReadStats& r, double seconds) {
 	static constexpr const char* Sections[] = {"other",   "flat",   "condition", "fill",
@@ -266,15 +312,22 @@ std::string MappedReadLeaders(const SrtReadStats& r, double seconds) {
 	    r.mapped_by_shader.begin(), r.mapped_by_shader.end());
 	std::ranges::sort(leaders, [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
 	std::string text;
+	const auto per_s = [&](uint64_t n) { return static_cast<double>(n) / seconds; };
 	for (size_t i = 0; i < leaders.size() && i < 6; i++) {
 		const auto& [key, value] = leaders[i];
-		text += fmt::format("{}0x{:016x} {} {}{} {:.0f}/s {:.1f} ms ({:.0f}/s writer running)",
+		text += fmt::format("{}0x{:016x} {} {}{}{} {:.0f}/s {:.1f} ms ({:.0f}/s writer running, "
+		                    "{:.0f}/s range writer running",
 		                    i == 0 ? "; mapped by shader: " : ", ", key.shader,
 		                    key.section < std::size(Sections) ? Sections[key.section] : "?",
 		                    key.strict ? "strict" : "ordinary", key.capture ? " capture" : "",
-		                    static_cast<double>(value.count) / seconds,
-		                    static_cast<double>(value.ns) / 1e6 / seconds,
-		                    static_cast<double>(value.running) / seconds);
+		                    CleanReasonText(key.reason), per_s(value.count),
+		                    static_cast<double>(value.ns) / 1e6 / seconds, per_s(value.running),
+		                    per_s(value.range_running));
+		if (value.same + value.changed + value.fresh != 0) {
+			text += fmt::format("; value same {:.0f}/s, changed {:.0f}/s, first {:.0f}/s",
+			                    per_s(value.same), per_s(value.changed), per_s(value.fresh));
+		}
+		text += ")";
 	}
 	return text;
 }
@@ -311,6 +364,9 @@ void ReportMaterializeStats() {
 	         per_s(r.refused_pages), ms_per_s(r.page_ns), per_s(r.slow_reads), ms_per_s(r.slow_ns),
 	         per_s(r.clean_reads), ms_per_s(r.clean_ns), per_s(r.mapped_reads), ms_per_s(r.mapped_ns),
 	         per_s(r.mapped_strict), per_s(r.mapped_quick), per_s(r.late_reads), per_s(m.late_words), MappedReadLeaders(r, seconds).c_str());
+	for (const auto& sample: r.samples) {
+		::printf("Strict SRT wait: %s\n", sample.c_str());
+	}
 	std::fflush(stdout);
 	m = {};
 	r = {};
@@ -507,7 +563,7 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 		return true;
 	}
 	enum class Path { Failed, Backing, Mapping, Late };
-	bool writer_running = false;
+	Libs::LibKernel::Memory::GpuWriterProbe writer;
 	const auto slow = [&] {
 		if (Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(),
 		                                                    values.size_bytes())) {
@@ -526,7 +582,7 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 		}
 		Common::Telemetry::Add(Common::Telemetry::Counter::SrtFaultReads, 1);
 		if (timed) {
-			writer_running = Libs::LibKernel::Memory::IsGpuWriteInFlight(address);
+			writer = Libs::LibKernel::Memory::ProbeGpuWriter(address, values.size_bytes());
 		}
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 		return Path::Mapping;
@@ -551,13 +607,52 @@ bool ReadShaderGuestMemoryImpl(ShaderReadChunks* chunks, uint64_t address,
 			r.mapped_ns += ns;
 			r.mapped_strict += t_ordinary_read ? 0u : 1u;
 			r.mapped_quick += ns < 20000u ? 1u : 0u;
-			const auto& context = ShaderRecompiler::IR::ThreadSrtReadContext();
-			auto&       shader  = r.mapped_by_shader[{ShaderRecompiler::IR::ThreadMaterializeStats().shader,
-			                                          static_cast<uint8_t>(context.section),
-			                                          !t_ordinary_read, context.capture}];
+			const auto& context   = ShaderRecompiler::IR::ThreadSrtReadContext();
+			const auto  program   = ShaderRecompiler::IR::ThreadMaterializeStats().shader;
+			const bool  flat_slot = context.section == ShaderRecompiler::IR::SrtReadSection::Flat &&
+			                       context.slot != UINT32_MAX && context.plan != nullptr;
+			const auto  reason    = flat_slot && !t_ordinary_read
+			                            ? ShaderRecompiler::IR::CleanSlotReason(*context.plan, context.slot)
+			                            : uint8_t {0};
+			auto&       shader    = r.mapped_by_shader[{program, static_cast<uint8_t>(context.section),
+			                                          !t_ordinary_read, context.capture, reason}];
 			shader.count++;
 			shader.ns += ns;
-			shader.running += writer_running ? 1u : 0u;
+			shader.running += writer.buffer_running ? 1u : 0u;
+			shader.range_running += writer.range_running ? 1u : 0u;
+			const char* stability = "";
+			if (flat_slot) {
+				uint64_t hash = 0xcbf29ce484222325ull;
+				for (const auto word: values) {
+					hash = (hash ^ word) * 0x100000001b3ull;
+				}
+				if (t_last_values.size() >= 16384u) {
+					t_last_values.clear();
+				}
+				const auto [it, fresh] = t_last_values.try_emplace({program, address, context.slot}, hash);
+				if (fresh) {
+					shader.fresh++;
+					stability = "first";
+				} else if (it->second == hash) {
+					shader.same++;
+					stability = "same";
+				} else {
+					shader.changed++;
+					stability = "changed";
+					it->second = hash;
+				}
+			}
+			if (flat_slot && !t_ordinary_read && r.samples.size() < 4u) {
+				r.samples.push_back(fmt::format(
+				    "shader 0x{:016x} slot {}{} address 0x{:x} ({} bytes, first 0x{:08x}, {}) waited "
+				    "{:.0f} us; buffer 0x{:x} +0x{:x} writer tick {} {}; range [0x{:x}, 0x{:x}) "
+				    "writer tick {} {}; current tick {}",
+				    program, context.slot, CleanReasonText(reason), address, values.size_bytes(),
+				    values[0], stability, static_cast<double>(ns) / 1e3, writer.buffer_begin,
+				    writer.buffer_size, writer.buffer_tick, writer.buffer_running ? "running" : "done",
+				    writer.range_begin, writer.range_end, writer.range_tick,
+				    writer.range_running ? "running" : "done", writer.current_tick));
+			}
 			break;
 		}
 		case Path::Late: r.late_reads++; break;

@@ -154,6 +154,17 @@ jobs:
           # newest successful one when the game starts (2026-11-06: a 3-day build expired unused).
           retention-days: 14
 
+      # The lld map of the same link (/DYNAMICBASE:NO, so host stack addresses in the log, such
+      # as "Long lock wait" reports, resolve against it). Uploaded after the package: the update
+      # script installs a run's first artifact.
+      - name: Upload symbol map
+        uses: actions/upload-artifact@v4
+        with:
+          name: zz-symbol-map
+          path: _Build/windows/**/kyty_emulator_*.map
+          if-no-files-found: warn
+          retention-days: 14
+
   tuning-settings:
     name: Test tuning settings (no GPU required)
     runs-on: ubuntu-latest

@@ -39,12 +39,6 @@ public:
 	void           Finish();
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
-	// Called at the start of every submission while set: work recorded earlier may read host
-	// memory that is filled late (KYTY_REPROTECT_BATCH deferred uploads).
-	void SetPreSubmit(void (*callback)(void*), void* context) noexcept {
-		m_pre_submit         = callback;
-		m_pre_submit_context = context;
-	}
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
@@ -136,8 +130,6 @@ private:
 	void     StopRecordingThread();
 	void     BeginThreadedCommand();
 	uint64_t SubmitThreaded(SubmitInfo submit, const SubmitDebug& debug);
-	void (*m_pre_submit)(void*)   = nullptr;
-	void*  m_pre_submit_context   = nullptr;
 	void     QueueSubmit(vk::CommandBuffer buffer, SubmitInfo& submit, uint64_t tick,
 	                     const SubmitDebug& debug);
 

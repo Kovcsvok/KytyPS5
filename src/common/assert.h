@@ -31,6 +31,12 @@ void DbgExit(int status);
 std::string HostBacktrace();
 // "0x<address> Symbol+0xoff [file:line]" for a host code address (Windows; plain address elsewhere).
 std::string HostSymbolize(uint64_t address);
+// A thread has waited over a second for a tracking spin lock (regionManager.h): prints the waiter
+// and the owner (thread ids, names, host stacks; frames inside the emulator also as exe+offset,
+// which the build's lld map resolves). At most one report every 2 s; returns whether it printed.
+// done: the wait has ended after waited_ns (printed only after a printed start).
+// KYTY_LOCK_WAIT_REPORT=0 (environment) turns it off.
+bool ReportLongLockWait(const void* lock, uint32_t owner_thread, bool done, uint64_t waited_ns);
 
 } // namespace Common
 

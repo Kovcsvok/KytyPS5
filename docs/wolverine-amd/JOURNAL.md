@@ -1091,8 +1091,7 @@ A shader-fordítás nem változik.
 
 **13,4 s-os képkocka** 18:18:41–51 között, B-ben (`BATCH=1`):
 - A GPU közben üres volt (16 s alatt 0,2 ms/s, 30 parancspuffer). A VRAM 13,4 / 14,2 GB-on állt.
-- A környező A-blokkok is 10–12 fps-re estek, ezért valószínűleg jelenetváltás vagy töltés (halál, checkpoint) volt. Nincs a BATCH-hez kötve.
-- A PREDICT alatt is volt egy 14 s-os megakadás. Figyeljük, nem ismétlődik-e kapcsolók nélkül is.
+- ~~A környező A-blokkok is 10–12 fps-re estek, ezért valószínűleg jelenetváltás vagy töltés volt.~~ **Javítva lent:** a telemetria szerint a GPU-szál 11 s-ig várt egy spinlockra.
 
 **`0xfb5ee753d43f3f0b` (`flat strict`):**
 - **Harcban:** 16–24 olvasás/s, 37–70 ms/s (olvasásonként ~2,5–3,5 ms). Szinte mindegyiknél még fut a szót író GPU-munka (`writer running`).
@@ -1109,4 +1108,47 @@ A shader-fordítás nem változik.
    - a tiszta slot oka (írt puffer, írt kép, indirekt kép, sampler);
    - az érték stabilitása: ugyanaz-e, mint az előző olvasáskor ugyanabban a programban és slotban.
    - Ha stabil, a GPU-várás helyett szóba jöhet a spekuláció ellenőrzéssel. Ezt előbb a GPT-vel átbeszéljük.
+
+## 2026-11-06 — Opus — 4. kör: WIDE és BATCH törölve; `fb5e`-, védés- és megakadás-diagnosztika (kód)
+**GPT 5. válasza alapján:**
+- **WIDE:** helyesebb így mondani: a +9% a mechanizmus mérésével nincs megerősítve (nem bizonyítottan zaj). A változatlan számlálók mellett nincs ok megtartani.
+- **Spekuláció:** az előző cím használata utólagos ellenőrzéssel veszélyes, mert a rossz címre írás az ellenőrzés előtt megtörténik. Csak az első mellékhatás előtti GPU-oldali ellenőrzés lenne helyes, ez nagy ütemező-átalakítás. A heap-szintű kötés sem oldja meg, hogy a CPU mikor olvashat. **Előbb meg kell nézni:**
+  - durva-e az utolsóíró-követés (a puffer tickje kontra az olvasott bájtok írójának tickje);
+  - változatlan adatot ír-e újra az előállító.
+- **Laphibák:** előbb a védés-syscallokat kell forrás és állapot szerint megszámolni. Az 1940 hívás és a 900 laphiba együttmozgása még nem bizonyít ok-okozatot.
+- **Megakadás:** naplózni kell, nem töltésnek nevezni.
+
+**A megakadás a meglévő adatokból:**
+- A `telemetry_*.csv`-k szerint mindhárom ~13–14 s-os képkockában **a GPU-szál ~11 s-ig várt egy `TrackingSpinLock`-ra** (régió- vagy textúracache-zár; a `spin_lock_ms` csak a GPU-szálon mér).
+  - 2026-10-29 17:59: 11 397 ms (PREDICT és BATCH előtt);
+  - 2026-11-06 15:51 (PREDICT=2): 11 016 ms;
+  - 2026-11-06 18:18 (BATCH=1): 11 079 ms.
+- A folyamat közben ~2,5–3 magot égetett, a GPU-szál semmit sem futott.
+- **Tehát emulátorhiba, nem töltés, és nem a kísérleti kapcsolók okozzák.** A ~11 s-os, ismétlődő hossz időkorlátra utal.
+
+**Törölve:** `KYTY_REPROTECT_BATCH` (`PageManager` deferral, `BufferCache` batch, `CommandScheduler::SetPreSubmit`, a `graphicsRun.cpp` ürítési pontjai, a `protect_deferred_spans` és `batch_flushes` számlálók), `KYTY_SRT_LATE_WIDE` (a `BufferReadTarget`-refaktor is). A `protect_calls` telemetria marad.
+
+**Új diagnosztika:**
+1. **`fb5e` (`KYTY_MATERIALIZE_STATS=1`):**
+   - **A szigorú lapos slot oka:** a `mapped by shader` kulcsában szerepel (`[written buffer]`, `[written image]`, `[indirect image]`, `[sampler]`).
+     - A `CleanSlotReason` futásidőben számolja a tervből, a terv-építés jelölését utánozva.
+     - A program-lemezcache-ben tárolt terv nem változik, így a Play bat `KYTY_PROGRAM_CACHE_GIT_REVISION`-je érvényes marad. A shader-fordítás nem változik.
+   - **Író:** a `writer running` mellett a `range writer running` is: az olvasott bájtok utolsó írójának tickje (`WriterTick`, a `KYTY_READBACK_RANGE_TICK` tartományaiból). Ha a puffer írója fut, de a tartományé nem, az utolsóíró-követés túl durva.
+   - **Értékstabilitás** programonként, slotonként és címenként (a bájtok hash-e): `same` / `changed` / `first`.
+   - **Minták:** 5 s-onként legfeljebb 4 `Strict SRT wait:` sor. Tartalmuk: program, slot, ok, cím, méret, első szó, stabilitás, várakozás; a puffer, a követett írási tartomány, a tickek és az aktuális tick.
+2. **`KYTY_PROTECT_STATS=1` (élő, alap 0):** minden védés-syscall megszámolva, kalapokra bontva:
+   - szál: GPU-szál vagy más;
+   - követő: pufferrégiók vagy képek;
+   - figyelő: írásfigyelés vagy hozzáférés-figyelés;
+   - irány: be vagy ki;
+   - hívásban és lapban.
+   - Ezen felül: hány lapállapot-frissítés hívott, és hány hívás kezdődött ott, ahol ugyanannak a szálnak az előző, azonos védésű hívása végződött (ezek összevonhatók lettek volna).
+   - Napló: `Protect calls (5 s)`.
+3. **Hosszú zárvárás (`TrackingSpinLock`, mindig be; `KYTY_LOCK_WAIT_REPORT=0` kikapcsolja):**
+   - 1 s várakozás után egyszer kiírja a várakozó és a tulajdonos szálat (azonosító, név) és mindkét host-vermet. A tulajdonost a kiolvasás idejére felfüggeszti; ezalatt semmi sem foglal memóriát.
+   - A végén kiírja a teljes várakozás hosszát. Legfeljebb 2 s-onként egy riport.
+   - A keretek `exe+offset` alakban is megjelennek. A CI külön artifactként (`zz-symbol-map`, 14 nap) feltölti a link lld-térképét, amely ezeket feloldja (`/DYNAMICBASE:NO`).
+   - Az `Update Emulator.ps1` a `zz-*` artifactokat kihagyja.
+
+**Kampány:** `plans/2026-11-08.json` – 5 perc `diagnostics` hold (`KYTY_PROTECT_STATS=1`). A/B nincs; a cél a fenti mérés. A zárvárás-riport minden további munkamenetben aktív.
 

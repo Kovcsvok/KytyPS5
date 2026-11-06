@@ -181,7 +181,7 @@ const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
 }
 
 void MarkCleanFlatSlots(const ResourcePlan& program, const DescriptorSource* source,
-                        std::span<uint8_t> slots, Value extra = {}) {
+                        std::span<uint8_t> slots, Value extra = {}, uint8_t value = 1u) {
 	if (source == nullptr && extra.IsEmpty()) {
 		return;
 	}
@@ -202,7 +202,7 @@ void MarkCleanFlatSlots(const ResourcePlan& program, const DescriptorSource* sou
 		if (inst->GetOpcode() == ValueOpcode::ReadConst) {
 			const auto slot = inst->Arg(1).Resolve();
 			if (slot.IsImmediate() && slot.GetType() == Type::U32 && slot.U32() < slots.size()) {
-				slots[slot.U32()] = 1u;
+				slots[slot.U32()] |= value;
 				pending.push_back(program.srt_reads[slot.U32()].value);
 			}
 			continue;
@@ -1617,22 +1617,15 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 	auto& context   = ThreadSrtReadContext();
 	context.capture = capture_reads;
 	context.section = SrtReadSection::Flat;
-	// A program that captures its specialization reads lists every word it evaluated on the host
-	// for the renderer's alias proof: its late words join that list (KYTY_SRT_LATE_WIDE), as the
-	// copy, like the host read, happens before the draw or dispatch.
-	const auto late_mode =
-	    allow_late && (!capture_reads || SrtLateWideEnabled()) ? SrtLateWordsMode() : 0;
+	context.plan    = &program;
+	// Captured reads must list every word (specialization), so no late words then.
+	const auto late_mode = allow_late && !capture_reads ? SrtLateWordsMode() : 0;
 	snapshot.late_verify = late_mode == 2;
 	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt,
 	                              late_mode != 0 ? &snapshot.late_words : nullptr,
-	                              late_mode == 2, late_mode != 0 && SrtLateWideEnabled())) {
+	                              late_mode == 2)) {
 		context.section = SrtReadSection::Other;
 		return FailIndirect(__LINE__);
-	}
-	if (capture_reads) {
-		for (const auto& [index, address]: snapshot.late_words) {
-			reads.emplace_back(address, sizeof(uint32_t));
-		}
 	}
 	if (timed) {
 		stats.late_words += snapshot.late_words.size();
@@ -1872,12 +1865,55 @@ static bool MaterializeOnce(const ResourcePlan& program, const SrtRuntime& runti
 // 2 verifies: the slots keep their true values (read as before) and RebindBuffers copies the late
 // words aside and compares them at completion (telemetry srt_late_checked, srt_late_mismatches;
 // mismatches are printed).
-// KYTY_SRT_LATE_WIDE=1 (live, default 0): late words also in programs that capture their
-// specialization reads (the late addresses join the captured list) and for slots that are uniform
-// buffer reads (LoadBufferU32), not only raw address and constant-buffer reads.
-bool SrtLateWideEnabled() {
-	static auto& wide = Common::LiveSwitches::Get("KYTY_SRT_LATE_WIDE", 0);
-	return wide.load(std::memory_order_relaxed) != 0;
+// KYTY_MATERIALIZE_STATS: why the plan reads each flat slot with the strict (clean) evaluator, as
+// CleanReason bits. Mirrors the marking in ExtractResourcePlan, which stores only 0/1 (the program
+// disk cache keeps those plans), so it is derived here from the plan instead.
+static std::vector<uint8_t> CleanSlotReasons(const ResourcePlan& plan) {
+	std::vector<uint8_t> reasons(plan.srt_reads.size());
+	for (const auto& image: plan.info.images) {
+		const auto* source = Source(plan, image.source);
+		if (source != nullptr && source->indirect_image.has_value()) {
+			const auto& indirect = *source->indirect_image;
+			MarkCleanFlatSlots(plan, Source(plan, indirect.material_source), reasons,
+			                   indirect.selector_mask, CleanReasonIndirectImage);
+			if (indirect.sources.empty()) {
+				MarkCleanFlatSlots(plan, Source(plan, indirect.table_source), reasons, {},
+				                   CleanReasonIndirectImage);
+			} else {
+				for (const auto candidate: indirect.sources) {
+					MarkCleanFlatSlots(plan, Source(plan, candidate), reasons, {},
+					                   CleanReasonIndirectImage);
+				}
+			}
+		}
+		if (image.written) {
+			MarkCleanFlatSlots(plan, Source(plan, image.source), reasons, {}, CleanReasonWrittenImage);
+		}
+	}
+	for (const auto& sampler: plan.info.samplers) {
+		const auto* source = Source(plan, sampler.source);
+		if (source != nullptr && source->bindless_sampler.has_value()) {
+			MarkCleanFlatSlots(plan, source, reasons, {}, CleanReasonSampler);
+		}
+	}
+	for (const auto& buffer: plan.info.buffers) {
+		if (buffer.written) {
+			MarkCleanFlatSlots(plan, Source(plan, buffer.source), reasons, {}, CleanReasonWrittenBuffer);
+		}
+	}
+	return reasons;
+}
+
+uint8_t CleanSlotReason(const ResourcePlan& plan, uint32_t slot) {
+	thread_local std::unordered_map<const ResourcePlan*, std::vector<uint8_t>> cache;
+	auto it = cache.find(&plan);
+	if (it == cache.end()) {
+		if (cache.size() >= 4096u) {
+			cache.clear();
+		}
+		it = cache.emplace(&plan, CleanSlotReasons(plan)).first;
+	}
+	return slot < it->second.size() ? it->second[slot] : 0u;
 }
 
 int SrtLateWordsMode() {

@@ -320,9 +320,6 @@ template bool GuestGpu::FindRecordedLabel<uint64_t>(const volatile uint64_t*, ui
 
 void GuestGpu::ProcessCommands() {
 	EXIT_IF(!IsGpuThread());
-	if (m_pending_commands.load(std::memory_order_acquire) != 0) {
-		m_renderer.GetBufferCache().FlushBatchedUploads(BufferCache::BatchFlush::Command);
-	}
 	while (m_pending_commands.load(std::memory_order_acquire) != 0) {
 		Common::UniqueFunction<void> command;
 		{
@@ -1036,8 +1033,6 @@ bool GuestGpu::Process(Submission& submission) {
 		}
 	}
 
-	// KYTY_REPROTECT_BATCH: nothing batched outlives a slice (the guest may resume at its end).
-	m_renderer.GetBufferCache().FlushBatchedUploads(BufferCache::BatchFlush::Slice);
 	return complete;
 }
 
@@ -1084,24 +1079,6 @@ void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands,
 void CommandProcessor::SuspendPm4() {
 	EXIT_IF(g_current_execution == nullptr);
 	g_current_execution->m_suspended = true;
-}
-
-// KYTY_REPROTECT_BATCH: packets after which the guest may observe command-processor progress or
-// the command processor waits for the guest (memory waits and semaphores, immediate memory writes,
-// labels and the emulator's custom packets, flips among them): the batched re-protections and
-// their copies are applied before them.
-static bool IsBatchSyncPacket(uint32_t opcode) {
-	switch (opcode) {
-		case Pm4::IT_WAIT_REG_MEM:
-		case Pm4::IT_WRITE_DATA:
-		case Pm4::IT_COPY_DATA:
-		case Pm4::IT_EVENT_WRITE_EOP:
-		case Pm4::IT_EVENT_WRITE_EOS:
-		case Pm4::IT_RELEASE_MEM:
-		case Pm4::IT_MEM_SEMAPHORE:
-		case Pm4::IT_NOP: return true;
-		default: return false;
-	}
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
@@ -1200,9 +1177,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			continue;
 		}
 
-		if (IsBatchSyncPacket(opcode)) {
-			m_renderer.GetBufferCache().FlushBatchedUploads(BufferCache::BatchFlush::SyncPacket);
-		}
 		auto handler = g_cp_op_func[opcode];
 
 		if (handler == nullptr) {

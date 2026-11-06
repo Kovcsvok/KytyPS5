@@ -129,9 +129,21 @@ bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t
 // GPU thread: whether a GPU buffer write owns some of these bytes and no image does, so a GPU copy
 // from the buffer cache reads what the guest would (KYTY_SRT_LATE_WORDS).
 [[nodiscard]] bool IsGpuBufferWritten(uint64_t vaddr, uint64_t size);
-// GPU thread, diagnostics: whether the GPU work that last wrote the cached buffer holding vaddr is
-// still running (KYTY_MATERIALIZE_STATS).
-[[nodiscard]] bool IsGpuWriteInFlight(uint64_t vaddr);
+// GPU thread, diagnostics (KYTY_MATERIALIZE_STATS): the cached buffer holding [vaddr, vaddr + size)
+// and its writers. All zero without a buffer.
+struct GpuWriterProbe {
+	uint64_t buffer_begin = 0;
+	uint64_t buffer_size  = 0;
+	// The tracked GPU write range holding vaddr (KYTY_READBACK_RANGE_TICK), [begin, end); 0, 0: none.
+	uint64_t range_begin = 0;
+	uint64_t range_end   = 0;
+	uint64_t buffer_tick = 0; // last GPU work that wrote the buffer
+	uint64_t range_tick  = 0; // last GPU work that wrote these bytes (the buffer's without range ticks)
+	uint64_t current_tick = 0;
+	bool     buffer_running = false;
+	bool     range_running  = false;
+};
+[[nodiscard]] GpuWriterProbe ProbeGpuWriter(uint64_t vaddr, uint64_t size);
 // Any thread (the draw-prep scanner, KYTY_DRAW_PREP): the backing bytes of [vaddr, vaddr + size)
 // when one mapping holds them and the buffer cache has no GPU-written byte among them, else
 // nullptr. The texture cache is not asked, and the answer can be stale by the time the bytes are

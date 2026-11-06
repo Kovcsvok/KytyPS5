@@ -69,8 +69,6 @@ enum class Counter : uint32_t {
 	SrtLateChecked,  // count: KYTY_SRT_LATE_WORDS=2, copied words compared with the true value
 	SrtLateMismatches, // count: of those, different
 	ProtectCalls,    // count: host protection changes (any thread)
-	ProtectDeferredSpans, // count: KYTY_REPROTECT_BATCH spans applied by flushes
-	BatchFlushes,    // count: KYTY_REPROTECT_BATCH flushes that copied uploads
 	Count
 };
 

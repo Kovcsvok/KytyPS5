@@ -48,8 +48,10 @@ SrtLateProbe& ThreadSrtLateProbe();
 // thread, and whether its program captures specialization reads, for the SRT read report.
 enum class SrtReadSection : uint8_t { Other, Flat, Condition, Fill, Buffers, Extents, Images, Samplers, Specialize };
 struct SrtReadContext {
-	SrtReadSection section = SrtReadSection::Other;
-	bool           capture = false;
+	SrtReadSection      section = SrtReadSection::Other;
+	bool                capture = false;
+	const ResourcePlan* plan    = nullptr;    // the program being materialized
+	uint32_t            slot    = UINT32_MAX; // the flat slot being refreshed (Flat section)
 };
 SrtReadContext& ThreadSrtReadContext();
 // Sets the section for a scope.
@@ -109,11 +111,9 @@ public:
 	// non-clean slot that is a raw read of a word a GPU buffer write owns stays zero and is listed
 	// (flat index, guest address) for a GPU copy instead of waiting for the GPU.
 	// late_verify: the slot still gets its true value (the copy is only checked against it).
-	// late_wide: uniform buffer reads (LoadBufferU32) may be late too (KYTY_SRT_LATE_WIDE).
 	bool RefreshFlatBuffer(std::vector<uint32_t>&                    flat,
 	                       std::vector<std::pair<uint32_t, uint64_t>>* late        = nullptr,
-	                       bool                                        late_verify = false,
-	                       bool                                        late_wide   = false);
+	                       bool                                        late_verify = false);
 
 private:
 	friend struct SrtNativeHelpers;
@@ -143,8 +143,6 @@ private:
 	// and the value is zero (past a constant buffer's end), 0 when an operand is unknown.
 	int  RawReadTarget(const Inst& inst, uint64_t& address, uint64_t& base);
 	bool EvaluateRawRead(const Inst& inst, uint64_t& result);
-	// The address EvaluateBufferRead reads, with RawReadTarget's results.
-	int  BufferReadTarget(const Inst& inst, uint64_t& address);
 	bool EvaluateBufferRead(const Inst& inst, uint64_t& result);
 	bool EvaluateInst(const Inst& inst, uint64_t& result);
 

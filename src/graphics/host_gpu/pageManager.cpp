@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/pageManager.h"
 
 #include "common/alignment.h"
+#include "common/liveSwitches.h"
 #include "common/profiler.h"
 #include "common/telemetry.h"
 #include "common/spinBackoff.h"
@@ -11,6 +12,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <fmt/format.h>
+#include <string>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -71,25 +75,51 @@ private:
 	std::atomic_flag& m_lock;
 };
 
-// KYTY_REPROTECT_BATCH: the protections recorded on the GPU thread (see pageManager.h).
-struct DeferredSpan {
-	void*                       impl; // PageManager::Impl
-	uint64_t                    begin;
-	uint64_t                    end;
-	Common::VirtualMemory::Mode mode;
-};
-std::mutex                g_deferred_mutex;
-std::vector<DeferredSpan> g_deferred_spans;
-std::atomic<bool>         g_deferred_active {false};
-thread_local bool         t_deferred_capture  = false;
-thread_local bool         t_deferred_applying = false;
-
 void ValidateRange(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		Fatal("invalid range vaddr=0x%016" PRIx64 ", size=0x%016" PRIx64, vaddr, size);
 	}
 }
 
+} // namespace
+
+// KYTY_PROTECT_STATS=1 (live, default 0): every protection syscall counted by thread (the GPU
+// thread or another), tracker (buffer regions through RegionManager, or images through the texture
+// cache), watcher (write: read-only pages that catch CPU writes; access: no-access pages over
+// GPU-written bytes) and direction (on, off), in calls and pages; also how many page-state updates
+// made calls, and how many calls began where the same thread's previous call with the same
+// protection ended (one call could have covered both). Combat 2026-11-06: ~1,940 calls a frame,
+// and batching the GPU thread's upload re-protections (KYTY_REPROTECT_BATCH) did not reduce them;
+// this says where they come from. Report: "Protect calls (5 s)".
+namespace {
+struct ProtectStats {
+	std::array<std::atomic<uint64_t>, 16> calls {};
+	std::array<std::atomic<uint64_t>, 16> pages {};
+	std::atomic<uint64_t>                 updates {0};
+	std::atomic<uint64_t>                 adjacent {0};
+};
+ProtectStats          g_protect_stats;
+thread_local uint64_t t_last_protect_end  = 0;
+thread_local uint32_t t_last_protect_mode = UINT32_MAX;
+
+bool ProtectStatsEnabled() {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_PROTECT_STATS", 0);
+	return enabled.load(std::memory_order_relaxed) != 0;
+}
+
+// bucket: 8 GPU thread, 4 images (else buffer regions), 2 access watch (else write), 1 on.
+void NoteProtect(size_t bucket, uint64_t begin, uint64_t bytes, Common::VirtualMemory::Mode mode,
+                 uint64_t page_size) {
+	auto& s = g_protect_stats;
+	bucket |= Common::Telemetry::OnGpuThread() ? 8u : 0u;
+	s.calls[bucket].fetch_add(1, std::memory_order_relaxed);
+	s.pages[bucket].fetch_add(bytes / page_size, std::memory_order_relaxed);
+	if (begin == t_last_protect_end && static_cast<uint32_t>(mode) == t_last_protect_mode) {
+		s.adjacent.fetch_add(1, std::memory_order_relaxed);
+	}
+	t_last_protect_end  = begin + bytes;
+	t_last_protect_mode = static_cast<uint32_t>(mode);
+}
 } // namespace
 
 struct PageManager::Impl {
@@ -203,50 +233,12 @@ struct PageManager::Impl {
 	}
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
-		if (t_deferred_capture && !t_deferred_applying &&
-		    mode != Common::VirtualMemory::Mode::ReadWrite &&
-		    g_deferred_active.load(std::memory_order_relaxed)) [[unlikely]] {
-			std::lock_guard lock(g_deferred_mutex);
-			auto&           spans = g_deferred_spans;
-			if (!spans.empty() && spans.back().impl == this && spans.back().mode == mode &&
-			    spans.back().end == vaddr) {
-				spans.back().end = vaddr + size;
-			} else {
-				spans.push_back({this, vaddr, vaddr + size, mode});
-			}
-			return;
-		}
 		KYTY_PROFILER_BLOCK("PageManager::Protect");
 		Common::Telemetry::Add(Common::Telemetry::Counter::ProtectCalls, 1);
 		Common::Telemetry::ScopedGpuTime telemetry(Common::Telemetry::Counter::GpuProtect);
 		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
 			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
 			      static_cast<uint32_t>(mode));
-		}
-	}
-
-	// KYTY_REPROTECT_BATCH: applies `mode` to the pages of [begin, end) whose state asks for it.
-	void ApplyDeferred(uint64_t begin, uint64_t end, Common::VirtualMemory::Mode mode) noexcept {
-		for (auto chunk_begin = begin; chunk_begin < end;) {
-			const auto chunk_end   = std::min(end, Common::AlignUp(chunk_begin + 1, REGION_SIZE));
-			const auto region_base = Common::AlignDown(chunk_begin, REGION_SIZE);
-			auto*      region      = FindRegion(chunk_begin);
-			if (region != nullptr) {
-				const auto first = static_cast<size_t>((chunk_begin - region_base) / PAGE_SIZE);
-				const auto last  = static_cast<size_t>((chunk_end - region_base) / PAGE_SIZE);
-				SpinGuard  lock(region->lock);
-				size_t     run = last;
-				for (size_t page = first; page <= last; page++) {
-					const bool wanted = page < last && region->pages[page].Perms() == mode;
-					if (wanted && run == last) {
-						run = page;
-					} else if (!wanted && run != last) {
-						Protect(region_base + run * PAGE_SIZE, (page - run) * PAGE_SIZE, mode);
-						run = last;
-					}
-				}
-			}
-			chunk_begin = chunk_end;
 		}
 	}
 
@@ -258,9 +250,16 @@ struct PageManager::Impl {
 		uint64_t  range_begin           = 0;
 		uint64_t  range_bytes           = 0;
 		uint64_t  potential_range_bytes = 0;
+		const bool stats                = ProtectStatsEnabled();
+		uint32_t   calls                = 0;
 
 		const auto release_pending = [&] {
 			if (range_bytes != 0) {
+				if (stats) [[unlikely]] {
+					constexpr size_t Bucket = (masked ? 0u : 4u) | (is_read ? 2u : 0u) | (track ? 1u : 0u);
+					NoteProtect(Bucket, base_addr + range_begin * PAGE_SIZE, range_bytes, perms, PAGE_SIZE);
+					calls++;
+				}
 				Protect(base_addr + range_begin * PAGE_SIZE, range_bytes, perms);
 				range_bytes           = 0;
 				potential_range_bytes = 0;
@@ -299,6 +298,9 @@ struct PageManager::Impl {
 		}
 
 		release_pending();
+		if (calls != 0) {
+			g_protect_stats.updates.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 
 	template <bool track, bool is_read>
@@ -335,6 +337,52 @@ uint64_t PageManager::GetPageSize() const {
 	return PAGE_SIZE;
 }
 
+void PageManager::ReportProtectStats() {
+	static auto report = std::chrono::steady_clock::now();
+	const auto  now    = std::chrono::steady_clock::now();
+	if (now - report < std::chrono::seconds(5)) {
+		return;
+	}
+	report = now;
+	auto& s = g_protect_stats;
+	if (!ProtectStatsEnabled()) {
+		return;
+	}
+	static constexpr const char* Threads[]  = {"other threads", "GPU thread"};
+	static constexpr const char* Trackers[] = {"buffers", "images"};
+	static constexpr const char* Watches[]  = {"write-watch", "access-watch"};
+	std::string text;
+	uint64_t    total = 0;
+	for (size_t thread = 2; thread-- > 0;) {
+		std::string part;
+		for (size_t tracker = 0; tracker < 2; tracker++) {
+			for (size_t watch = 0; watch < 2; watch++) {
+				for (size_t on = 2; on-- > 0;) {
+					const auto bucket = thread * 8 + tracker * 4 + watch * 2 + on;
+					const auto calls  = s.calls[bucket].exchange(0, std::memory_order_relaxed);
+					const auto pages  = s.pages[bucket].exchange(0, std::memory_order_relaxed);
+					if (calls == 0) {
+						continue;
+					}
+					total += calls;
+					part += fmt::format("{}{} {} {} {} calls/{} pages", part.empty() ? "" : ", ",
+					                    Trackers[tracker], Watches[watch], on != 0 ? "on" : "off", calls,
+					                    pages);
+				}
+			}
+		}
+		text += fmt::format("{}{}: {}", text.empty() ? "" : "; ", Threads[thread],
+		                    part.empty() ? "none" : part);
+	}
+	const auto updates  = s.updates.exchange(0, std::memory_order_relaxed);
+	const auto adjacent = s.adjacent.exchange(0, std::memory_order_relaxed);
+	::printf("Protect calls (5 s): %s; %llu calls from %llu page-state updates, %llu beginning where "
+	         "the thread's previous call with the same protection ended\n",
+	         text.c_str(), static_cast<unsigned long long>(total),
+	         static_cast<unsigned long long>(updates), static_cast<unsigned long long>(adjacent));
+	std::fflush(stdout);
+}
+
 template <bool track>
 void PageManager::UpdatePageWatchers(uint64_t vaddr, uint64_t size) {
 	m_impl->UpdatePageWatchers<track, false>(vaddr, size);
@@ -362,63 +410,6 @@ void PageManager::Watchers(uint64_t vaddr, uint32_t& write, uint32_t& access) co
 	const auto& page = region->pages[static_cast<size_t>((vaddr % REGION_SIZE) / PAGE_SIZE)];
 	write            = page.write_watchers;
 	access           = page.access_watchers;
-}
-
-void PageManager::BeginDeferredProtect() noexcept {
-	g_deferred_active.store(true, std::memory_order_relaxed);
-}
-
-PageManager::DeferCapture::DeferCapture() noexcept: m_previous(t_deferred_capture) {
-	t_deferred_capture = true;
-}
-
-PageManager::DeferCapture::~DeferCapture() {
-	t_deferred_capture = m_previous;
-}
-
-bool PageManager::DeferringProtect() noexcept {
-	return g_deferred_active.load(std::memory_order_relaxed);
-}
-
-void PageManager::FlushDeferredProtect() noexcept {
-	constexpr uint64_t                     MaxGap = 16 * PAGE_SIZE;
-	static thread_local std::vector<DeferredSpan> spans;
-	{
-		std::lock_guard lock(g_deferred_mutex);
-		if (g_deferred_spans.empty()) {
-			return;
-		}
-		spans.clear();
-		std::swap(spans, g_deferred_spans);
-	}
-	// Applied at once, even from inside a capture scope.
-	t_deferred_applying = true;
-	std::sort(spans.begin(), spans.end(), [](const DeferredSpan& a, const DeferredSpan& b) {
-		return a.impl != b.impl ? a.impl < b.impl : a.begin < b.begin;
-	});
-	for (size_t i = 0; i < spans.size();) {
-		auto   merged = spans[i];
-		size_t j      = i + 1;
-		for (; j < spans.size(); j++) {
-			const auto& next = spans[j];
-			if (next.impl != merged.impl || next.mode != merged.mode ||
-			    next.begin > merged.end + MaxGap) {
-				break;
-			}
-			merged.end = std::max(merged.end, next.end);
-		}
-		static_cast<Impl*>(merged.impl)->ApplyDeferred(merged.begin, merged.end, merged.mode);
-		i = j;
-	}
-	t_deferred_applying = false;
-	Common::Telemetry::Add(Common::Telemetry::Counter::ProtectDeferredSpans,
-	                       static_cast<int64_t>(spans.size()));
-	spans.clear();
-}
-
-void PageManager::EndDeferredProtect() noexcept {
-	FlushDeferredProtect();
-	g_deferred_active.store(false, std::memory_order_relaxed);
 }
 
 template <bool track, bool is_read>
