@@ -654,6 +654,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	// Labels often share a page with bytes the GPU wrote. A plain write then faults and downloads
 	// the page, draining the GPU; WriteClean writes both copies instead.
 	auto& cache = m_renderer.GetBufferCache();
+	cache.CloseBeforeDirectWrite();
 	if (write_one_address) {
 		if (cache.WriteClean(reinterpret_cast<uint64_t>(dst), &src[dw_num - 1], sizeof(uint32_t))) {
 			return;
@@ -677,6 +678,7 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 		     num_bytes);
 	}
 	const auto value = Sync::ReadReferenceClock();
+	m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 	std::memcpy(reinterpret_cast<void*>(dst_address), &value, num_bytes);
 	static std::atomic<uint32_t> clock_log_count {0};
 	if (clock_log_count.fetch_add(1) < 64) {
@@ -1716,6 +1718,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 			m_renderer.GetGpu().DeferLabelWrite(reinterpret_cast<uint64_t>(dst), data,
 			                                    sizeof(data));
 		} else {
+			m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 			std::memcpy(dst, &data, sizeof(data));
 		}
 
@@ -1745,6 +1748,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 				if (eop_event_type == 0x2f && cache_action == 0x00 && event_index == 0x06) {
 					auto* dst = static_cast<uint32_t*>(dst_gpu_addr);
 					SynchronizeGpu();
+					m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 					Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(), dst, value & 0xffffu,
 					              value >> 16u);
 					Sync::WriteAtEndOfPipeGds32(m_submit_id, command, dst, value & 0xffffu,
@@ -1783,6 +1787,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 						m_renderer.GetGpu().DeferLabelWrite(reinterpret_cast<uint64_t>(dst),
 						                                    value, sizeof(value));
 					} else {
+						m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 						std::memcpy(dst, &value, sizeof(value));
 					}
 
@@ -2039,6 +2044,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	if (LabelsAfterGpu()) {
 		PublishLabelAtCompletion(dst_gpu_addr, value, sizeof(value), false);
 	} else {
+		m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 		std::memcpy(dst_gpu_addr, &value, sizeof(value));
 	}
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
@@ -2068,6 +2074,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	if (LabelsAfterGpu()) {
 		PublishLabelAtCompletion(dst_gpu_addr, value, sizeof(value), false);
 	} else {
+		m_renderer.GetBufferCache().CloseBeforeDirectWrite();
 		std::memcpy(dst_gpu_addr, &value, sizeof(value));
 	}
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,

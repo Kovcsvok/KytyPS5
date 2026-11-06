@@ -2563,6 +2563,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferTracked(uint64_t vaddr, ui
 		m_predict_stats.pages.fetch_add(prediction.pages, std::memory_order_relaxed);
 		Common::Telemetry::Add(Common::Telemetry::Counter::PredictOpen,
 		                       static_cast<int64_t>(prediction.pages));
+		if (prediction.apply) {
+			m_predict_opened.store(true, std::memory_order_relaxed);
+		}
 		const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 		const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
 		bool       queue = false;
@@ -2622,7 +2625,19 @@ void BufferCache::CheckPredictedWrites(uint64_t tick) {
 		}
 		ranges = std::move(pending->second);
 		m_predict_pending.erase(pending);
+		m_predict_checking++;
 	}
+	// CloseBeforeDirectWrite waits until no check runs.
+	struct Done {
+		BufferCache* cache;
+		~Done() {
+			{
+				std::scoped_lock lock(cache->m_predict_mutex);
+				cache->m_predict_checking--;
+			}
+			cache->m_predict_idle.notify_all();
+		}
+	} done {this};
 	if (m_write_bitmap == nullptr || !m_scheduler.IsFree(tick)) {
 		return; // only run inline while the scheduler shuts down
 	}
@@ -2698,6 +2713,37 @@ void BufferCache::CloseOpenPages(uint64_t vaddr, uint64_t size) {
 	if (const auto pages = m_memory_tracker.CloseOpenPages(begin, end - begin); pages != 0) {
 		m_write_history->Note(begin, end - begin);
 		m_predict_stats.guarded.fetch_add(pages, std::memory_order_relaxed);
+		Common::Telemetry::Add(Common::Telemetry::Counter::PredictGuarded,
+		                       static_cast<int64_t>(pages));
+	}
+}
+
+// KYTY_WRITE_PREDICT: the GPU thread is about to write guest memory itself (WRITE_DATA, a
+// reference-clock copy, a GDS read-back, a label written at once). The guest may take that write
+// as a sign that the GPU work before it finished: after a forwarded label wait or a partial flush
+// the GPU thread runs ahead of the host GPU, so the completion thread may not have checked that
+// work's predicted pages yet, and a page written after all would still read stale. Every page
+// still open for a pending check is closed first (correct predictions only lose their opening;
+// the check then finds nothing pending), and a check in progress is waited for. Nothing to do
+// unless a prediction left pages open (mode 2): measure mode keeps its pages protected.
+void BufferCache::CloseBeforeDirectWrite() {
+	if (!m_predict_opened.load(std::memory_order_relaxed)) {
+		return;
+	}
+	std::map<uint64_t, RangeSet> pending;
+	{
+		std::unique_lock lock(m_predict_mutex);
+		pending.swap(m_predict_pending);
+		m_predict_idle.wait(lock, [this] { return m_predict_checking == 0; });
+	}
+	uint64_t pages = 0;
+	for (auto& [tick, ranges]: pending) {
+		ranges.ForEach([&](uint64_t from, uint64_t to) {
+			pages += m_memory_tracker.CloseOpenPages(from, to - from);
+		});
+	}
+	if (pages != 0) {
+		m_predict_stats.fenced.fetch_add(pages, std::memory_order_relaxed);
 		Common::Telemetry::Add(Common::Telemetry::Counter::PredictGuarded,
 		                       static_cast<int64_t>(pages));
 	}
@@ -2932,7 +2978,8 @@ void BufferCache::ReportWriteBitmap() {
 		::printf("Write predict (5 s): mode %d%s, %" PRIu64 " tracked writes left %" PRIu64
 		         " pages (%" PRIu64 " MiB) %s; %" PRIu64 " checks of %" PRIu64
 		         " pages: %" PRIu64 " written after all, %" PRIu64 " more found by refinements, %" PRIu64
-		         " closed for GPU-thread reads; history %" PRIu64 " pages; %.1f ms on the "
+		         " closed for GPU-thread reads, %" PRIu64 " before direct writes; history %" PRIu64
+		         " pages; %.1f ms on the "
 		         "completion thread\n",
 		         static_cast<int>(mode.load(std::memory_order_relaxed)), warming ? " (learning)" : "",
 		         p.writes.exchange(0, std::memory_order_relaxed), pages, (pages * TRACKER_PAGE_SIZE) >> 20u,
@@ -2941,7 +2988,8 @@ void BufferCache::ReportWriteBitmap() {
 		         p.checked.exchange(0, std::memory_order_relaxed),
 		         p.missed.exchange(0, std::memory_order_relaxed),
 		         p.refined.exchange(0, std::memory_order_relaxed),
-		         p.guarded.exchange(0, std::memory_order_relaxed), m_write_history->Pages(),
+		         p.guarded.exchange(0, std::memory_order_relaxed),
+		         p.fenced.exchange(0, std::memory_order_relaxed), m_write_history->Pages(),
 		         static_cast<double>(p.us.exchange(0, std::memory_order_relaxed)) / 1000.0);
 	}
 	std::fflush(stdout);

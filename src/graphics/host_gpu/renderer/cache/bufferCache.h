@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <map>
 #include <memory>
@@ -139,6 +140,9 @@ public:
 	// range become unreadable, so the read faults and gets the GPU's bytes should a tracked write
 	// in flight write them after all. Their pages are never left open again.
 	void                            CloseOpenPages(uint64_t vaddr, uint64_t size);
+	// GPU thread, before it writes guest memory itself (KYTY_WRITE_PREDICT): closes every page
+	// still open for a check that has not run, and waits for a check in progress.
+	void                            CloseBeforeDirectWrite();
 	[[nodiscard]] ShaderFaultReport CollectFaults() { return m_fault_manager.CollectFaults(); }
 	[[nodiscard]] uint64_t          UnattributedFaults() const noexcept {
 		return m_fault_manager.UnattributedFaults();
@@ -463,6 +467,11 @@ private:
 	std::chrono::steady_clock::time_point              m_write_history_since;
 	std::mutex                                         m_predict_mutex;
 	std::map<uint64_t, RangeSet>                       m_predict_pending;
+	// Checks running on the completion thread (m_predict_mutex), and whether a prediction ever
+	// left pages open (only then can a direct write need CloseBeforeDirectWrite).
+	uint64_t                                           m_predict_checking = 0;
+	std::condition_variable                            m_predict_idle;
+	std::atomic<bool>                                  m_predict_opened {false};
 	struct PredictStats {
 		std::atomic<uint64_t> writes {0};
 		std::atomic<uint64_t> pages {0};
@@ -471,6 +480,7 @@ private:
 		std::atomic<uint64_t> missed {0};
 		std::atomic<uint64_t> refined {0};
 		std::atomic<uint64_t> guarded {0};
+		std::atomic<uint64_t> fenced {0};
 		std::atomic<uint64_t> us {0};
 	};
 	PredictStats                                       m_predict_stats;

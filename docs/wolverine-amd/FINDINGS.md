@@ -65,6 +65,12 @@ write wrote or the GPU thread read, `KYTY_WRITE_PREDICT_BLOCK_KB`). The completi
 the bitmap before the labels of that tick are published and protects pages written after all.
 Target: most of the ~4.4 ms of protection changes and ~2.2 ms of refinements on the GPU thread.
 Results will be added here.
+Correctness: labels, flips and EOP interrupts are published by the completion thread after the
+check of their tick. The GPU thread's own direct guest writes (WRITE_DATA, reference-clock copies,
+the GDS EOP read-back, immediate labels) can reach the guest earlier, after a forwarded label wait
+or a partial flush, so `CloseBeforeDirectWrite` closes every page still open for a pending check
+(and waits for a running check) before them. Treat mode 2 as experimental until it has run
+without visual differences for a while.
 
 ## Related work in other forks (scan 2026-11-06)
 
