@@ -4,6 +4,22 @@ Gép: Windows 11, i5-14600KF, RX 9070 XT 16 GB, Adrenalin 26.9.2. Játék: Marve
 Ág: `wolverine-v2-amd-hang-markers` a `Kovcsvok/KytyPS5` forkban. Előtte a Codex AMD-ágai (mesh/pixel wave, depth feedback).
 Napló: `JOURNAL.md` (mindenki ide ír, röviden). Feladatok: `TASKS.md`. Promptok: `PROMPTS.md`.
 
+## Állapot (2026-11-06 – ezt olvasd először)
+- **Csomag:** `C:\Games\Wolverine-AMD-Async`. Az `emulator\BUILD_SHA.txt` mondja meg, melyik build van fent.
+  - A `Play Wolverine AMD Async.bat` indításkor az `Update Emulator.ps1`-gyel telepíti a legújabb sikeres CI-buildet (napló: `D:\KytyAnalysis\logs\update.log`).
+  - A CI-artifact 14 napig él.
+- **Élő alapok:** `KYTY_WRITE_BITMAP=1`, DGC, a `kyty_live.txt` többi sora. Új, mérendő: `KYTY_WRITE_PREDICT` (0/1/2), `KYTY_WRITE_PREDICT_BLOCK_KB`, `KYTY_SEMA_WAKE_ONE`.
+- **Mérés egy menetben:**
+  - a felhasználó csak elindítja a játékot, harcba megy és szól;
+  - ezután a `python docs/wolverine-amd/campaign.py docs/wolverine-amd/plans/<terv>.json` fut a háttérben;
+  - összegzés: `D:\KytyAnalysis\campaigns\<idő>\summary.txt`.
+- **Adatok:** minden nagy, a futáshoz nem kellő adat a D:-n van:
+  - logok (junction): `D:\KytyAnalysis\logs`;
+  - Tracy: `D:\KytyAnalysis\tracy` és `tools`;
+  - forkscan, artifactok: `D:\KytyAnalysis`;
+  - diagnosztikai eszközök: `D:\KytyDiagnostics`.
+- **Angol összefoglaló másoknak:** `FINDINGS.md`, minden mérés után frissítendő.
+
 ## Állapot (2026-10-21 este – T1, T2, T3, T5 kész; T4 előkészítve Opusnak; 8478aef CI fut)
 - **Crash (combat, ráugrás/ütés/átvezető):** megkerülve (`KYTY_SKIP_POPS_SHADERS=1`). Az új játék (Trask Outpost) nyitó átvezetője és harca, valamint a lopakodós rész is 0 crash-sel ment végig. Összesen **22 egyedi POPS pixel shader hash** lett kigyűjtve. A **T4**-hez az `RX 9070 XT`-n a `VK_EXT_fragment_shader_interlock` támogatott (`pixel=true, sample=true`), és bekerültek a `KYTY_POPS_ALLOW=<hash,...|all>`, `KYTY_SHADER_POPS_ZERO_LOAD=1`, `KYTY_SHADER_POPS_NO_STORE=1` kapcsolók (`570283e`).
 - **Menü-FPS (T1 kész):** a `0da13e0` (`S_MEMREALTIME` shift 0 a `timestampPeriod = 10.0 ns`-ból) watchdog nélkül **3–6 FPS-ről 24 FPS-re** javította a menüt, de a watchdogos (`KYTY_SHADER_LOOP_WATCHDOG=1`) **36–38 FPS**-től elmarad. Ok (`0x7c5c0785877c0999` RDNA/IR dump): a shader a játék GPU frame-pacer várakozója (`min(t0 + s6, max(s[4:5], prev_t0 + s7))`), és mivel a CPU óra-epoch (`s[4:5]`) eltér a Vulkan `OpReadClockKHR` epochtól (`t0`), minden képkockánál kifutja az `s6` (~16 ms @ 100 MHz) korlátot (`26 ms render + 16 ms spin = 42 ms = 24 FPS`). A `KYTY_SHADER_LOOP_WATCHDOG=1` 4095 iterációnál (~0,2 ms) elvágja a ciklust és megőrzi a **38 FPS**-t; a naplókban kizárólag ez az egy shader akad fenn a watchdogon.
@@ -11,7 +27,7 @@ Napló: `JOURNAL.md` (mindenki ide ír, röviden). Feladatok: `TASKS.md`. Prompt
   - **T2 (`8226cf3` + `4d3987b`):** az összes alkalmazható upstream perf-commit átültetve (`70668fb` -> `95193a8`, `4bb4be5` -> `f879c99`, `75d7a43` -> `0871a86`, `8cc5f53` -> `b9584a8`, `3c4124d` -> `e4a9f11`; `f6f1ac8` nem kell, mert nincs `FoldWorklist`). A lopakodós rész FPS-e állva **18-ról 22–27 FPS-re** nőtt (Tracy átlag: 23,8 FPS), forgolódva/lépkedve **9–18 FPS**.
   - **T3 (`570283e` + `8478aef`):** `KYTY_HOST_ARCH=x86-64-v3` (`/clang:-march=x86-64-v3` a `3rdparty` után) + arányos VRAM GC küszöbök (`40% / 70% / 88%` = `5758 / 10076 / 12668 MiB`, `KYTY_VRAM_GC_PROPORTIONAL=0` a régi). **Mérés (`8478aef`, `C:\Games\Wolverine-AMD-T3b`):** főmenü **40 FPS**, lopakodós rész állva **23–25 FPS** (`6544 cmdbuf / 5 s`, +20% a `T2a`-hoz és +90% a `Guard2`-höz képest!), mozgás/ráugrás közben időszakos 1–6 FPS-es megakadásokkal (4 ok azonosítva a `JOURNAL.md`-ben és a `TASKS.md`-ben).
 
-## Állapot (2026-10-23 – friss, ezt olvasd először)
+## Állapot (2026-10-23 – korábbi)
 - **Csomag:** `C:\Games\Wolverine-AMD-Async` az egyetlen (`emulator` = `5931ea8`, írási bitmap, `KYTY_WRITE_BITMAP` alap 0; tartalék `emulator-395e39f`; a `Play Wolverine AMD Async.bat` pinje `5931ea89…`, lemezcache-aláírás `KytyPRG2`). Élő alapértékek (`userdata\kyty_live.txt`): `KYTY_LIVE_SKIP=1` + `skip_live.txt` = `0x618eca57f179de7d` (POPS shader kihagyva), `KYTY_READBACK_SPARSE_KB=512`, `KYTY_GPU_TIME=1`, `KYTY_DGC_DRAWS=0`, `KYTY_READBACK_QUEUE_ASYNC=1`, `KYTY_READBACK_RANGE_TICK=1`, `KYTY_READBACK_QUEUE_FLUSH_US=500`, `KYTY_ASYNC_WRITE_READBACK=1`, `KYTY_BACKING_LOCKS=2`, `KYTY_CLAMP_RING=1`, `KYTY_RANGE_EDIT=1`, `KYTY_SRT_PAGE_CACHE=1`, `KYTY_DRAW_PREP=1`, `KYTY_SRT_FAST_READ=1`.
 - **Folyamatban:** automatikus A/B mérés harcban (`48427a9`: `KYTY_TELEMETRY_MS` + `KYTY_EXPERIMENT`, `docs/wolverine-amd/experiment.py` a háttérben váltogat, `experiment_report.py` értékel; a felhasználó csak játszik és szól, ha harcban van). Első kérdés: B mód (readback-queue + flush) – a vendégszál −17 ms/képkocka, de a GPU-szál +21 ms (`FindBuffers`, `BuildKey` várakozás): mire vár (zárvárás-zónák/számlálók).
 - **Harci kép (10–13 FPS):** a fő vendégszál 50–70 ms-ot vár képkockánként GPU-visszaolvasásra (főleg a 2,8 GB-os heap `0x1210000000` ~100 apró visszaolvasása/képkocka, mindegyik a fő sor összes addigi munkájára vár), a GPU-szál 55–75 ms/képkocka (profilozva). A „ne várjunk” plafon (stale-all) 18–23 FPS volt, de képhibával.
@@ -28,7 +44,7 @@ Napló: `JOURNAL.md` (mindenki ide ír, röviden). Feladatok: `TASKS.md`. Prompt
 ## Állapot (2026-10-22 délután – korábbi)
 - **T12a (új build, tesztelendő):** a lassú (5–10 FPS-es) szakaszokban nem a draw-költség, hanem a vendégszálak GPU-visszaolvasása a plafon (fő szál 70–90%-ban vár, GPU-szál félig tétlen). Új: `KYTY_DIRECT_READBACK=1|2` az aszinkron visszaolvasási úton is, `KYTY_MAPPED_DEVICE_BUFFERS=1` induláskor (ReBAR be van kapcsolva). Részletek: `JOURNAL.md` „T12: a lassú szakaszokban…”.
 - **Ajánlott csomag:** `C:\Games\Wolverine-AMD-Async\Play Wolverine AMD Async.bat` (`c5cf56c`, a 95572c5 program-cache-ével `KYTY_PROGRAM_CACHE_GIT_REVISION`-nel; `KYTY_ASYNC_SHADERS=2` + 4 worker). Ugyanaz a játszhatóság, mint a `Wolverine-AMD-Play`, + háttér-transzláció, + 5 s-os FPS-sor a naplóban (`Frames (5 s)`). Profilozás: `Profile Wolverine AMD.bat` + `Tracy 30s.bat`.
-- **Teljesítmény-kép (mérve):** menü 45, nyugodt rész 25–32, új részek felé haladva és harcban **5–10 FPS** – a régi 95572c5-tel is ugyanennyi (nem regresszió). A shaderfordítás ebben már elhanyagolható (meleg cache). Fő költség (`C:\KytyDiagnostics\tracy\forward_2026-10-22_100601.tracy`): a GPU-szál draw-onkénti CPU-munkája (~11 ezer draw + ~11 ezer dispatch / s, 60–90 µs/draw) és a vendégszálak GPU→CPU visszaolvasásai. Kipróbálva, **nem segített**: `KYTY_STALE_INFLIGHT_READS=1`, `KYTY_GPU_THREAD_PRIORITY=2`, `KYTY_VIDEO_OUT_1080P=1` (a játék figyelmen kívül hagyja), `KYTY_READBACK_TILED_IMAGES=1` (T8-ra sem). A játék occlusion query-ket a CPU-n/compute-tal olvas, predikáció nincs (T11). Következő nagy feladat: **T12**.
+- **Teljesítmény-kép (mérve):** menü 45, nyugodt rész 25–32, új részek felé haladva és harcban **5–10 FPS** – a régi 95572c5-tel is ugyanennyi (nem regresszió). A shaderfordítás ebben már elhanyagolható (meleg cache). Fő költség (`D:\KytyDiagnostics\tracy\forward_2026-10-22_100601.tracy`): a GPU-szál draw-onkénti CPU-munkája (~11 ezer draw + ~11 ezer dispatch / s, 60–90 µs/draw) és a vendégszálak GPU→CPU visszaolvasásai. Kipróbálva, **nem segített**: `KYTY_STALE_INFLIGHT_READS=1`, `KYTY_GPU_THREAD_PRIORITY=2`, `KYTY_VIDEO_OUT_1080P=1` (a játék figyelmen kívül hagyja), `KYTY_READBACK_TILED_IMAGES=1` (T8-ra sem). A játék occlusion query-ket a CPU-n/compute-tal olvas, predikáció nincs (T11). Következő nagy feladat: **T12**.
 - **Vér (T7)** és **árnyék-villogás (T8)**: változatlanul nyitott (lásd lent).
 
 ## Állapot (2026-10-22 reggel)
@@ -58,13 +74,13 @@ Ami nem segített a crashen: eviction/slot reuse ki (Codex), LDS fence, indirekt
 Ami segített: az összes POPS-shader kihagyása (crash), watchdog vagy óra-javítás (menü-FPS).
 
 ## Hol mi van a gépen
-- Repo (klón): `C:\Users\Ádám Kovács\Documents\Codex\2026-10-16\el-z-gpt-le-r-sa-2\work\KytyPS5` (`origin` = fork, `upstream` = KytyPS5/KytyPS5). Donor: `...\work\Infamous` (shadPS4-alapú, nem közvetlenül portolható).
+- Repo (klón): `C:\Users\Ádám Kovács\Documents\Codex\2026-10-16\el-z-gpt-le-r-sa-2\work\KytyPS5` (`origin` = fork, `upstream` = KytyPS5/KytyPS5). Donor: `D:\KytyAnalysis\Infamous` (shadPS4-alapú, nem közvetlenül portolható).
 - Játék: `C:\Games\Ps5 games\Marvels.Wolverine-PPSA03671-USA-Game` – **soha ne módosítsd.**
 - **Egyetlen csomag (2026-10-22 este takarítás után):** `C:\Games\Wolverine-AMD-Async` – `emulator\` (a legutóbbi build) + `emulator-8d06dd7\` (stabil tartalék), `userdata\` (a felhasználó mentései `_SaveData`, a 95572c5-ös program-cache `_PipelineCache\PPSA03671.programs.0d02534d5a543331.bin` 607 MB + `PPSA03671.bin`, élő kapcsolók `kyty_live.txt`, kihagyott shaderek `skip_live.txt`). Minden régebbi `Wolverine-AMD-*` csomag és a Codex régi csomagjai (`outputs\`, `new-chat-6\Wolverine-AMD-*`) a felhasználó kérésére lomtárba kerültek.
-- A régi HangMarkers shader-dumpok (T4/T7, pl. `2464e975d88b7f15.{rdna,}.txt`): `C:\KytyDiagnostics\shader-dumps\HangMarkers-userdata-dump`.
-- Eszközök: Tracy 0.14.1 `C:\Games\tracy-0.14.1` (`tracy-capture`, `tracy-csvexport`; az emulátor `--profile` kapcsolóval, port 8086). Felvételek: `D:\KytyAnalysis\tracy` (`Tracy 30s.bat`, `experiment.py --tracy`; a régiek 10-30-án lomtárba). Elemzés: `tracy-csvexport -u` cmd-vel fájlba (a Git Bash-cső ~20× lassabb), majd `tracy_parents.py`. A sűrű, rövid zónák saját idejét a profilozó felfújja – építés előtt vesd össze a telemetriával.
-  RGD/RDP: `C:\KytyDiagnostics\RDTS\RadeonDeveloperToolSuite-2026-10-02-1872`. A dumpok a `Documents\rgd_dumps` mappába kerülnek; az `rgd.exe` nem kezel ékezetes utat, ezért előbb másold a `C:\KytyDiagnostics\rgd` mappába. Az RDP Crash Analysis módja lassít.
-  Vulkan SDK (glslangValidator, spirv-dis): `C:\KytyDiagnostics\VulkanSDK-1.4.363.0\Bin`.
+- A régi HangMarkers shader-dumpok (T4/T7, pl. `2464e975d88b7f15.{rdna,}.txt`): `D:\KytyDiagnostics\shader-dumps\HangMarkers-userdata-dump`.
+- Eszközök: Tracy 0.14.1 `D:\KytyAnalysis\tools\tracy-0.14.1` (`tracy-capture`, `tracy-csvexport`; az emulátor `--profile` kapcsolóval, port 8086). Felvételek: `D:\KytyAnalysis\tracy` (`Tracy 30s.bat`, `experiment.py --tracy`; a régiek 10-30-án lomtárba). Elemzés: `tracy-csvexport -u` cmd-vel fájlba (a Git Bash-cső ~20× lassabb), majd `tracy_parents.py`. A sűrű, rövid zónák saját idejét a profilozó felfújja – építés előtt vesd össze a telemetriával.
+  RGD/RDP: `D:\KytyDiagnostics\RDTS\RadeonDeveloperToolSuite-2026-10-02-1872`. A dumpok a `Documents\rgd_dumps` mappába kerülnek; az `rgd.exe` nem kezel ékezetes utat, ezért előbb másold a `D:\KytyDiagnostics\rgd` mappába. Az RDP Crash Analysis módja lassít.
+  Vulkan SDK (glslangValidator, spirv-dis): `D:\KytyDiagnostics\VulkanSDK-1.4.363.0\Bin`.
 - Naplók: `<csomag>\<userdata>\logs\run_*.log`. A release-ben a `LOGF` néma, csak a `printf` látszik.
 
 ## Build és teszt menete

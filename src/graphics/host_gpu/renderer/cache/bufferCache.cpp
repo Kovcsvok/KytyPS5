@@ -2561,6 +2561,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferTracked(uint64_t vaddr, ui
 	if (predict && prediction.pages != 0) {
 		m_predict_stats.writes.fetch_add(1, std::memory_order_relaxed);
 		m_predict_stats.pages.fetch_add(prediction.pages, std::memory_order_relaxed);
+		Common::Telemetry::Add(Common::Telemetry::Counter::PredictOpen,
+		                       static_cast<int64_t>(prediction.pages));
 		const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 		const auto last  = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
 		bool       queue = false;
@@ -2675,14 +2677,16 @@ void BufferCache::CheckPredictedWrites(uint64_t tick) {
 		m_write_history->Note(from, to - from);
 		missed += (to - from) / Page;
 	}
+	const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                    std::chrono::steady_clock::now() - start)
+	                    .count();
 	auto& s = m_predict_stats;
 	s.checks.fetch_add(1, std::memory_order_relaxed);
 	s.checked.fetch_add(checked, std::memory_order_relaxed);
 	s.missed.fetch_add(missed, std::memory_order_relaxed);
-	s.us.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-	                                         std::chrono::steady_clock::now() - start)
-	                                         .count()),
-	               std::memory_order_relaxed);
+	s.us.fetch_add(static_cast<uint64_t>(ns / 1000), std::memory_order_relaxed);
+	Common::Telemetry::Add(Common::Telemetry::Counter::PredictMissed, static_cast<int64_t>(missed));
+	Common::Telemetry::Add(Common::Telemetry::Counter::PredictCheck, static_cast<int64_t>(ns));
 }
 
 void BufferCache::CloseOpenPages(uint64_t vaddr, uint64_t size) {
@@ -2694,6 +2698,8 @@ void BufferCache::CloseOpenPages(uint64_t vaddr, uint64_t size) {
 	if (const auto pages = m_memory_tracker.CloseOpenPages(begin, end - begin); pages != 0) {
 		m_write_history->Note(begin, end - begin);
 		m_predict_stats.guarded.fetch_add(pages, std::memory_order_relaxed);
+		Common::Telemetry::Add(Common::Telemetry::Counter::PredictGuarded,
+		                       static_cast<int64_t>(pages));
 	}
 }
 
@@ -2854,8 +2860,10 @@ bool BufferCache::RefineWithWriteBitmap(const Buffer& buffer, uint64_t vaddr, ui
 	flush_word();
 	if (m_write_history != nullptr) {
 		for (const auto& [from, to]: written) {
-			m_predict_stats.refined.fetch_add(m_memory_tracker.CloseOpenPages(from, to - from),
-			                                  std::memory_order_relaxed);
+			const auto closed = m_memory_tracker.CloseOpenPages(from, to - from);
+			m_predict_stats.refined.fetch_add(closed, std::memory_order_relaxed);
+			Common::Telemetry::Add(Common::Telemetry::Counter::PredictMissed,
+			                       static_cast<int64_t>(closed));
 			m_write_history->Note(from, to - from);
 		}
 	}

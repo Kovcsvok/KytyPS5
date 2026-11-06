@@ -22,7 +22,7 @@ import sys
 import time
 
 DEFAULT_LIVE = r"C:\Games\Wolverine-AMD-Async\userdata\kyty_live.txt"
-TRACY_CAPTURE = r"C:\Games\tracy-0.14.1\tracy-capture.exe"
+TRACY_CAPTURE = r"D:\KytyAnalysis\tools\tracy-0.14.1\tracy-capture.exe"
 TRACY_DIR = r"D:\KytyAnalysis\tracy"
 
 

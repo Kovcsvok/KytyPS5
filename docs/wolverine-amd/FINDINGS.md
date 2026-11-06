@@ -66,6 +66,31 @@ the bitmap before the labels of that tick are published and protects pages writt
 Target: most of the ~4.4 ms of protection changes and ~2.2 ms of refinements on the GPU thread.
 Results will be added here.
 
+## Related work in other forks (scan 2026-11-06)
+
+From the whole KytyPS5 fork network (`forkscan/`, 1136 active forks); candidates for the same
+bottlenecks, not yet ported unless noted:
+
+- joshweible `yotei-front-thread` (Ghost of Yotei): `ac8ee370` fills flat SRT words the GPU is
+  still writing with a GPU copy instead of a CPU wait (their GPU-thread read waits 25 -> 7 ms);
+  `99082835` parses PM4 packets on a front thread; `7eb33b86`/`1609f5e6` read clean SRT bytes
+  without the fault (we already do this through `TryReadGpuCleanBacking`).
+- carbonimax `3a154025` `KYTY_REPROTECT_BATCH` (+8.5% in their game): batches the write
+  re-protections after uploads until guest sync points.
+- Upstream `a0268f1d` (a semaphore signal wakes only the waiters it hands counts to): ported here
+  as `KYTY_SEMA_WAKE_ONE` (live, default 0, to be measured).
+- Xx-LiDAF-xX: ReleaseMem/submit batching and write-invalidation clustering (we have
+  `KYTY_SLICE_FLUSH_US` and `KYTY_FAULT_WIDEN_KB`); MrBigBritches: batched hot readbacks, submit
+  cadence; JOmega321: `KYTY_SERVE_IN_WAITS` (needs an async upload worker).
+
+## Measuring several things in one session
+
+`docs/wolverine-amd/campaign.py <plan.json>` runs the phases of a plan (`plans/`) one after
+another during one fight: hold phases (with a telemetry gate) and ABBA A/B phases; a B that wins
+(paired change minus its error above zero) is carried into later phases and kept in the live file,
+a phase whose prerequisite lost is skipped, and the campaign stops if the emulator dies or logs a
+fatal line. The package's `Update Emulator.ps1` installs the newest CI build when the game starts.
+
 ## Files
 
 - `docs/wolverine-amd/JOURNAL.md`: every experiment with its numbers (Hungarian).

@@ -150,8 +150,9 @@ jobs:
           name: Wolverine-v2-AMD-Hang-Markers-Windows-x64
           path: _Build/windows/portable/**
           if-no-files-found: error
-          # Each build is downloaded right away; older ones only take storage.
-          retention-days: 3
+          # The tester may play days after the build: the package's update script downloads the
+          # newest successful one when the game starts (2026-11-06: a 3-day build expired unused).
+          retention-days: 14
 
   tuning-settings:
     name: Test tuning settings (no GPU required)

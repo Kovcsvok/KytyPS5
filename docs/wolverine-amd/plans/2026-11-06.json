@@ -1,0 +1,8 @@
+[
+ {"name": "predict-learn", "minutes": 1.5, "hold": {"KYTY_WRITE_PREDICT": 1},
+  "gate": {"max_missed_ratio": 0.05}},
+ {"name": "predict", "minutes": 4, "ab": {"KYTY_WRITE_PREDICT": [0, 2]}, "needs": "predict-learn"},
+ {"name": "predict-block", "minutes": 3,
+  "ab": {"KYTY_WRITE_PREDICT": [2, 2], "KYTY_WRITE_PREDICT_BLOCK_KB": [64, 16]}, "needs": "predict"},
+ {"name": "sema-wake-one", "minutes": 3, "ab": {"KYTY_SEMA_WAKE_ONE": [0, 1]}}
+]

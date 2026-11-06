@@ -777,3 +777,63 @@ Shader-fordítást nem érint, a pin marad `5931ea8…`. A push a DEFER-eltávol
 - Új angol összefoglaló: `docs/wolverine-amd/FINDINGS.md` (mi segített / mi nem, számokkal, módszer, fájlok).
 - A `README.md` elején mutató rá.
 - Push után a GitHubon: a fork alapértelmezett ága a munkaág lesz (eddig a régi `main`; ütemezett workflow nincs, így ez nem indít futást), plusz leírás és topicok.
+
+## 2026-11-06 — Opus — repók (7 nap), SSD-kímélés, egy menetben több mérés
+**A `30bdd378` artifactja lejárt** (3 napos megőrzés, a felhasználó 7 nap múlva jött). Ezért:
+- a workflow most 14 napig tartja;
+- az új build ezt is hozza.
+
+**Upstream `4919fdb6` → `182161eb`, 136 commit:** zömében ellenőrzés-törlő refaktor (11-03), shader/BVH, NGS2, videodec, PSN, launcher. Ránk vonatkozik:
+- `a0268f1d` szemafor: csak a számlálót kapó várakozó ébred → átvéve **`KYTY_SEMA_WAKE_ONE`** (élő, alap 0).
+- Kicsik, nem vettem át:
+  - `fe847be9` (bitteszt helyben);
+  - `e58bb418` (pending signal scan kihagyása);
+  - `c86d31bf` (ismétlődő interruptok összevonása).
+- Már megvan nálunk más formában:
+  - `1d5c8787` (512 KiB visszaolvasási ablak; nálunk `KYTY_READBACK_SPARSE_KB=512`);
+  - `abc509d3` (mesh-indirekt task shaderrel; nálunk DGC).
+- Félretéve: `21b44f12` (regiszterkezelők fordítási időben; a CP saját ideje nálunk ~1 ms).
+
+**Forkok** (`list_forks.py`):
+- 1365 fork, 1136 aktív, 3830 ág;
+- 10-29 óta 177 repóban 708 ág változott, 2804 új egyedi commit (`D:\KytyAnalysis\forkscan\new-1106.txt`, `new1106.py`);
+- Revi, mionstyle7, IDXTRI, Frank nem változott.
+
+Ránk vonatkozó jelöltek:
+- **joshweible `yotei-front-thread`** (Ghost of Yōtei):
+  - `ac8ee370` „SRT late words”: a GPU által még írt flat-SRT szót a walker ismeretlennek hagyja, és egy GPU-másolat tölti be a rajzolás előtt. Náluk a GPU-szál olvasási várása 25 → 7 ms. A mi walkerünk nem az Xbyak-JIT, ezért nagyobb port; **következő jelölt** a GPU-szál saját szinkron visszaolvasásaira (~5 ms).
+  - `99082835`: CP front thread (csomagfeldolgozás külön szálon).
+  - `7eb33b86`, `1609f5e6`: tiszta SRT-bájt laphiba nélkül; ez nálunk már megvan (`TryReadGpuCleanBacking`).
+- **carbonimax `3a154025` `KYTY_REPROTECT_BATCH`** (náluk +8,5%): a feltöltés utáni újravédések kötegelve, szinkronpontokig halasztva. A `PROTECT_COALESCE` infrastruktúrájukra épül; jelölt a `RebindBuffers` ~2,5 ms-os védésére.
+- **Xx-LiDAF:**
+  - ReleaseMem / submit kötegelés: nálunk ott a `KYTY_SLICE_FLUSH_US`;
+  - írásinvalidálás-klaszterezés 64–512 KB: nálunk a `FAULT_WIDEN_KB=64`.
+- **JOmega321** `KYTY_SERVE_IN_WAITS`: aszinkron upload workert feltételez, ilyen nálunk nincs.
+- **MrBigBritches:** batch hot readbacks, submit cadence, readback-fault-wait.
+- **Új Wolverine-forkok:** `calang000/KytyPS5-Wolverine` (10-29, release workflow) és `erickmendes22` Androidos bindless munkája.
+
+**SSD-kímélés (felhasználó kérése):**
+- D:-re költözött:
+  - `C:\KytyDiagnostics` (3 GB: RDTS, Vulkan SDK, rgd, shader-dumpok) → `D:\KytyDiagnostics`;
+  - Tracy-eszközök → `D:\KytyAnalysis\tools\tracy-0.14.1`;
+  - az Infamous donor-klón → `D:\KytyAnalysis\Infamous`.
+- A `userdata\logs` junction → `D:\KytyAnalysis\logs` (logok, telemetria, kísérlet-JSON-ok).
+- A régi Codex-zipek és a Vulkan SDK telepítő lomtárba került (~400 MB).
+- A futáshoz kellő dolgok maradtak a C:-n: emulátor, `_PipelineCache`, mentések.
+
+**Kevesebb interakció:**
+- `C:\Games\Wolverine-AMD-Async\Update Emulator.ps1`:
+  - a `Play Wolverine AMD Async.bat` indításkor telepíti a legújabb sikeres CI-buildet (Git tokenjével, D:-re tölt);
+  - az előzőt `emulator-<sha>` tartalékként tartja, a régebbit lomtárba teszi;
+  - napló: `D:\KytyAnalysis\logs\update.log`, kikapcsolás: `KYTY_NO_UPDATE=1`;
+  - így nem kell szólni, ha kész a CI.
+- `docs/wolverine-amd/campaign.py` + `plans/2026-11-06.json`:
+  - egy harcban több fázis fut, mindegyik előtt életjel- és naplóellenőrzéssel;
+  - kapuk vannak (pl. a téves jóslat aránya), a nyerteseket továbbviszi és a végén beírja a `kyty_live.txt`-be;
+  - összegzés: `D:\KytyAnalysis\campaigns\<idő>\summary.txt`.
+- **Új telemetria-oszlopok:** `guest_read_fault_ms`, `guest_read_faults`, `predict_open`, `predict_missed`, `predict_guarded`, `predict_check_ms`. Így a jósolt védés számai is setupokra bontva látszanak.
+- **A 11-06-i terv** (~12 perc harc):
+  1. `predict-learn` (=1, 1,5 perc; kapu: missed/open ≤ 5%);
+  2. `predict` ABBA 0 / 2 (4 perc);
+  3. `predict-block` 64 / 16 KiB (3 perc);
+  4. `sema-wake-one` 0 / 1 (3 perc).

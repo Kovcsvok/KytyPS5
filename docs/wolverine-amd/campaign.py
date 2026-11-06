@@ -1,0 +1,192 @@
+"""Runs several live-switch experiments in one fight, one after another, so one play session answers
+several questions (experiment.py runs one A/B).
+
+  python campaign.py plans/2026-11-06.json
+
+A plan is a list of phases:
+  {"name": "...", "minutes": 1.5, "hold": {"KYTY_X": 1}}            hold values (no A/B)
+  {"name": "...", "minutes": 4, "ab": {"KYTY_X": [0, 2]}, "needs": "phase name"}
+"ab" runs experiment.py with A = the first values, B = the second, both on top of the values the
+campaign carries. After an A/B: B wins when its paired fps change minus its error is above zero (its
+values are then carried into later phases and written to the live file at the end), loses when
+plus its error is below zero. A phase whose "needs" lost is skipped. "gate" (optional, on a hold
+phase): {"max_missed_ratio": 0.05} stops phases needing it when predict_missed / predict_open of
+its telemetry is above that.
+Every phase checks first that the emulator still runs and its log shows no fatal line; otherwise the
+campaign stops. The live file gets the winners at the end, nothing else changes. Summary:
+D:\\KytyAnalysis\\campaigns\\<time>\\summary.txt (the experiment schedules stay in userdata\\logs).
+"""
+import csv
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PACKAGE = r"C:\Games\Wolverine-AMD-Async"
+LIVE = os.path.join(PACKAGE, "userdata", "kyty_live.txt")
+LOGS = os.path.join(PACKAGE, "userdata", "logs")
+OUT_ROOT = r"D:\KytyAnalysis\campaigns"
+FATAL = re.compile(r"device.?lost|VK_ERROR_DEVICE_LOST|EXIT |unhandled exception|access violation", re.I)
+
+sys.path.insert(0, HERE)
+import experiment  # noqa: E402  (read_lines, write_atomic, with_values)
+
+
+def emulator_running():
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq kyty_emulator.exe", "/NH"],
+                         capture_output=True, text=True).stdout
+    return "kyty_emulator.exe" in out
+
+
+def newest(pattern):
+    found = sorted(glob.glob(os.path.join(LOGS, pattern)), key=os.path.getmtime)
+    return found[-1] if found else None
+
+
+def fatal_lines(log, offset):
+    if log is None:
+        return []
+    with open(log, "rb") as f:
+        f.seek(offset)
+        text = f.read().decode("utf-8", "replace")
+    return [line for line in text.splitlines() if FATAL.search(line)][:5]
+
+
+def telemetry_sums(start_ms, end_ms, names):
+    """Sums of telemetry columns over rows in [start_ms, end_ms] of the newest telemetry file."""
+    path = newest("telemetry_*.csv")
+    sums = {n: 0.0 for n in names}
+    if path is None:
+        return sums
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for row in csv.DictReader(f):
+            try:
+                t = float(row.get("unix_ms") or 0)
+            except ValueError:
+                continue
+            if start_ms <= t <= end_ms:
+                for n in names:
+                    try:
+                        sums[n] += float(row.get(n) or 0)
+                    except ValueError:
+                        pass
+    return sums
+
+
+def paired_b(report):
+    """(mean %, error %) of the second setup's paired change, or None."""
+    rows = [l for l in report.splitlines() if re.search(r"[+-][\d.]+% \(\+/-[\d.]+, n=\d+\)", l)]
+    if not rows:
+        return None
+    m = re.search(r"([+-][\d.]+)% \(\+/-([\d.]+), n=(\d+)\)", rows[-1])
+    return float(m.group(1)), float(m.group(2))
+
+
+def main():
+    plan_path = sys.argv[1]
+    with open(plan_path, encoding="utf-8") as f:
+        plan = json.load(f)
+    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+    out_dir = os.path.join(OUT_ROOT, stamp)
+    os.makedirs(out_dir, exist_ok=True)
+    summary = []
+
+    def say(text):
+        print(text, flush=True)
+        summary.append(text)
+        with open(os.path.join(out_dir, "summary.txt"), "w", encoding="utf-8") as out:
+            out.write("\n".join(summary) + "\n")
+
+    sha_file = os.path.join(PACKAGE, "emulator", "BUILD_SHA.txt")
+    build = open(sha_file).read().strip() if os.path.exists(sha_file) else "unknown"
+    say(f"campaign {os.path.basename(plan_path)} on build {build}, {stamp}")
+    if not emulator_running():
+        say("the emulator is not running: nothing done")
+        return 1
+
+    original = experiment.read_lines(LIVE)
+    carried = {}
+    outcome = {}
+    log = newest("run_*.log")
+    log_offset = os.path.getsize(log) if log else 0
+    try:
+        for phase in plan:
+            name = phase["name"]
+            need = phase.get("needs")
+            if need and outcome.get(need) in ("lost", "skipped", "stopped", "gated"):
+                outcome[name] = "skipped"
+                say(f"\n== {name}: skipped ({need} {outcome[need]})")
+                continue
+            if not emulator_running():
+                say(f"\n== {name}: the emulator stopped; campaign ends")
+                outcome[name] = "stopped"
+                break
+            bad = fatal_lines(log, log_offset)
+            if bad:
+                say(f"\n== {name}: fatal log lines; campaign ends\n" + "\n".join(bad))
+                break
+            minutes = float(phase["minutes"])
+            if "hold" in phase:
+                values = {**carried, **phase["hold"], "KYTY_TELEMETRY_MS": 500, "KYTY_EXPERIMENT": 0}
+                experiment.write_atomic(LIVE, experiment.with_values(original, values))
+                start = int(time.time() * 1000)
+                say(f"\n== {name}: hold {phase['hold']} for {minutes} min")
+                deadline = time.time() + minutes * 60
+                while time.time() < deadline and emulator_running():
+                    time.sleep(1)
+                end = int(time.time() * 1000)
+                outcome[name] = "held"
+                gate = phase.get("gate")
+                if gate:
+                    # The second half: the history has learned by then.
+                    sums = telemetry_sums((start + end) // 2, end, ["predict_open", "predict_missed",
+                                                                      "predict_guarded"])
+                    ratio = sums["predict_missed"] / sums["predict_open"] if sums["predict_open"] else 0.0
+                    say(f"   telemetry (2nd half): {sums}, missed/open {ratio:.4f}")
+                    if ratio > gate.get("max_missed_ratio", 1.0):
+                        outcome[name] = "gated"
+                        say("   gate failed: phases needing it are skipped")
+                continue
+            key_values = phase["ab"]
+            a = {k: v[0] for k, v in key_values.items()}
+            b = {k: v[1] for k, v in key_values.items()}
+            fmt = lambda tag, vals: tag + ":" + ",".join(f"{k}={v}" for k, v in {**carried, **vals}.items())
+            # experiment.py reads and restores the live file itself: start it from the carried state.
+            experiment.write_atomic(LIVE, experiment.with_values(original, carried))
+            say(f"\n== {name}: A/B {a} vs {b}, {minutes} min (carried {carried})")
+            run = subprocess.run([sys.executable, os.path.join(HERE, "experiment.py"), "--minutes", str(minutes),
+                                  fmt("A", a), fmt("B", b)], capture_output=True, text=True)
+            schedule = re.search(r"schedule: (.+)", run.stdout)
+            if schedule is None:
+                say("   experiment.py failed:\n" + run.stdout[-800:] + run.stderr[-800:])
+                outcome[name] = "stopped"
+                break
+            report = subprocess.run([sys.executable, os.path.join(HERE, "experiment_report.py"),
+                                     schedule.group(1).strip()], capture_output=True, text=True).stdout
+            with open(os.path.join(out_dir, f"{len(outcome) + 1:02d}_{name}.txt"), "w", encoding="utf-8") as out:
+                out.write(report)
+            result = paired_b(report)
+            if result is None:
+                outcome[name] = "unclear"
+                say("   no paired result")
+                continue
+            mean, err = result
+            verdict = "won" if mean - err > 0 else "lost" if mean + err < 0 else "unclear"
+            outcome[name] = verdict
+            say(f"   B {mean:+.1f}% (+/-{err:.1f}): {verdict}")
+            if verdict == "won":
+                carried.update(b)
+    finally:
+        experiment.write_atomic(LIVE, experiment.with_values(original, carried))
+        say(f"\nlive file: original values plus the winners {carried}")
+        for name, verdict in outcome.items():
+            say(f"   {name}: {verdict}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
