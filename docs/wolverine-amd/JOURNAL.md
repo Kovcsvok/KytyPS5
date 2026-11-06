@@ -1055,3 +1055,58 @@ A shader-fordítás nem változik.
 2. `late-wide` ABBA 0 / 1 (5 perc).
 3. `reprotect-batch` ABBA 0 / 1 (5 perc).
 
+## 2026-11-06 — Opus — kampány a `b4cd31e3`-on: WIDE semleges (a +9% zaj), BATCH −7,4%
+`D:\KytyAnalysis\campaigns\2026-11-06_180717`, napló: `run_2026-11-06_180627.log`.
+
+**`wide-verify`** (2 perc, `LATE_WORDS=2` + `WIDE=1`): 9826 ellenőrzött másolat, 0 eltérés.
+
+**`late-wide`** ABBA 0 / 1 (5 perc): a kampány szerint **+9,0% (±4,4)**, győztes. **Nem tartjuk meg**, mert a mechanizmus nem változott. Képkockánként, setupra bontva a telemetriából:
+
+| Számláló | WIDE=0 | WIDE=1 |
+|---|---|---|
+| `srt_late_words` | 15,8 | 16,1 |
+| `srt_fault_reads` | 2,98 | 3,00 |
+| `materialize_ms` | 8,53 | 8,21 |
+
+- A WIDE tehát egyetlen új késői szót sem hozott. Ebben a jelenetben a capture-programok lapos slotjai szinte sosem várnak (`0xf8ee…`, `0x6573…` flat ordinary capture 0–1/s). A `0x06544f382c6b0850` leképezéses olvasásai pedig az `extents` és a `condition` szakaszban vannak, ezek nem késleltethetők.
+- A +9% a jelenet szórása: az A-blokkok között 16,6–17,6 fps-es kiugrók voltak (B: 19,8–28,7).
+- A `KYTY_SRT_LATE_WIDE=1` sort kivettem a live fájlból; a kód a következő buildben törlődik. Ezzel a GPT 4. válaszának aggálya is megszűnik: a specializációs olvasásokat nem oldjuk fel egyszerűen.
+
+**`reprotect-batch`** ABBA 0 / 1 (5 perc, `WIDE=1` mellett): **−7,4% (±3,0)**, vesztes.
+
+| Számláló (képkockánként) | BATCH=0 | BATCH=1 |
+|---|---|---|
+| `protect_calls` | 1945 | 1940 |
+| `protect_deferred_spans` | 0 | 108 |
+| `batch_flushes` | 0 | 27,7 |
+| `gpu_protect_ms` | 4,51 | 5,10 |
+| `spin_lock_ms` | 3,16 | 8,27 |
+| `guest_read_fault_ms` | 28,3 | 32,1 |
+| GPU-szál, megmagyarázatlan off-CPU idő | 1,1 | 4,1 |
+
+- **A védésváltás-syscallok száma nem csökkent.** A kötegelhető, csak-olvasó feltöltés utáni újravédés a hívásoknak csak ~5,5%-a (108 / ~1940).
+- **A köteg túl kicsi:** ~550 ürítés/s (88%-ban szinkroncsomagnál, a többi vendégparancsnál; beküldésnél sosem, mert addigra a szinkroncsomag már ürített). Ürítésenként ~9 másolás, összesen ~600 MiB/s.
+- **Tanulság:** a ~1940 védéshívás/képkocka a ~850–900 vendég-laphibát követi (laphiba → feloldás → később újravédés), nem a feltöltéseket. A kötegelés ezt nem érinti, a plusz zár és a késleltetett védés viszont drágább.
+- A kód a következő buildben törlődik.
+
+**13,4 s-os képkocka** 18:18:41–51 között, B-ben (`BATCH=1`):
+- A GPU közben üres volt (16 s alatt 0,2 ms/s, 30 parancspuffer). A VRAM 13,4 / 14,2 GB-on állt.
+- A környező A-blokkok is 10–12 fps-re estek, ezért valószínűleg jelenetváltás vagy töltés (halál, checkpoint) volt. Nincs a BATCH-hez kötve.
+- A PREDICT alatt is volt egy 14 s-os megakadás. Figyeljük, nem ismétlődik-e kapcsolók nélkül is.
+
+**`0xfb5ee753d43f3f0b` (`flat strict`):**
+- **Harcban:** 16–24 olvasás/s, 37–70 ms/s (olvasásonként ~2,5–3,5 ms). Szinte mindegyiknél még fut a szót író GPU-munka (`writer running`).
+- **A harc előtt** (a napló eleje): 45–48/s, ~340 ms/s (~7 ms/olvasás).
+- **Miért szigorú:** a terv akkor jelöl egy lapos slotot tisztának, ha
+  - egy írt puffer vagy írt kép leíróját adja (az alias-bizonyításhoz pontos cím kell);
+  - egy indirekt kép material- vagy táblaforrása;
+  - vagy bindless sampler.
+- Az `fb5e` nem capture-program, így valószínűleg az első eset, vagy egy szelektor nélküli indirekt kép. Ezt még ki kell mérni.
+
+**Következő kör (kód):**
+1. A WIDE és a BATCH kódjának törlése.
+2. `fb5e`-diagnosztika:
+   - a tiszta slot oka (írt puffer, írt kép, indirekt kép, sampler);
+   - az érték stabilitása: ugyanaz-e, mint az előző olvasáskor ugyanabban a programban és slotban.
+   - Ha stabil, a GPU-várás helyett szóba jöhet a spekuláció ellenőrzéssel. Ezt előbb a GPT-vel átbeszéljük.
+

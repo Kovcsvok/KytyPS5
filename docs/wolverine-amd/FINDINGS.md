@@ -29,7 +29,8 @@ frame; the emulator uses ~3.6 of 20 CPU cores. Per frame on the GPU thread: reso
 materialization (SRT walks) 9-10.5 ms, its own synchronous readbacks 4.8-6.1 ms, command buffer
 submission 4.3-5.5 ms, guest page-protection changes 4.2-5.2 ms, its page faults 4.5-6.2 ms, copy
 queue waits 4.1-5.4 ms. Guest threads spend ~44 ms a frame (summed over threads) in page faults,
-~16-24 ms of it in read faults on GPU-written pages.
+~16-24 ms of it in read faults on GPU-written pages. Page-protection syscalls run ~1,940 a frame
+and track those guest faults, not the GPU thread's upload re-protections (~5.5% of them).
 
 `KYTY_MATERIALIZE_STATS=1` (GPU-thread walks only; the draw-prep scanner thread walks ~80% of the
 draws ahead): ~16k walks/s, ~200 ms/s of walk time, almost all in the flat SRT pass. **~800 SRT
@@ -67,25 +68,23 @@ cache.
 | `KYTY_WRITE_PREDICT=2` (leave pages readable that a tracked write is predicted not to write; check the write bitmap at completion) | +2.1% (+/-5.0), n.s. | Predictions were almost always right (209 misses in 2.4M checked pages), but protection time did not fall (4.2 -> 4.5 ms): to be correct, the GPU thread's direct guest writes (WRITE_DATA etc., which can reach the guest before the completion check) had to close every still-open page first, ~10M pages per 5 s. One 14 s stall with an 11 s region-lock wait happened in mode 2 only. Removed. |
 | `KYTY_WRITE_PREDICT_BLOCK_KB` 16 vs 64 | -2.7% (+/-8.1), n.s. | Removed with the above. |
 | `KYTY_SEMA_WAKE_ONE` (upstream `a0268f1d`: a semaphore signal wakes only the waiters it serves) | -5.9% (+/-7.7), n.s. | Removed. |
+| `KYTY_REPROTECT_BATCH` (carbonimax `9ef01206` + `3a154025`: read-only upload re-protections recorded and applied in merged runs before submissions and guest sync points) | **-7.4%** (+/-3.0) | Protection syscalls did not fall (1945 -> 1940 a frame): the deferrable re-protections are only ~5.5% of them; the rest follow the ~850-900 guest faults a frame. Sync packets flush ~550 times a second, ~9 copies each, so little merges; spinning rose 3.2 -> 8.3 ms and guest read faults 28 -> 32 ms. Removed. |
+| `KYTY_SRT_LATE_WIDE` (late words also in programs that capture specialization reads, and for uniform buffer reads) | +9.0% (+/-4.4) "won", rejected | Late words 15.8 vs 16.1 a frame, fault reads 2.98 vs 3.00: it added no late word in this scene, so the gain is scene noise. Verified correct (9,826 checks, 0 mismatches). Removed. |
 | `KYTY_DRAW_PREP` + `KYTY_SRT_FAST_READ` | +20% in one run, +3.5% n.s. in the confirmation | Kept on: the mechanism is real (Materialize 21.6 -> 8.8 ms) but the fps gain was scene noise. |
 
 ## In progress
 
-Find out what shader `0xfb5ee753d43f3f0b` reads strictly: with late words on, the remaining GPU
-wait (~20 reads/s, ~2.7 ms each) moved to it (see JOURNAL 2026-11-06).
-
-Being measured next: `KYTY_SRT_LATE_WIDE` (late words also in programs that capture their
-specialization reads, whose late addresses join the captured list for the renderer's alias proof,
-and for uniform buffer reads) and `KYTY_REPROTECT_BATCH` (carbonimax `9ef01206` + `3a154025`:
-upload re-protections of the GPU thread's read-only synchronizations recorded and applied in
-merged runs before every submission and guest sync point, with the bytes copied after them).
+The remaining GPU wait in Materialize is shader `0xfb5ee753d43f3f0b`: 16-24 strict flat reads a
+second in combat, ~2.5-3.5 ms each (37-70 ms/s), almost all with the writing GPU work still
+running. The plan marks a flat slot clean (exact) when it feeds a written buffer's or image's
+descriptor (the alias proof needs the exact address), an indirect image's material or table
+source, or a bindless sampler. Next: log which of these it is and whether the value changes
+between reads.
 
 ## Next
 
-2. Batch upload re-protections and copies (carbonimax `3a154025` + `fd13335327`, on their
-   `KYTY_PROTECT_COALESCE`).
-3. PGO with an own Wolverine combat profile (pengui07 `KytyPS5-nhl` `KYTY_PGO=generate|use`).
-4. Later: an upload thread (inFAMOUS shadPS4 fork pattern); a descriptor cache only if the
+1. PGO with an own Wolverine combat profile (pengui07 `KytyPS5-nhl` `KYTY_PGO=generate|use`).
+2. Later: an upload thread (inFAMOUS shadPS4 fork pattern); a descriptor cache only if the
    descriptor share grows.
 
 ## Related work in other forks (scan 2026-11-06)
@@ -99,7 +98,8 @@ bottlenecks, not yet ported unless noted:
   without the fault (we already do this through `TryReadGpuCleanBacking`).
 - carbonimax `3a154025` `KYTY_REPROTECT_BATCH` (+8.5% in one game, +1.4% in another): batches the
   re-protections after uploads until guest sync points; `fd13335327` records one copy per
-  destination between shared barriers.
+  destination between shared barriers. Ported as `KYTY_REPROTECT_BATCH`: -7.4% here (see above),
+  removed.
 - Upstream `a0268f1d` (a semaphore signal wakes only the waiters it hands counts to): ported as
   `KYTY_SEMA_WAKE_ONE`, no gain here (see above), removed.
 - PGO: pengui07 `KytyPS5-nhl` (clang-cl, `KYTY_PGO`, 45.6 -> 49.8 fps in NHL), also Xx-LiDAF-xX,
