@@ -470,7 +470,50 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 	return show_help || (!options.app0_dir.empty() && !options.elf.empty());
 }
 
+#if defined(KYTY_PGO_GENERATE)
+#include <chrono>
+#include <cstdlib>
+#include <string>
+#include <system_error>
+#include <thread>
+
+// compiler-rt profile runtime (instrumented builds, CMake KYTY_PGO_GENERATE).
+extern "C" void __llvm_profile_set_filename(const char*);
+extern "C" int  __llvm_profile_write_file(void);
+
+// The profile runtime writes its counters only at a normal exit; the emulator ends with quick_exit
+// or is closed. With KYTY_PGO_FILE=<file.profraw> a thread writes them every KYTY_PGO_DUMP_SECONDS
+// (default 20) to <file>.tmp and renames that over <file>, which always holds the last complete
+// dump (Senaxx main.cpp, after Jetsku's fork).
+static void StartPgoDumps() {
+	const char* file = std::getenv("KYTY_PGO_FILE");
+	if (file == nullptr || *file == '\0') {
+		::printf("PGO: instrumented build without KYTY_PGO_FILE: no profile is written\n");
+		return;
+	}
+	const char* seconds_text = std::getenv("KYTY_PGO_DUMP_SECONDS");
+	const int   seconds =
+	    seconds_text != nullptr && std::atoi(seconds_text) > 0 ? std::atoi(seconds_text) : 20;
+	static const std::string target = file;
+	static const std::string temp   = target + ".tmp";
+	::printf("PGO: instrumented build, counters to %s every %d s\n", target.c_str(), seconds);
+	std::thread([seconds]() {
+		for (;;) {
+			std::this_thread::sleep_for(std::chrono::seconds(seconds));
+			__llvm_profile_set_filename(temp.c_str());
+			std::error_code error;
+			if (__llvm_profile_write_file() == 0) {
+				std::filesystem::rename(temp, target, error);
+			}
+		}
+	}).detach();
+}
+#endif
+
 static int Main(int argc, char* argv[]) {
+#if defined(KYTY_PGO_GENERATE)
+	StartPgoDumps();
+#endif
 	VirtualMemory::Init();
 	InitializeThreads();
 

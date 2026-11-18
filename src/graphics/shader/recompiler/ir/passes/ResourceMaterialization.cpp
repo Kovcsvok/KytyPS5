@@ -181,7 +181,7 @@ const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
 }
 
 void MarkCleanFlatSlots(const ResourcePlan& program, const DescriptorSource* source,
-                        std::span<uint8_t> slots, Value extra = {}, uint8_t value = 1u) {
+                        std::span<uint8_t> slots, Value extra = {}, uint8_t mark = 1u) {
 	if (source == nullptr && extra.IsEmpty()) {
 		return;
 	}
@@ -202,7 +202,7 @@ void MarkCleanFlatSlots(const ResourcePlan& program, const DescriptorSource* sou
 		if (inst->GetOpcode() == ValueOpcode::ReadConst) {
 			const auto slot = inst->Arg(1).Resolve();
 			if (slot.IsImmediate() && slot.GetType() == Type::U32 && slot.U32() < slots.size()) {
-				slots[slot.U32()] |= value;
+				slots[slot.U32()] |= mark;
 				pending.push_back(program.srt_reads[slot.U32()].value);
 			}
 			continue;

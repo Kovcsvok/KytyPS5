@@ -98,6 +98,37 @@ jobs:
           glslangValidator --version
           echo Qt6_DIR=%Qt6_DIR%
 
+      # Profile-guided optimization (pgo/README.md). pgo/GENERATE: the instrumented emulator.
+      # Otherwise profiles under pgo/train/ (*.profraw, or zipped) are merged with the llvm-profdata
+      # beside clang-cl into pgo/PPSA03671.profdata (uploaded as zz-pgo-profdata, to be committed),
+      # and a pgo/PPSA03671.profdata optimizes the build.
+      - name: PGO mode
+        id: pgo
+        shell: pwsh
+        run: |
+          $pgoArgs = ''
+          if (Test-Path pgo/GENERATE) {
+            $pgoArgs = '-DKYTY_PGO_GENERATE=ON'
+          } else {
+            foreach ($zip in @(Get-ChildItem pgo/train -Filter *.zip -Recurse -ErrorAction SilentlyContinue)) {
+              Expand-Archive -LiteralPath $zip.FullName -DestinationPath pgo/train -Force
+            }
+            $raw = @(Get-ChildItem pgo/train -Filter *.profraw -Recurse -ErrorAction SilentlyContinue | ForEach-Object FullName)
+            if ($raw.Count -gt 0) {
+              $profdata = Join-Path (Split-Path (Get-Command clang-cl).Source) 'llvm-profdata.exe'
+              if (-not (Test-Path $profdata)) { $profdata = (Get-Command llvm-profdata).Source }
+              "merging $($raw.Count) profiles with $profdata"
+              & $profdata merge -o pgo/PPSA03671.profdata @raw
+              if ($LASTEXITCODE -ne 0) { throw 'llvm-profdata merge failed' }
+              & $profdata show pgo/PPSA03671.profdata | Select-Object -Last 6
+            }
+            if (Test-Path pgo/PPSA03671.profdata) {
+              $pgoArgs = '-DKYTY_PGO_USE=' + ((Resolve-Path pgo/PPSA03671.profdata).Path -replace '\\', '/')
+            }
+          }
+          "PGO: $pgoArgs"
+          "args=$pgoArgs" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Configure
         shell: cmd
         run: |
@@ -105,7 +136,7 @@ jobs:
             -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON ^
-            -DKYTY_HOST_ARCH=x86-64-v3 ^
+            -DKYTY_HOST_ARCH=x86-64-v3 ${{ steps.pgo.outputs.args }} ^
             -DKYTY_BUILD_ORIGIN=%KYTY_BUILD_ORIGIN% ^
             -DKYTY_BUILD_REPOSITORY=%KYTY_BUILD_REPOSITORY% ^
             -DKYTY_RELEASE_TAG=${{ needs.metadata.outputs.release_tag }} ^
@@ -157,6 +188,14 @@ jobs:
       # The lld map of the same link (/DYNAMICBASE:NO, so host stack addresses in the log, such
       # as "Long lock wait" reports, resolve against it). Uploaded after the package: the update
       # script installs a run's first artifact.
+      - name: Upload merged PGO profile
+        if: hashFiles('pgo/train/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: zz-pgo-profdata
+          path: pgo/PPSA03671.profdata
+          retention-days: 14
+
       - name: Upload symbol map
         uses: actions/upload-artifact@v4
         with:

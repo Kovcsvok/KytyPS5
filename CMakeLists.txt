@@ -203,6 +203,57 @@ if(KYTY_HOST_ARCH)
 		add_compile_options("-march=${KYTY_HOST_ARCH}")
 	endif()
 endif()
+
+# Profile-guided optimization (clang/clang-cl; Senaxx f617aa53, after Jetsku's fork). Kyty's own
+# targets only (added after 3rdparty). Two builds from the same source path: clang-cl names
+# functions in anonymous namespaces after a hash of the source file's path (CI: always the same).
+# 1. KYTY_PGO_GENERATE=ON: an instrumented emulator; with KYTY_PGO_FILE=<x.profraw> it writes its
+#    counters every KYTY_PGO_DUMP_SECONDS (default 20, main.cpp).
+# 2. llvm-profdata merge -o <x.profdata> <x.profraw...> (the llvm-profdata of the same LLVM).
+# 3. KYTY_PGO_USE=<x.profdata>: the optimized emulator. See pgo/README.md.
+option(KYTY_PGO_GENERATE "Instrumented build for profile-guided optimization (clang)" OFF)
+set(KYTY_PGO_USE "" CACHE FILEPATH "llvm-profdata output to optimize with (clang; empty: none)")
+if(KYTY_PGO_GENERATE AND KYTY_PGO_USE)
+	message(FATAL_ERROR "KYTY_PGO_GENERATE and KYTY_PGO_USE are separate builds")
+endif()
+if((KYTY_PGO_GENERATE OR KYTY_PGO_USE) AND NOT CLANG)
+	message(FATAL_ERROR "KYTY_PGO_GENERATE/KYTY_PGO_USE need clang or clang-cl")
+endif()
+if(KYTY_PGO_GENERATE)
+	add_compile_options(-fprofile-instr-generate)
+	add_compile_definitions(KYTY_PGO_GENERATE=1)
+	if(KYTY_CLANG_CL)
+		# lld-link is called directly, so the profile runtime of the same LLVM has to be named.
+		set(KYTY_PGO_RUNTIME "" CACHE FILEPATH "clang_rt.profile-x86_64.lib (empty: next to the compiler)")
+		cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH kyty_llvm_bin)
+		file(GLOB kyty_profile_runtime "${kyty_llvm_bin}/../lib/clang/*/lib/windows/clang_rt.profile-x86_64.lib")
+		if(KYTY_PGO_RUNTIME)
+			set(kyty_profile_runtime "${KYTY_PGO_RUNTIME}")
+		endif()
+		if(NOT kyty_profile_runtime)
+			message(FATAL_ERROR "KYTY_PGO_GENERATE: clang_rt.profile-x86_64.lib not found next to ${CMAKE_CXX_COMPILER}; set KYTY_PGO_RUNTIME")
+		endif()
+		list(GET kyty_profile_runtime 0 kyty_profile_runtime)
+		message(STATUS "KYTY_PGO_GENERATE: profile runtime ${kyty_profile_runtime}")
+		link_libraries("${kyty_profile_runtime}")
+		# The objects ask for clang_rt.profile.lib by its unsuffixed name; the runtime above is it.
+		add_link_options(/nodefaultlib:clang_rt.profile.lib)
+	else()
+		add_link_options(-fprofile-instr-generate)
+	endif()
+elseif(KYTY_PGO_USE)
+	if(NOT EXISTS "${KYTY_PGO_USE}")
+		message(FATAL_ERROR "KYTY_PGO_USE: ${KYTY_PGO_USE} does not exist")
+	endif()
+	add_compile_options("-fprofile-instr-use=${KYTY_PGO_USE}" -Wno-profile-instr-unprofiled
+	                    -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+	# sccache hashes the flag's path, not the file: a retrained profile must change the command line.
+	file(SHA256 "${KYTY_PGO_USE}" kyty_pgo_hash)
+	add_compile_definitions(KYTY_PGO_PROFILE=${kyty_pgo_hash})
+	set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KYTY_PGO_USE}")
+	message(STATUS "KYTY_PGO_USE: ${KYTY_PGO_USE} (${kyty_pgo_hash})")
+endif()
+
 add_subdirectory("${KYTY_SOURCE_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/common")
 
 file(GLOB kyty_emulator_src CONFIGURE_DEPENDS

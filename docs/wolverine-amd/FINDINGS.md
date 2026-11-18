@@ -90,8 +90,9 @@ experimental switches: an emulator bug. A wait over 1 s now prints the owner's t
 
 ## Next
 
-1. PGO with an own Wolverine combat profile (pengui07 `KytyPS5-nhl` `KYTY_PGO=generate|use`).
-2. Later: an upload thread (inFAMOUS shadPS4 fork pattern); a descriptor cache only if the
+1. PGO with an own Wolverine combat profile: in progress (`pgo/README.md`; Senaxx `f617aa53`).
+2. FSR 3.1 frame generation in PS5 Pro mode (Senaxx `3ddafa94` on upstream `651ef73a`, `02b17af3`, `e1292528`).
+3. Later: an upload thread (inFAMOUS shadPS4 fork pattern); a descriptor cache only if the
    descriptor share grows.
 
 ## Related work in other forks (scan 2026-11-06)

@@ -1152,3 +1152,34 @@ A shader-fordítás nem változik.
 
 **Kampány:** `plans/2026-11-08.json` – 5 perc `diagnostics` hold (`KYTY_PROTECT_STATS=1`). A/B nincs; a cél a fenti mérés. A zárvárás-riport minden további munkamenetben aktív.
 
+## 2026-11-18 — Opus — helyzetfelmérés; a `54c11984` nem fordult le; PGO mérő build (kód)
+**A `54c11984` CI-je elbukott** (11-06): a `MarkCleanFlatSlots` új `value` paraméterét eltakarta a ciklus azonos nevű helyi változója (`ResourceMaterialization.cpp:205`, `'unsigned char' and 'Value'`). A paraméter most `mark`. Nálunk azóta is a `b4cd31e3` futott.
+
+**A többiek (11-06 óta):**
+- **Upstream:** ~163 commit; a mi águnk 420 commit előnyben, 1010 lemaradásban van. A Wolverine ott még logó / nem indul (#2183, #2367). A `b3295be` óta Windowson `slot >= 64` TLS-hiba is van.
+- **Senaxx:** nyilvános „Wolverine release” buildek (11-16/17, legutóbb `ec6c3f1`):
+  - Wolverine-indító, shader-hint előfordítás;
+  - PS5 Pro mód + FSR 3.1 2x képkocka-generálás, DLSS;
+  - VRAM-javítások, PGO-s release.
+  - Ismert hibájuk a Trask-harc FPS-esése a GPU-szál rajzolásonkénti munkája miatt: ugyanaz, mint nálunk.
+- **todojuegos67-bot:** már Bloodborne-nal foglalkozik.
+- **Teszt a felhasználó gépén (Senaxx v0.5, RX 9070 XT):**
+  - tömeges `shader resource specialization failed: SRT refresh …` sorok, a kihagyott rajzolások miatt csillogás;
+  - ugyanaz a „vér” összeomlás, amit nálunk már javítottunk;
+  - képkocka-generálással 37 FPS (alap 19), egy átvezetőben.
+  - Döntés: maradunk a saját buildnél, és átveszünk tőlük dolgokat. A felhasználó a PGO-t választotta először (a képkocka-generálás a következő nagy port).
+
+**PGO (Senaxx `f617aa53` + `main.cpp`, Jetsku nyomán):**
+- `CMakeLists.txt`:
+  - `KYTY_PGO_GENERATE` (`-fprofile-instr-generate`, a clang-cl melletti `clang_rt.profile-x86_64.lib`);
+  - `KYTY_PGO_USE` (`-fprofile-instr-use`, a profil SHA-ja definícióként, hogy az sccache ne adjon vissza régi objektumot).
+- `main.cpp`: a mérő build `KYTY_PGO_FILE`-ba írja a számlálókat 20 s-onként (`.tmp`, majd átnevezés), mert az emulátor nem normál kilépéssel áll le.
+- **CI:** új `PGO mode` lépés.
+  - Ha van `pgo/GENERATE`: mérő build.
+  - Különben a `pgo/train/` alatti profilokat a clang-cl melletti `llvm-profdata` összefésüli `pgo/PPSA03671.profdata`-vá. A nyers profil ugyanazt az LLVM-et kéri, ezért fésüljük a CI-ben. Az eredmény `zz-pgo-profdata` artifact lesz.
+  - Ha van `profdata`, optimalizált build készül.
+- **Play bat:** `KYTY_PGO_FILE=D:\KytyAnalysis\pgo\wolverine-%RANDOM%.profraw`; csak a mérő build ír.
+- **Ez a push a mérő buildet készíti** (`pgo/GENERATE`): lassabb. A harc közben a `plans/2026-11-08.json` diagnosztika is fut.
+- **Utána:** a `.profraw` zippelve a `pgo/train/`-be, a `GENERATE` törlése, push → optimalizált build, majd A/B a mostani buildhez képest.
+- A shader-fordítás nem változik, a `KYTY_PROGRAM_CACHE_GIT_REVISION` érvényes marad.
+
