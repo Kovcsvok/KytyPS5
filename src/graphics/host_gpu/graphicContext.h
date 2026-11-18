@@ -173,6 +173,9 @@ struct GraphicContext {
 	// allocations left it before their hold time because of the size cap.
 	[[nodiscard]] static uint64_t GraveyardBytes();
 	[[nodiscard]] static uint64_t GraveyardFreedEarly();
+	// KYTY_VRAM_PREFREE: allocations that freed the graveyard first, the bytes, and how many of
+	// them stayed over the budget with the graveyard at its floor (since the start).
+	static void GraveyardPreFrees(uint64_t& allocations, uint64_t& bytes, uint64_t& short_of_budget);
 	// Device usage and driver budget for the graveyard's cap (shrinks near the budget).
 	static void NoteDeviceMemory(uint64_t usage, uint64_t budget);
 	void                   ReleaseParkedImages() { TrimImagePool(0, false); }

@@ -429,10 +429,15 @@ void RenderContext::ReportVram() {
 	uint64_t       allocations = 0;
 	uint64_t       blocks      = 0;
 	graphics.GetDeviceAllocationStats(allocations, blocks);
+	uint64_t prefrees      = 0;
+	uint64_t prefreed      = 0;
+	uint64_t prefree_short = 0;
+	GraphicContext::GraveyardPreFrees(prefrees, prefreed, prefree_short);
 	constexpr double MiB = 1024.0 * 1024.0;
 	std::printf("VRAM: device %.0f of %.0f MiB | blocks %.0f, allocations %.0f (trapped %.0f) | "
 	            "images %zu %.0f [%.0f guest] | buffers %zu %.0f | pool %.0f | retiring %.0f MiB | "
-	            "graveyard %.0f MiB (freed early %" PRIu64 ")\n",
+	            "graveyard %.0f MiB (freed early %" PRIu64 ", pre-freed %" PRIu64 " times %.0f MiB, short %" PRIu64
+	            ")\n",
 	            static_cast<double>(graphics.GetDeviceMemoryUsage()) / MiB,
 	            static_cast<double>(graphics.GetDriverMemoryBudget()) / MiB,
 	            static_cast<double>(blocks) / MiB, static_cast<double>(allocations) / MiB,
@@ -445,7 +450,7 @@ void RenderContext::ReportVram() {
 	                                m_buffer_cache.RetiringBytes()) /
 	                MiB,
 	            static_cast<double>(GraphicContext::GraveyardBytes()) / MiB,
-	            GraphicContext::GraveyardFreedEarly());
+	            GraphicContext::GraveyardFreedEarly(), prefrees, static_cast<double>(prefreed) / MiB, prefree_short);
 	std::fflush(stdout);
 }
 

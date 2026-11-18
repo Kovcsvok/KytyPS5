@@ -75,22 +75,44 @@ cache.
 ## In progress
 
 The remaining GPU wait in Materialize is shader `0xfb5ee753d43f3f0b`: 16-24 strict flat reads a
-second in combat, ~2.5-3.5 ms each (37-70 ms/s), almost all with the writing GPU work still
-running. The plan marks a flat slot clean (exact) when it feeds a written buffer's or image's
-descriptor (the alias proof needs the exact address), an indirect image's material or table
-source, or a bindless sampler. Being logged now: which of these it is, whether the value changes
-between reads, and whether the read bytes' own writer (range tick) is still running or only the
-buffer's (writer tracking too coarse). GPT's advice: speculating on the old value is unsafe
-unless the GPU checks it before the first side effect; look at the writer tracking and the
-producer first.
+second in combat, ~3.3 ms each on average. Logged 2026-11-18 (428 samples): always flat slot 0,
+marked strict because it feeds a written buffer's descriptor, always the same 4-byte word, and
+the GPU work writing exactly those bytes is still running (the last-writer tracking is not too
+coarse). The value is a small integer (0x34, 0x41-0x44), the same as last time in 67% of reads:
+not safe to speculate on. Next: `MarkCleanFlatSlots` marks every dword of a written buffer's
+descriptor strict, and their source chain too. If slot 0 only feeds the size (dword 2) or an index,
+not the address, the alias proof could use a conservative size and the slot could become a late
+word.
 
-**Stall:** three ~13-14 s frames (2026-10-29, 2026-11-06 twice) were the GPU thread waiting ~11 s
-on a `TrackingSpinLock` (region or texture-cache lock) with the GPU idle, also before the
-experimental switches: an emulator bug. A wait over 1 s now prints the owner's thread and stack.
+**Stall: VRAM exhaustion.** In the ~13 s stalls, the GPU thread is inside `vkAllocateMemory`. These
+stalls are 2026-10-29, 2026-11-06 twice, and 2026-11-18. The call comes from a new image's
+dedicated allocation, and the AMD driver waits ~11 s in
+`NtGdiDdDDIWaitForSynchronizationObjectFromCpu`. The GPU thread holds the texture cache's tracking
+lock meanwhile, so the AMPR thread waits on it too. Right before: device 14182 of 14182 MiB, with
+2 GiB in the memory graveyard (freed memory held back against stale reads). Lowering the
+graveyard cap from 2048 to 768 MiB was fps-neutral (-1.4% +/-2.5); VRAM stayed 0.6-1.8 GiB
+under the budget. New: `KYTY_VRAM_PREFREE=1` frees graveyard memory before an allocation that
+would come within 256 MiB of the budget. A `Slow vkAllocateMemory` line logs any allocation
+over 100 ms.
+
+**Protection syscalls by source** (`KYTY_PROTECT_STATS=1`, 2026-11-18, ~33k calls/s = ~1940 a
+frame):
+
+| Source | Share of calls |
+|---|---|
+| Guest-thread write faults dropping write watches on unmasked (image) ranges (~6 pages a call) | 66% |
+| The GPU thread re-arming those watches | 9% + 4% |
+| Access watches toggled on and off by the GPU thread (few calls, ~700 pages each, ~3.2M pages/s) | 19% |
+| Masked buffer-region updates | 2% |
+
+Guest faults cost ~54 us each (~49 ms a frame summed over threads). The fault/re-arm cycle on
+image pages is the next protection target.
 
 ## Next
 
-1. PGO with an own Wolverine combat profile: in progress (`pgo/README.md`; Senaxx `f617aa53`).
+1. PGO with an own Wolverine combat profile: trained 2026-11-18 (~17 min, combat), optimized build
+   pending A/B (`pgo/README.md`; Senaxx `f617aa53`). Non-PGO baseline kept outside the package.
+   `KYTY_VRAM_PREFREE` A/B and stall count in the same session.
 2. FSR 3.1 frame generation in PS5 Pro mode (Senaxx `3ddafa94` on upstream `651ef73a`, `02b17af3`, `e1292528`).
 3. Later: an upload thread (inFAMOUS shadPS4 fork pattern); a descriptor cache only if the
    descriptor share grows.

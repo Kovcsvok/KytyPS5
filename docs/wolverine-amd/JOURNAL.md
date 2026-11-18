@@ -1183,3 +1183,68 @@ A shader-fordítás nem változik.
 - **Utána:** a `.profraw` zippelve a `pgo/train/`-be, a `GENERATE` törlése, push → optimalizált build, majd A/B a mostani buildhez képest.
 - A shader-fordítás nem változik, a `KYTY_PROGRAM_CACHE_GIT_REVISION` érvényes marad.
 
+
+## 2026-11-18 — Opus — mérő build harcban: a ~13 s-os megakadás oka a VRAM; graveyard 768 semleges; PGO-tanítás (kód)
+**Build:** `f1b3168e` (PGO-mérő, lassabb), kb. 17 perc játék (22:17–22:34). Kampányok: `2026-11-18_222036` (5 perc diagnosztika, `KYTY_PROTECT_STATS=1`), `2026-11-18_222814` (graveyard A/B).
+
+**Megakadás (13,35 s-os képkocka, 22:2x), a zárvárás-riport alapján (`zz-symbol-map`, `D:\KytyAnalysis\symbols\f1b3168e`):**
+- A **várakozó** az AMPR beküldő szála (`SubmissionEngine::Execute` → `RenderContext::InvalidateMemory` → `TextureCache::InvalidateMemory`). Ez 11 001 ms-ot várt a textúracache követőzárára.
+- A **tulajdonos a GPU-szál**:
+  - útvonal: `DrawIndirect` → `PrepareBindings` → `ResolveBindlessKey` → `ResolveTexture` → `TextureCache::FindImage` → új `Image`;
+  - a VMA dedikált foglalása → `MemoryGraveyard::Allocate` → `vkAllocateMemory`;
+  - az AMD driver ezen belül `NtGdiDdDDIWaitForSynchronizationObjectFromCpu`-ban ~11 s-ig várt.
+- Közvetlenül előtte: `VRAM: device 14182 of 14182 MiB … graveyard 2026 MiB`. **A foglalás a driver-keret tetején blokkolt**, a GPU közben üresjáratban volt (12%).
+- A korábbi három ~11 s-os eset (10-29, 11-06 ×2) mintája ugyanez: GPU-szál, `spin_lock_ms`.
+- **Tehát nem zárhiba és nem töltés, hanem VRAM-kimerülés a zár alatt.** A graveyard (2048 MiB a csomagban) ~2 GB-ot tartott vissza.
+
+**Graveyard A/B (`KYTY_MEMORY_GRAVEYARD_MB` 2048 → 768, 6 perc):** **−1,4% (±2,5), semleges.**
+- 768-cal a VRAM 12,4–13,6 GB maradt a 14,2 GB-os keretből, megakadás nem volt.
+- 3 perc B kevés a megakadás gyakoriságához (kb. 10–15 percenként egy). A csomag marad 2048-on; a célzott javítás az alábbi kapcsoló.
+
+**Új (kód, ebben a pushban):**
+- **`KYTY_VRAM_PREFREE=1`** (élő, alap 0): minden budgetelt (eszközlokális) foglalás előtt becsli a használatot: a képkockánként közölt értékhez hozzáadja az azóta foglalt és levonja a visszaadott bájtokat. Ha a foglalással 256 MiB-on belülre kerülne a driver-kerethez, előbb felszabadítja a graveyard legrégebbi budgetelt bejegyzéseit, a padlóig (`KYTY_MEMORY_GRAVEYARD_FLOOR_MB`).
+  - A VRAM-sor új része: `pre-freed N times X MiB, short S`.
+- **`Slow vkAllocateMemory:` sor** (mindig, 100 ms felett): időtartam, méret, típus, eredmény, használat, keret, graveyard.
+
+**`fb5e` (`KYTY_MATERIALIZE_STATS=1`, 428 minta):**
+- Mindig slot 0, ok `[written buffer]`, ugyanaz a cím (`0x11871ed400`), 4 bájt.
+- **A tartomány saját írója is fut** (416/420; a puffer és a tartomány tickje azonos): az utolsóíró-követés nem durva, a GPU tényleg most írja ezt a szót.
+- **Érték:** 67% ugyanaz, 32% változott (0x34, 0x41–0x44: kis egész, nem cím). Spekulációra nem elég biztos.
+- Átlagos várakozás 3,3 ms, legfeljebb 34 ms.
+- **Következő ötlet (ellenőrizni):** a `MarkCleanFlatSlots` egy írt puffer *összes* descriptor-dwordját (és a forrásláncukat) szigorúnak jelöli. Ha a slot 0 csak a méretet (dword 2) vagy indexet ad, nem a címet, akkor az aliasbizonyítás konzervatív mérettel is működhet, és a slot késői (late) szó lehetne.
+
+**Védés-syscallok (`KYTY_PROTECT_STATS=1`, 98 riport, 17 fps a mérő buildben):**
+
+| Forrás | Hívás/s | Lap/s |
+|---|---|---|
+| Más szálak (vendéghiba), nem maszkolt írásfigyelés ki | 22 036 (66%) | 137 754 |
+| GPU-szál, nem maszkolt hozzáférés-figyelés ki | 4 091 (12%) | 1 662 682 |
+| GPU-szál, nem maszkolt írásfigyelés be | 3 083 (9%) | 165 392 |
+| GPU-szál, nem maszkolt hozzáférés-figyelés be | 2 172 (7%) | 1 532 301 |
+| GPU-szál, nem maszkolt írásfigyelés ki | 1 373 (4%) | 82 883 |
+| GPU-szál, maszkolt (pufferrégiók) összesen | ~520 (2%) | ~254 000 |
+
+- Összesen 33 271 hívás/s (~1940/képkocka).
+- 99,98%-uk egy-egy lapállapot-frissítésből jön; 14%-uk ott kezdődik, ahol a szál előző, azonos védésű hívása végződött.
+- **A „nem maszkolt” vödör = `UpdatePageWatchers` (képek, a statisztika „images” néven írja).**
+- **A fő forrás:** a vendégszálak írási hibái nem maszkolt írásfigyelt lapokon (~6 lap/hívás). A GPU-szál ezeket képkockánként újra élesíti (írásfigyelés be).
+- A hozzáférés-figyelés be/ki a GPU-szálon kevés hívás, de óriási lapszám: ~3,2 M lap/s, ~700 lap hívásonként.
+
+**Telemetria (mérő build, képkockánként, 750 sor):**
+
+| Mérőszám | Érték |
+|---|---|
+| GPU-szál futás | 48,7 ms |
+| Materialize | 9,0 ms |
+| Védés | 4,5 ms |
+| GPU-hibák | 3,1 ms |
+| `spin_lock` | 5,9 ms (ebből ~1,85 ms maga a megakadás) |
+| readmem | 3,2 ms |
+| submit | 3,1 ms |
+| Vendéghibák | 900 db, 48,9 ms szálakra összegezve (~54 µs/hiba) |
+
+**PGO:**
+- `D:\KytyAnalysis\pgo\wolverine-32451.profraw` (14,5 MB, 22:34) zippelve a `pgo/train/` alá (1,4 MB); a `pgo/GENERATE` törölve.
+- A CI összefésüli (`zz-pgo-profdata`), és optimalizált buildet fordít. A `vma.cpp` megváltozott függvényei elvesztik a profiljukat, a többi megmarad.
+- **Nem PGO-s összehasonlítási alap:** `D:\KytyAnalysis\baseline\emulator-b4cd31e3` (a frissítő a fallbackot kukába tenné).
+- **Következő kampány:** `plans/2026-11-19.json`, PREFREE A/B [0, 1] 8 perc. Az FPS-t durván a 11-06-i `b4cd31e3`-as kampányhoz vetjük, mert buildet egy harcon belül nem lehet váltani.

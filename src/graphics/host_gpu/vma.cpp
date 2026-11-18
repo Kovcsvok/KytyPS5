@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -49,11 +50,17 @@ struct Entry {
 	VkDeviceSize                          size;
 	const VkAllocationCallbacks*          callbacks;
 	std::chrono::steady_clock::time_point released;
+	bool                                  budgeted; // in a heap the driver budget covers
+};
+
+struct Allocation {
+	VkDeviceSize size;
+	bool         budgeted;
 };
 
 std::mutex                                     g_mutex;
 std::deque<Entry>                              g_entries; // oldest first
-std::unordered_map<VkDeviceMemory, VkDeviceSize> g_sizes;
+std::unordered_map<VkDeviceMemory, Allocation> g_sizes;
 uint64_t                                       g_bytes = 0;
 uint64_t                                       g_freed_early = 0; // past the cap, younger than N s
 PFN_vkAllocateMemory                           g_allocate = nullptr;
@@ -63,6 +70,14 @@ PFN_vkFreeMemory                               g_free     = nullptr;
 std::atomic<uint64_t> g_device_usage {0};
 std::atomic<uint64_t> g_driver_budget {0};
 std::atomic<uint64_t> g_bytes_at_note {0}; // g_bytes when g_device_usage was published
+// Memory types whose heap the budget covers (device-local heaps on a discrete GPU).
+std::array<bool, VK_MAX_MEMORY_TYPES> g_budgeted_type {};
+// Budgeted bytes allocated minus budgeted bytes given back to the driver since the last
+// published usage (g_mutex).
+int64_t  g_since_note    = 0;
+uint64_t g_prefrees      = 0; // allocations that freed the graveyard first
+uint64_t g_prefreed      = 0; // bytes they freed
+uint64_t g_prefree_short = 0; // of those, still over the budget with the graveyard at its floor
 
 // The cap in effect: within 512 MiB of the driver budget the graveyard shrinks by the overshoot,
 // so it never pushes the process past the budget (Wolverine 2026-10-12: a full 768 MiB graveyard
@@ -109,13 +124,64 @@ void Collect(bool all) {
 		}
 		g_free(entry.device, entry.memory, entry.callbacks);
 		g_bytes -= entry.size;
+		if (entry.budgeted) {
+			g_since_note -= static_cast<int64_t>(entry.size);
+		}
 		g_entries.pop_front();
+	}
+}
+
+// KYTY_VRAM_PREFREE=1 (live, default 0): before a budgeted allocation that would take the usage
+// (as last published, plus what was allocated and given back since) within 256 MiB of the driver
+// budget, the graveyard's oldest budgeted entries are freed first, down to its floor
+// (KYTY_MEMORY_GRAVEYARD_FLOOR_MB). Wolverine 2026-11-18: an image's dedicated allocation at the
+// budget (device 14182 of 14182 MiB, graveyard 2026 MiB) waited 11 s inside the AMD driver
+// (NtGdiDdDDIWaitForSynchronizationObjectFromCpu) while the GPU thread held the texture cache's
+// tracking lock: the ~13 s stalls of 2026-10-29 and 2026-11-06 (three, each ~11 s). The per-frame
+// cap (EffectiveCap) reacts a frame late and only by the overshoot.
+// Called with g_mutex held.
+void PreFree(uint64_t size) {
+	static auto& enabled = Common::LiveSwitches::Get("KYTY_VRAM_PREFREE", 0);
+	const auto   budget  = static_cast<int64_t>(g_driver_budget.load(std::memory_order_relaxed));
+	if (enabled.load(std::memory_order_relaxed) == 0 || budget == 0 || g_entries.empty()) {
+		return;
+	}
+	constexpr int64_t Reserve = 256ll << 20u;
+	const auto usage = static_cast<int64_t>(g_device_usage.load(std::memory_order_relaxed)) + g_since_note;
+	auto       need  = usage + static_cast<int64_t>(size) + Reserve - budget;
+	if (need <= 0) {
+		return;
+	}
+	static auto& floor_mb = Common::LiveSwitches::Get("KYTY_MEMORY_GRAVEYARD_FLOOR_MB", 256);
+	const auto   floor    = static_cast<uint64_t>(std::max<int64_t>(0, floor_mb.load(std::memory_order_relaxed)))
+	                   << 20u;
+	g_prefrees++;
+	for (auto it = g_entries.begin(); need > 0 && g_bytes > floor && it != g_entries.end();) {
+		if (!it->budgeted) {
+			++it;
+			continue;
+		}
+		g_free(it->device, it->memory, it->callbacks);
+		g_bytes -= it->size;
+		g_since_note -= static_cast<int64_t>(it->size);
+		g_prefreed += it->size;
+		need -= static_cast<int64_t>(it->size);
+		it = g_entries.erase(it);
+	}
+	if (need > 0) {
+		g_prefree_short++;
 	}
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL Allocate(VkDevice device, const VkMemoryAllocateInfo* info,
                                         const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory) {
-	auto result = g_allocate(device, info, callbacks, memory);
+	const bool budgeted = info->memoryTypeIndex < VK_MAX_MEMORY_TYPES && g_budgeted_type[info->memoryTypeIndex];
+	if (budgeted) {
+		std::scoped_lock lock(g_mutex);
+		PreFree(info->allocationSize);
+	}
+	const auto start  = std::chrono::steady_clock::now();
+	auto       result = g_allocate(device, info, callbacks, memory);
 	if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
 		std::scoped_lock lock(g_mutex);
 		if (!g_entries.empty()) {
@@ -123,9 +189,26 @@ VKAPI_ATTR VkResult VKAPI_CALL Allocate(VkDevice device, const VkMemoryAllocateI
 			result = g_allocate(device, info, callbacks, memory);
 		}
 	}
+	// A driver call that blocks is logged whatever the switches (see PreFree).
+	const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	if (ms >= 100.0) {
+		std::scoped_lock lock(g_mutex);
+		::printf("Slow vkAllocateMemory: %.0f ms for %.1f MiB (type %u%s), result %d; usage %.0f + %.0f of %.0f MiB, "
+		         "graveyard %.0f MiB\n",
+		         ms, static_cast<double>(info->allocationSize) / 1048576.0, info->memoryTypeIndex,
+		         budgeted ? ", budgeted" : "", static_cast<int>(result),
+		         static_cast<double>(g_device_usage.load(std::memory_order_relaxed)) / 1048576.0,
+		         static_cast<double>(g_since_note) / 1048576.0,
+		         static_cast<double>(g_driver_budget.load(std::memory_order_relaxed)) / 1048576.0,
+		         static_cast<double>(g_bytes) / 1048576.0);
+		std::fflush(stdout);
+	}
 	if (result == VK_SUCCESS) {
 		std::scoped_lock lock(g_mutex);
-		g_sizes[*memory] = info->allocationSize;
+		g_sizes[*memory] = {info->allocationSize, budgeted};
+		if (budgeted) {
+			g_since_note += static_cast<int64_t>(info->allocationSize);
+		}
 		Collect(false);
 	}
 	return result;
@@ -137,19 +220,23 @@ VKAPI_ATTR void VKAPI_CALL Free(VkDevice device, VkDeviceMemory memory,
 		return;
 	}
 	std::scoped_lock lock(g_mutex);
-	VkDeviceSize size = 0;
+	Allocation allocation {0, false};
 	if (const auto found = g_sizes.find(memory); found != g_sizes.end()) {
-		size = found->second;
+		allocation = found->second;
 		g_sizes.erase(found);
 	}
 	static auto& hold_s = Common::LiveSwitches::Get("KYTY_MEMORY_GRAVEYARD_S", 60);
 	if (hold_s.load(std::memory_order_relaxed) <= 0) {
 		g_free(device, memory, callbacks);
+		if (allocation.budgeted) {
+			g_since_note -= static_cast<int64_t>(allocation.size);
+		}
 		Collect(false);
 		return;
 	}
-	g_entries.push_back({device, memory, size, callbacks, std::chrono::steady_clock::now()});
-	g_bytes += size;
+	g_entries.push_back({device, memory, allocation.size, callbacks, std::chrono::steady_clock::now(),
+	                     allocation.budgeted});
+	g_bytes += allocation.size;
 	Collect(false);
 }
 
@@ -166,6 +253,7 @@ void GraphicContext::NoteDeviceMemory(uint64_t usage, uint64_t budget) {
 	MemoryGraveyard::g_device_usage.store(usage, std::memory_order_relaxed);
 	MemoryGraveyard::g_driver_budget.store(budget, std::memory_order_relaxed);
 	MemoryGraveyard::g_bytes_at_note.store(MemoryGraveyard::g_bytes, std::memory_order_relaxed);
+	MemoryGraveyard::g_since_note = 0;
 	if (MemoryGraveyard::g_free != nullptr) {
 		MemoryGraveyard::Collect(false);
 	}
@@ -174,6 +262,13 @@ void GraphicContext::NoteDeviceMemory(uint64_t usage, uint64_t budget) {
 uint64_t GraphicContext::GraveyardFreedEarly() {
 	std::scoped_lock lock(MemoryGraveyard::g_mutex);
 	return MemoryGraveyard::g_freed_early;
+}
+
+void GraphicContext::GraveyardPreFrees(uint64_t& allocations, uint64_t& bytes, uint64_t& short_of_budget) {
+	std::scoped_lock lock(MemoryGraveyard::g_mutex);
+	allocations     = MemoryGraveyard::g_prefrees;
+	bytes           = MemoryGraveyard::g_prefreed;
+	short_of_budget = MemoryGraveyard::g_prefree_short;
 }
 
 // KYTY_VMA_MIN_MEMORY=1 (live, research, default 0): device-local images and buffers placed with
@@ -199,6 +294,17 @@ bool GraphicContext::CreateAllocator() {
 	MemoryGraveyard::g_free = reinterpret_cast<PFN_vkFreeMemory>(
 	    functions.vkGetDeviceProcAddr(static_cast<VkDevice>(device), "vkFreeMemory"));
 	EXIT_IF(MemoryGraveyard::g_allocate == nullptr || MemoryGraveyard::g_free == nullptr);
+	{
+		// The heaps GetDriverMemoryBudget sums (device-local ones on a discrete GPU).
+		const bool discrete = physical_device_properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
+		for (uint32_t type = 0; type < physical_device_memory_properties.memoryTypeCount && type < VK_MAX_MEMORY_TYPES;
+		     type++) {
+			const auto heap = physical_device_memory_properties.memoryTypes[type].heapIndex;
+			MemoryGraveyard::g_budgeted_type[type] =
+			    !discrete || static_cast<bool>(physical_device_memory_properties.memoryHeaps[heap].flags &
+			                                   vk::MemoryHeapFlagBits::eDeviceLocal);
+		}
+	}
 	functions.vkAllocateMemory = MemoryGraveyard::Allocate;
 	functions.vkFreeMemory     = MemoryGraveyard::Free;
 
